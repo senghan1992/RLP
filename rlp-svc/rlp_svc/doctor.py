@@ -216,6 +216,72 @@ def _ladder() -> list[dict]:
     return out
 
 
+def _providers() -> list[dict]:
+    """Endpoints and credentials, and the arms that cannot run because of them.
+
+    The most common silent failure in a fresh install is an arm the ladder
+    prefers whose provider has no credential: the model is visible, the router
+    picks it, and the dispatch dies. `preflight` catches it per node; this
+    catches it before a request is ever made.
+    """
+    from . import providers as mod
+
+    out: list[dict] = []
+    try:
+        cards = mod.list_providers()
+    except Exception as e:
+        return [_check(WARN, "providers", f"could not read {mod.models_path()}: {str(e)[:160]}", "")]
+
+    credentialed = [c["id"] for c in cards if c["credential"] != "none"]
+    keyless = [c["id"] for c in cards if c["credential"] == "none"]
+    if not cards:
+        out.append(
+            _check(
+                FAIL,
+                "providers",
+                f"no endpoints configured in {mod.models_path()}",
+                "connect one: /provider (in a session), or `rlp provider add <id> <baseUrl> <model>`",
+            )
+        )
+        return out
+    out.append(
+        _check(
+            OK if credentialed else FAIL,
+            "providers",
+            f"{len(cards)} endpoint(s) · {len(credentialed)} with a credential"
+            + (f" · no credential: {', '.join(keyless)}" if keyless else ""),
+            "" if credentialed else "run /provider key <id>, or /login <id> in a session",
+        )
+    )
+    if keyless:
+        out.append(
+            _check(
+                WARN,
+                "providers:no-credential",
+                f"{', '.join(keyless)} — configured but unusable",
+                "nothing orchestrates on these until a key is stored: /provider key <id>",
+            )
+        )
+    try:
+        orphans = mod.orphan_arms()
+    except Exception:
+        orphans = []
+    if orphans:
+        out.append(
+            _check(
+                WARN,
+                "ladder-arms-reachable",
+                f"{len(orphans)} ladder arm(s) cannot run: "
+                + "; ".join(f"{o['arm']} ({o['why'].split(' — ')[0]})" for o in orphans[:3])
+                + (" …" if len(orphans) > 3 else ""),
+                "fix the endpoint/credential, or remove the arm with /rlp-config set-arm",
+            )
+        )
+    else:
+        out.append(_check(OK, "ladder-arms-reachable", "every available ladder arm has an endpoint and a credential", ""))
+    return out
+
+
 def _laya() -> list[dict]:
     """Checkpoint presence, NOT the model itself (see module docstring)."""
     out: list[dict] = []
@@ -244,13 +310,14 @@ def _laya() -> list[dict]:
 
 
 def _extensions() -> list[dict]:
-    """RLP's own dropped-in extensions, and the optional third-party ones beside them.
+    """RLP's own dropped-in extensions and skills, and the optional third-party ones beside them.
 
     The harness agent dir is shared: myviking, databricks-tool-schema-sanitizer
     and friends live in the same `extensions/` directory RLP installs into. RLP
     needs none of them, so this check verifies only the files RLP recorded as its
     own (in `rlp-location.json`) and lists the rest as optional — never a
-    failure, and never implied as a dependency.
+    failure, and never implied as a dependency. The same split applies to the
+    skills directory, where RLP ships the `/skill:rlp-*` entry points.
     """
     agent = Path(os.environ.get("RPI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
     ext_dir = agent / "extensions"
@@ -283,6 +350,35 @@ def _extensions() -> list[dict]:
                 "optional-extensions",
                 f"{', '.join(optional)} — not required by RLP",
                 "",
+            )
+        )
+    # RLP's shipped skills are the `/skill:<name>` entry points for the engine.
+    # A shared skills directory means a missing one is silent: the command is
+    # simply not in the menu, and nothing says so.
+    skill_dir = agent / "skills"
+    listed_skills: object = None
+    try:
+        listed_skills = json.loads((agent / "rlp-location.json").read_text()).get("skills")
+    except Exception:
+        listed_skills = None
+    owned_skills = set(listed_skills) if isinstance(listed_skills, list) else set()
+    if owned_skills:
+        missing_skills = sorted(name for name in owned_skills if not (skill_dir / name / "SKILL.md").is_file())
+        out.append(
+            _check(
+                FAIL if missing_skills else OK,
+                "rlp-skills",
+                f"{len(owned_skills)} owned, all installed" if not missing_skills else f"missing {missing_skills}",
+                "sh scripts/install.sh" if missing_skills else "",
+            )
+        )
+    else:
+        out.append(
+            _check(
+                WARN,
+                "rlp-skills",
+                "no skills recorded in rlp-location.json (installed by an older RLP)",
+                "sh scripts/install.sh adds /skill:rlp-* to the menu",
             )
         )
     return out
@@ -356,7 +452,7 @@ def _warm() -> list[dict]:
 def run(*, warm: bool = False, host: bool = True) -> dict:
     """Collect every check. Returns {"ok", "summary", "checks"}; never raises."""
     checks: list[dict] = []
-    for group in (_python, _credentials, _ladder, _laya, _env, _extensions):
+    for group in (_python, _credentials, _providers, _ladder, _laya, _env, _extensions):
         try:
             checks.extend(group())
         except Exception as e:  # a broken group must not hide the others

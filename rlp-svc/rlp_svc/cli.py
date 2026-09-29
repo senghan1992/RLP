@@ -8,6 +8,8 @@ transport the orchestrator uses).
     rlp triage "fix the typo" --json
     rlp plan "add payments + tests, then review independently"
     rlp doctor --warm
+    rlp provider list --json          # endpoints, credentials, ladder arms
+    rlp provider probe my-provider    # one real round trip; classifies the failure
     rlp serve            # MCP stdio; what config.yaml launches
 
 Contract for scripting: exit 0 on a valid result, 1 when the envelope is
@@ -351,6 +353,132 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return _emit(envelope, False, human)
 
 
+def _cmd_provider(args: argparse.Namespace) -> int:
+    """model endpoints and credentials: list, add, remove, key, discover, probe.
+
+    The TUI drives this instead of writing models.json/auth.json itself, so the
+    validation, the backup and the 0600 on auth.json have one implementation
+    and the offline suite covers them.
+    """
+    from . import providers as mod
+
+    if not hasattr(args, "json"):
+        # `rlp-svc provider` with no subcommand reaches here without the
+        # subparser's own flag, and a missing attribute is not a reason to fail.
+        args.json = False
+    verb = args.provider_command
+    if verb in (None, "show"):
+        verb = "list"
+    try:
+        if verb == "list":
+            data = mod.summary()
+            envelope = {"ok": True, "result": data}
+        elif verb == "add":
+            data = mod.add_provider(
+                args.id,
+                args.base_url,
+                args.model or [],
+                api_key=args.key,
+                name=args.name,
+                api=args.api,
+                replace_models=args.replace_models,
+            )
+            envelope = {"ok": True, "result": data}
+        elif verb == "remove":
+            envelope = {"ok": True, "result": mod.remove_provider(args.id, drop_key=args.drop_key)}
+        elif verb == "key":
+            if args.key:
+                envelope = {"ok": True, "result": mod.set_key(args.id, args.key)}
+            elif args.drop:
+                envelope = {"ok": True, "result": mod.clear_key(args.id)}
+            else:
+                return _emit(
+                    {"ok": False, "error": "provider key needs a key, or --drop to remove it"},
+                    args.json,
+                    "usage: rlp-svc provider key <id> <key> | provider key <id> --drop",
+                )
+        elif verb == "discover":
+            base_url = args.base_url or next(
+                (p["baseUrl"] for p in mod.list_providers() if p["id"] == args.id), ""
+            )
+            if not base_url:
+                return _emit(
+                    {"ok": False, "error": f"no endpoint for {args.id!r}"},
+                    args.json,
+                    f"no endpoint configured for {args.id!r} — pass one: provider discover --base-url URL",
+                )
+            key = args.key
+            if key is None and args.id:
+                key = mod.stored_credential(args.id)
+            envelope = mod.discover_models(base_url, key)
+        elif verb == "probe":
+            envelope = mod.probe(args.id, base_url=args.base_url, api_key=args.key, model=args.model)
+        else:  # pragma: no cover - argparse restricts the choices
+            raise ValueError(f"unknown provider subcommand {verb!r}")
+    except ValueError as e:
+        return _emit({"ok": False, "error": str(e)}, args.json, f"provider: {e}")
+
+    if args.json:
+        return _emit(envelope, True)
+    if not envelope.get("ok"):
+        lines = [
+            f"✗ {envelope.get('error', 'failed')}",
+            f"  kind  {envelope.get('kind', 'unknown')}",
+            f"  fix   {envelope.get('fix', '')}",
+        ]
+        for model in (envelope.get("availableModels") or [])[:12]:
+            lines.append(f"        {model}")
+        return _emit(envelope, False, "\n".join(lines))
+    # `list`/`add`/`remove`/`key` wrap their payload in `result`; the two live
+    # checks return the payload itself, because that is the envelope.
+    payload = envelope["result"] if isinstance(envelope.get("result"), dict) else envelope
+    return _emit(envelope, False, _render_provider(payload, verb))
+
+
+def _render_provider(data: dict, verb: str) -> str:
+    if verb == "probe":
+        return (
+            f"✓ {data.get('provider') or data.get('baseUrl')} answered in {data.get('latency')}\n"
+            f"  model  {data.get('model')}\n  url    {data.get('baseUrl')}"
+        )
+    if verb == "discover":
+        models = data.get("models") or []
+        head = [f"{data.get('count')} model(s) at {data.get('baseUrl')}", ""]
+        head += [f"  {m}" for m in models[:40]]
+        if len(models) > 40:
+            head.append(f"  …and {len(models) - 40} more")
+        return "\n".join(head)
+    if verb in ("add", "remove", "key"):
+        lines = [f"{verb}: {data.get('provider')}"]
+        for key in ("baseUrl", "credential", "models", "backup", "path"):
+            if data.get(key):
+                value = data[key]
+                lines.append(f"  {key:<10} {', '.join(value) if isinstance(value, list) else value}")
+        if verb == "key":
+            lines = [f"credential stored for {data.get('provider')} ({data.get('credential')})", f"  backup  {data.get('backup') or 'none'}"]
+        return "\n".join(lines)
+
+    cards = data.get("providers") or []
+    lines = [f"endpoints · {data.get('modelsPath')}", ""]
+    for card in cards:
+        badge = {"oauth": "◆", "key": "●", "none": "○"}[card["credential"]]
+        arms = ", ".join(a["model"] for a in card.get("ladderArms") or [])
+        lines.append(f"{badge} {card['id']}  —  {card['baseUrl']}  ({card['modelCount']} model(s), {card['credentialLabel']})")
+        if arms:
+            lines.append(f"   ladder: {arms}")
+        else:
+            lines.append("   ladder: not an arm — add it with /rlp-config or `rlp config`")
+    if not cards:
+        lines.append("  no endpoints configured — /provider add <id> <baseUrl> <modelId>")
+    orphans = data.get("orphanArms") or []
+    if orphans:
+        lines += ["", "arms that cannot run (visible but unusable):"]
+        for o in orphans:
+            lines.append(f"  {o['arm']} — {o['why']}")
+    lines += ["", "  ● api key   ◆ oauth   ○ no credential"]
+    return "\n".join(lines)
+
+
 def _cmd_memory(args: argparse.Namespace) -> int:
     from . import memory as mem
 
@@ -465,6 +593,45 @@ def build_parser() -> argparse.ArgumentParser:
     add_route("route", "route one subtask with the laya decision model")
     add_route("llm-route", "route one subtask with the transparent LLM fallback")
 
+    sp = sub.add_parser("provider", help="model endpoints and credentials: list, add, remove, key, discover, probe")
+    psub = sp.add_subparsers(dest="provider_command")
+    psub.add_parser("list", help="every endpoint, its credential state and its ladder arms").add_argument("--json", action="store_true")
+    psub.add_parser("show", help="alias for list").add_argument("--json", action="store_true")
+
+    pa = psub.add_parser("add", help="attach an OpenAI-compatible endpoint (validate, back up, write atomically)")
+    pa.add_argument("id", help="provider id (letters, digits, . _ -)")
+    pa.add_argument("base_url", help="API root, e.g. https://api.example.com/v1")
+    pa.add_argument("model", nargs="*", help="model id(s) to attach")
+    pa.add_argument("--key", default=None, help="API key; written to auth.json (0600), never printed")
+    pa.add_argument("--name", default=None, help="display name")
+    pa.add_argument("--api", default="openai-completions", help="api shape (default: openai-completions)")
+    pa.add_argument("--replace-models", action="store_true", help="replace the model list instead of merging into it")
+    pa.add_argument("--json", action="store_true")
+
+    pr = psub.add_parser("remove", help="detach an endpoint")
+    pr.add_argument("id")
+    pr.add_argument("--drop-key", action="store_true", help="also remove its credential from auth.json")
+    pr.add_argument("--json", action="store_true")
+
+    pk = psub.add_parser("key", help="set, replace, or (--drop) remove a provider's credential")
+    pk.add_argument("id")
+    pk.add_argument("key", nargs="?", help="the credential; omit with --drop")
+    pk.add_argument("--drop", action="store_true", help="remove the stored credential")
+    pk.add_argument("--json", action="store_true")
+
+    pd = psub.add_parser("discover", help="ask an endpoint which models it serves (GET /models)")
+    pd.add_argument("id", nargs="?", default="", help="a configured provider to read the URL and key from")
+    pd.add_argument("--base-url", default="", help="probe this URL instead")
+    pd.add_argument("--key", default=None, help="credential for --base-url")
+    pd.add_argument("--json", action="store_true")
+
+    pp = psub.add_parser("probe", help="one real completion round trip: does this endpoint answer?")
+    pp.add_argument("id", nargs="?", default=None, help="a configured provider")
+    pp.add_argument("--base-url", default=None, help="check this URL before writing it")
+    pp.add_argument("--key", default=None, help="credential for --base-url")
+    pp.add_argument("--model", default=None, help="model to test")
+    pp.add_argument("--json", action="store_true")
+
     sub.add_parser("ladder", help="print the resolved orchestration ladder").add_argument("--json", action="store_true")
     sub.add_parser("roster", help="print the router roster derived from the ladder").add_argument("--json", action="store_true")
 
@@ -515,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
         "llm-route": _cmd_llm_route,
         "ladder": _cmd_ladder,
         "roster": _cmd_roster,
+        "provider": _cmd_provider,
         "config": _cmd_config,
         "replan": _cmd_replan,
         "verify": _cmd_verify,

@@ -33,7 +33,7 @@ SVC_PY="$ROOT/rlp-svc/.venv/bin/python"
 # Subcommands owned by the decision engine. Anything else belongs to the
 # orchestrator, including omni's own flags (-p, --jsonl, ...).
 case "${1:-}" in
-  plan|triage|decompose|route|llm-route|ladder|roster|config|replan|verify|memory|remember|doctor|serve|engine|version)
+  plan|triage|decompose|route|llm-route|ladder|roster|config|replan|verify|memory|remember|doctor|serve|engine|provider|version)
     if [ ! -x "$SVC_PY" ]; then
       echo "rlp: decision engine not installed (no $SVC_PY)." >&2
       echo "     run: sh $ROOT/scripts/install.sh" >&2

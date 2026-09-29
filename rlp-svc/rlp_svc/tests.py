@@ -450,7 +450,7 @@ def test_cli_surface() -> None:
     from .cli import EXIT_USAGE, build_parser
 
     parser = build_parser()
-    expected = {"triage", "decompose", "route", "llm-route", "ladder", "roster", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "serve", "version"}
+    expected = {"triage", "decompose", "route", "llm-route", "ladder", "roster", "provider", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "serve", "version"}
     actions = [a for a in parser._actions if hasattr(a, "choices") and isinstance(a.choices, dict)]
     check(bool(actions), "the parser declares subcommands")
     if actions:
@@ -486,6 +486,26 @@ def test_cli_surface() -> None:
             os.environ.pop("RLP_ORCHESTRATION", None)
 
 
+def test_version_consistency() -> None:
+    """One version, three places. A drift between them is a support ticket."""
+    import re as _re
+
+    import rlp_svc
+
+    from . import cli
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    text = pyproject.read_text()
+    declared = _re.search(r'^version\s*=\s*"([^"]+)"', text, _re.MULTILINE)
+    check(declared is not None, "pyproject declares a version")
+    if declared:
+        check(
+            declared.group(1) == rlp_svc.__version__ == cli.VERSION,
+            f"pyproject={declared.group(1) if declared else '?'} package={rlp_svc.__version__} cli={cli.VERSION}",
+        )
+    check(callable(getattr(cli, "_cmd_provider", None)), "the provider command has a handler")
+
+
 def test_doctor() -> None:
     from . import doctor
 
@@ -494,6 +514,8 @@ def test_doctor() -> None:
     names = {c["name"] for c in report["checks"]}
     check({"python", "ladder", "laya-checkpoint"} <= names, f"core checks present: {sorted(names)}")
     check("rlp-extensions" in names, "doctor verifies RLP's own extensions")
+    check("rlp-skills" in names, "doctor verifies RLP's own skills")
+    check({"providers", "ladder-arms-reachable"} <= names, f"doctor checks endpoints reachability: {sorted(names)}")
     check(all(c["status"] != "fail" for c in report["checks"] if c["name"] == "optional-extensions"),
           "a third-party optional extension is never a RLP failure")
     check(report["ok"] == (report["summary"]["fail"] == 0), "verdict agrees with the failure count")
@@ -1080,6 +1102,10 @@ def test_plan_reads_memory() -> None:
 
 
 def main() -> None:
+    # The provider store has its own file (it is long and hermetic on its own);
+    # it shares this runner's `check` contract via its own module-level list.
+    from . import tests_providers
+
     for test in (
         test_waves,
         test_pick_arm,
@@ -1108,14 +1134,19 @@ def main() -> None:
         test_availability,
         test_plan_excludes_unavailable,
         test_cli_surface,
+        test_version_consistency,
         test_doctor,
+        tests_providers.test_providers_store,
+        tests_providers.test_providers_probe,
+        tests_providers.test_providers_surface,
     ):
         print(f"— {test.__name__}")
         test()
     print()
-    if _failures:
-        print(f"{len(_failures)} failure(s):")
-        for f in _failures:
+    failures = _failures + tests_providers._failures
+    if failures:
+        print(f"{len(failures)} failure(s):")
+        for f in failures:
             print(f"  {f}")
         sys.exit(1)
     print("all offline tests passed")

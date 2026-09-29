@@ -151,7 +151,21 @@ for ext in "$ROOT"/agent/rlp/extensions/*.ts; do
   echo "[rlp] installed extension $name"
   RLP_EXT_LIST="${RLP_EXT_LIST}${RLP_EXT_LIST:+, }\"$name\""
 done
-printf '{\n  "root": "%s",\n  "extensions": [%s]\n}\n' "$ROOT" "$RLP_EXT_LIST" > "$PI_AGENT_DIR/rlp-location.json"
+# Skills are the harness's `/skill:<name>` commands. They are part of the tool's
+# surface — the local plane never had them installed, so /commands advertised
+# whatever happened to be in the shared skills dir and RLP's own were missing.
+RLP_SKILL_LIST=""
+mkdir -p "$PI_AGENT_DIR/skills"
+for skill in "$ROOT"/agent/rlp/skills/*/SKILL.md; do
+  [ -e "$skill" ] || continue
+  name=$(basename "$(dirname "$skill")")
+  mkdir -p "$PI_AGENT_DIR/skills/$name"
+  cp "$skill" "$PI_AGENT_DIR/skills/$name/SKILL.md"
+  echo "[rlp] installed skill $name"
+  RLP_SKILL_LIST="${RLP_SKILL_LIST}${RLP_SKILL_LIST:+, }\"$name\""
+done
+printf '{\n  "root": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
+  "$ROOT" "$RLP_EXT_LIST" "$RLP_SKILL_LIST" > "$PI_AGENT_DIR/rlp-location.json"
 
 if [ -f "$PI_AGENT_DIR/orchestration.json" ] && [ -z "${RLP_ORCH_FORCE:-}" ]; then
   echo "[rlp] kept existing $PI_AGENT_DIR/orchestration.json (RLP_ORCH_FORCE=1 to overwrite)"
