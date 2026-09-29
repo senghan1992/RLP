@@ -1,9 +1,17 @@
 #!/bin/sh
 # rpi: the branded pi fork (RLP's harness).
 #
+# Two settings are seeded here, both overridable:
+#
+# RPI_CODING_AGENT_DIR — RLP keeps its own state under ~/.rlp/agent (settings,
+# credentials, models, sessions, extensions, skills, orchestration.json) rather
+# than sharing pi's ~/.pi. The fork's own `piConfig.configDir` is already ".rlp",
+# so this export only matters for a fork built before that default existed; it
+# also lets RLP_CODING_AGENT_DIR be used as the friendlier spelling.
+#
 # RPI_DEFAULT_MODEL is read by the fork's SettingsManager and beats
-# ~/.pi/agent/settings.json, so `rpi` starts on an orchestration-ladder model
-# instead of inheriting the shared pi default. Value uses the `provider/model`
+# ~/.rlp/agent/settings.json, so `rpi` starts on an orchestration-ladder model
+# instead of inheriting whatever the user saved. Value uses the `provider/model`
 # spelling of `--model`; omnigent passes its own --model on managed sessions
 # and the CLI flag wins, so worker routing is unaffected.
 #
@@ -20,6 +28,16 @@ while [ -L "$SELF" ]; do
   esac
 done
 ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
-RPI_DEFAULT_MODEL="${RPI_DEFAULT_MODEL:-agnes/agnes-3.0-flash}"
-export RPI_DEFAULT_MODEL
+RPI_CODING_AGENT_DIR="${RPI_CODING_AGENT_DIR:-${RLP_CODING_AGENT_DIR:-$HOME/.rlp/agent}}"
+
+# The session default is the ladder's `brain`, read from the same file the
+# orchestrator plans with, so editing the ladder takes effect on the next launch
+# and no model name is written down twice. A fresh install with no ladder (or an
+# unreadable one) leaves this unset on purpose: the harness then falls back to
+# the user's saved default, which is the honest answer for a host whose ladder
+# has not been built yet. `RPI_DEFAULT_MODEL` still overrides everything.
+if [ -z "${RPI_DEFAULT_MODEL:-}" ]; then
+  RPI_DEFAULT_MODEL=$(sed -n 's/.*"brain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$RPI_CODING_AGENT_DIR/orchestration.json" 2>/dev/null | head -1)
+fi
+export RPI_DEFAULT_MODEL RPI_CODING_AGENT_DIR
 exec node "$ROOT/fork/pi/packages/coding-agent/dist/bundle/cli.js" "$@"

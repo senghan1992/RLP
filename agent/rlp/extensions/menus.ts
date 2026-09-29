@@ -26,7 +26,16 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-const AGENT_DIR = process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+/**
+ * RLP's own agent dir — the one rule, spelled once per file because the
+ * extensions load independently.
+ *
+ * `RLP_CODING_AGENT_DIR` wins, then the harness's own `RPI_CODING_AGENT_DIR`
+ * (derived from its `APP_NAME`), then `~/.rlp/agent`, which is also the fork's
+ * `piConfig.configDir` default. RLP keeps its settings, credentials, models,
+ * sessions, extensions and skills here; pi's `~/.pi` is a different tool's.
+ */
+const AGENT_DIR = process.env.RLP_CODING_AGENT_DIR || process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".rlp", "agent");
 const SETTINGS_FILE = join(AGENT_DIR, "settings.json");
 
 type Json = Record<string, unknown>;
@@ -916,10 +925,15 @@ const OMNIGENT: Array<[string, string]> = [
  * user opted into — optional, and never something RLP depends on.
  */
 function rlpExtensionFiles(): Set<string> {
+	// `install.sh` writes the marker and it is authoritative. The fallback is
+	// what this version ships — spelled out because an extension cannot read the
+	// checkout it came from. Keep it in step with `agent/rlp/extensions/*.ts`;
+	// `rlp doctor` compares the marker against the checkout and warns when a
+	// recorded file is no longer shipped, which is the drift this cannot see.
 	const marker = readJson(join(AGENT_DIR, "rlp-location.json"));
 	const listed = marker?.extensions;
 	if (Array.isArray(listed)) return new Set(listed.map(String));
-	return new Set(["menus.ts", "rlp-commands.ts", "rlp-orchestrate.ts"]);
+	return new Set(["menus.ts", "rlp-commands.ts", "rlp-orchestrate.ts", "rlp-provider.ts"]);
 }
 
 /** Split the extensions dir into RLP's own files and optional third-party ones. */
@@ -939,6 +953,11 @@ function extensionFiles(): { rlp: string[]; optional: string[] } {
 }
 
 function skillCommands(): Array<[string, string]> {
+	// RLP's own skills live in RLP's agent dir. The omnigent agent spec carries
+	// its own copy of the same five (the REPL loads them from there), so the same
+	// name can appear in two directories — which listed it twice in the index.
+	// A slash index answers "what can I type", so a skill is listed once, from
+	// the first place it was found: RLP's own dir first.
 	const dirs = [join(AGENT_DIR, "skills")];
 	const omnigent = join(homedir(), ".omnigent", "agents");
 	try {
@@ -950,6 +969,7 @@ function skillCommands(): Array<[string, string]> {
 		/* no omnigent agents */
 	}
 	const found: Array<[string, string]> = [];
+	const seen = new Set<string>();
 	for (const dir of dirs) {
 		try {
 			for (const entry of readdirSync(dir)) {
@@ -957,6 +977,8 @@ function skillCommands(): Array<[string, string]> {
 				if (!existsSync(file)) continue;
 				const first = readFileSync(file, "utf8").slice(0, 600);
 				const name = first.match(/^name:\s*(.+)$/m)?.[1]?.trim() ?? entry;
+				if (seen.has(name)) continue;
+				seen.add(name);
 				const description = first.match(/^description:\s*(.+)$/m)?.[1]?.trim() ?? "";
 				found.push([`/skill:${name}`, description]);
 			}

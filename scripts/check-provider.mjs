@@ -224,7 +224,25 @@ try {
 	);
 	console.log("  ok  /provider remove detaches the endpoint and its credential");
 
-	// --- 7. the whole wizard, every dialog cancelled
+	// --- 7. the slash index, which is what proves the TUI resolved RLP's own dir
+	const index = await step("/commands", "/commands", (m) => m.includes("commands ·"));
+	record(
+		index.matched.includes("RLP extensions (this tool)") && index.matched.includes("rlp-provider"),
+		"the index finds RLP's extensions in RLP's own agent dir",
+	);
+	record(
+		!/optional|third-party/i.test(index.matched.split("RLP extensions")[0] ?? ""),
+		"nothing outside RLP's dir is implied as a dependency",
+	);
+	const skillLines = index.matched.split("\n").filter((l) => l.includes("/skill:rlp-"));
+	record(
+		skillLines.length === new Set(skillLines.map((l) => l.trim())).size,
+		`each skill is listed once (saw ${skillLines.length} line(s) for RLP skills)`,
+	);
+	record(skillLines.length >= 5, `RLP's own skills are installed and indexed: ${skillLines.length}`);
+	console.log(`  ok  /commands indexes RLP's own extensions and ${skillLines.length} skills, once each`);
+
+	// --- 8. the whole wizard, every dialog cancelled
 	const before = digest(LADDER);
 	const setup = await step(
 		"/setup (all dialogs cancelled)",

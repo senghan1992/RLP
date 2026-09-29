@@ -83,10 +83,11 @@ never type it).
 
 - `git`, `node` ≥ 18 with `npm`, `python` ≥ 3.10
 - ~1.5 GB of disk (the harness, a CPU-only torch, and the laya checkpoint)
-- Model credentials: RLP reads pi's `~/.pi/agent/auth.json` + `models.json`.
-  Any OpenAI-compatible provider works. Configure them inside `rlp` with
-  `/setup` (or `/provider connect`), which is the guided path; a hand-edited
-  file works too, and `rlp provider` is the scriptable equivalent.
+- Model credentials: RLP keeps its own state under `~/.rlp/agent/` —
+  `auth.json` + `models.json`, never pi's `~/.pi`. Any OpenAI-compatible
+  provider works. Configure them inside `rlp` with `/setup` (or
+  `/provider connect`), which is the guided path; a hand-edited file works too,
+  and `rlp provider` is the scriptable equivalent.
 - `omni` (omnigent) is **optional** — only `rlp --omnigent` needs it.
 
 The installer uses [`uv`](https://github.com/astral-sh/uv) when it is present and
@@ -148,11 +149,24 @@ merges, never force-pushes, never touches a protected branch.
 Deep dives: [docs/CONCEPTS.md](docs/CONCEPTS.md) (what it is and how to drive it)
 and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (a one-page diagram, Korean).
 
+Under `~/.rlp/`, one directory per concern:
+
+| Path | Holds |
+|---|---|
+| `~/.rlp/agent/` | the harness state: `settings.json`, `auth.json`, `models.json`, `sessions/`, `extensions/`, `skills/`, `orchestration.json` |
+| `~/.rlp/runs/` | per-run ledgers, worker logs and reports |
+| `~/.rlp/memory/` | the per-project knowledge log |
+
+Nothing here is shared with pi: RLP's fork defaults to `~/.rlp/agent` through its
+own `piConfig.configDir`, and `rlp doctor` prints which directory it resolved.
+`RLP_CODING_AGENT_DIR` (or the harness's older `RPI_CODING_AGENT_DIR`) moves the
+agent dir; `RLP_HOME` moves the run/memory data only.
+
 ---
 
 ## The model ladder — configuration, not prose
 
-Every model RLP can spend on lives in one file, `~/.pi/agent/orchestration.json`.
+Every model RLP can spend on lives in one file, `~/.rlp/agent/orchestration.json`.
 The harness renders it into the agent's prompt, the router derives its roster
 from it, and the headless planner reads the same file — a model name is never
 written twice.
@@ -183,6 +197,11 @@ written twice.
 
 - **Arms are priority-ordered.** The first arm is the default — where the bulk of
   the spend goes; `when` is the operator's reasoning, kept next to the model.
+- **`rlm.maxTimeout` is a budget for the whole decomposition**, not per attempt:
+  the planner's candidate arms (configured planner → the DEFAULT arm → the fast
+  arm, then the same list for the plain-LLM contingency) share it, so a gateway
+  that hangs instead of erroring cannot hold a plan open for the arm count times
+  the timeout. `maxIterations` and `maxConcurrentSubcalls` bound the recursion.
 - **`roles` binds a role to a model** (`code`, `debug`, `review`, `research`,
   `docs`, `explore`) or to an **ordered fallback list**, and it wins over
   priority order. Three roles name models the *planner itself* uses, never a
@@ -302,7 +321,7 @@ rules — a credential is never printed and never placed on a command line.
 - **Cross-vendor review** is verified against the ladder's families and reported
   as a violation when it cannot be satisfied.
 - **Never merges.** Branches and (with a GitHub remote) PRs only.
-- **Secrets stay out of the repo.** Credentials live in `~/.pi/agent/`, outside
+- **Secrets stay out of the repo.** Credentials live in `~/.rlp/agent/`, outside
   the checkout and git-ignored.
 - **Credentials are handled as credentials.** `auth.json` is written `0600`;
   nothing ever prints a key (only `present`/`absent`); every write to it or to
@@ -337,11 +356,13 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 
 | Variable | Effect |
 |---|---|
+| `RLP_CODING_AGENT_DIR` | RLP's agent dir (`~/.rlp/agent` by default) |
+| `RPI_CODING_AGENT_DIR` | the same, under the harness's own name — still honoured |
 | `RLP_ORCHESTRATION` | path to the ladder, overriding `<agent dir>/orchestration.json` |
-| `RPI_CODING_AGENT_DIR` | the harness agent dir (`~/.pi/agent` by default) |
 | `RPI_DEFAULT_MODEL` | the `rpi` session default (`provider/model`) |
 | `RLP_DECOMPOSE_MODEL` · `RLP_CRITIQUE_MODEL` · `RLP_VERIFY_MODEL` | override the planner / critic / verifier model |
 | `RLP_SKIP_CREDENTIAL_PREFLIGHT=1` | skip the per-arm credential check |
+| `RLP_NO_MIGRATE=1` | do not copy credentials out of pi's `~/.pi` on install |
 | `RLP_HOME` | where run ledgers and project memory live (`~/.rlp`) |
 | `RLP_PI_REPO` · `RLP_PI_REF` | fork source + ref for `install.sh` |
 | `RLP_REBUILD=1` · `RLP_ORCH_FORCE=1` | force a fork rebuild · overwrite the installed ladder |

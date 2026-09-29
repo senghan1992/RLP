@@ -29,9 +29,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any
 
-from .llm import chat, chat_first, decomp_spec
+from .llm import DAG_TOKENS, chat, chat_first, decomp_spec
 
 DECOMPOSE_PROMPT = """You are a task decomposer for a multi-agent orchestrator. Given the REQUEST below,
 decompose it (recursively if needed) into a flat DAG of 2-12 subtasks, each of which
@@ -88,11 +89,16 @@ _SIZES = {"S", "M", "L"}
 _ID_RE = re.compile(r"^t\d+$")
 
 _DEFAULT_RLM = {
-    # 30 iterations is RLM's default and is right for a long-context exploration;
-    # a planning prompt is short, so 8 bounds planner latency without cutting.
-    # reasoning short. maxTimeout is a hard stop on a slow gateway.
+    # RLM's own default is 30 iterations, which is right for a long-context
+    # exploration and wrong for a planning prompt: the system prompt already
+    # says "finish with the JSON and nothing else", so the work is done in one
+    # or two. Measured on the host gateway, an iteration costs ~45 s (192 s for
+    # four), so eight iterations cannot finish inside any sane budget — the RLM
+    # path would only ever time out and hand over to the plain-LLM contingency.
+    # Three leaves room for the fallback within `maxTimeout`, which is the
+    # budget for the whole decomposition.
     "maxDepth": 1,
-    "maxIterations": 8,
+    "maxIterations": 3,
     "maxConcurrentSubcalls": 4,
     "maxBudget": None,
     "maxTimeout": 300.0,
@@ -194,6 +200,28 @@ def _planner_fallbacks() -> list[tuple[str, str]]:
         if spec and spec not in out:
             out.append(spec)
     return out
+
+
+#: Shortest attempt worth starting. Below this, an arm cannot plausibly answer,
+#: and spending the remainder on a doomed request is worse than reporting the
+#: budget as exhausted.
+_MIN_ATTEMPT_SECONDS = 15.0
+
+
+def _attempt_timeout(deadline: float | None, attempts_left: int) -> float | None:
+    """Per-attempt ceiling: the time left, shared by the attempts left.
+
+    A candidate list is a *bounded* retry, so the budget is shared rather than
+    multiplied. This was learned the hard way: with a per-attempt timeout, a
+    gateway that hangs instead of erroring made one `decompose()` take
+    N × `rlm.maxTimeout` — 15 minutes of a stalled plan on a three-arm ladder.
+    Fair-share means a hung first arm cannot starve the rest, and the whole call
+    is bounded by `rlm.maxTimeout`. `None` (no budget configured) leaves each
+    client its own default.
+    """
+    if deadline is None:
+        return None
+    return max(_MIN_ATTEMPT_SECONDS, (deadline - time.monotonic()) / max(1, attempts_left))
 
 
 def _extract_first_json(text: str) -> Any:
@@ -331,12 +359,22 @@ def _validated(tasks: list[dict]) -> list[dict]:
     return _topo_sort(tasks)
 
 
-def _plain_llm_decompose(request: str, context: str) -> list[dict]:
-    """Contingency (c): recursive plain-LLM decomposition. Returns tasks list."""
+def _plain_llm_decompose(request: str, context: str, timeout: float | None = None) -> list[dict]:
+    """Contingency (c): recursive plain-LLM decomposition. Returns tasks list.
+
+    `timeout` is the per-candidate ceiling, so the contingency costs the same
+    bounded walk as the RLM path rather than an unbounded one.
+    """
     prompt = DECOMPOSE_PROMPT.format(request=request, context=context)
     # `chat_fn=chat` keeps this module's own client as the seam (the offline
     # suite stubs it here), rather than reaching through to llm.chat.
-    text, _spec = chat_first(_planner_fallbacks(), messages=[{"role": "user", "content": prompt}], chat_fn=chat)
+    text, _spec = chat_first(
+        _planner_fallbacks(),
+        messages=[{"role": "user", "content": prompt}],
+        chat_fn=chat,
+        timeout=timeout,
+        max_tokens=DAG_TOKENS,
+    )
     return _extract_first_json(text)
 
 
@@ -365,6 +403,15 @@ def _rlm_decompose(prompt: str, knobs: dict, spec: tuple[str, str] | None = None
         environment="local",
         custom_system_prompt=RLM_SYSTEM_PROMPT,
         verbose=False,
+        # The completion budget goes to `sampling_args`, which reaches each
+        # chat-completions call. It must NOT go to RLM's own `max_tokens`: that
+        # one is a *total* input+output ceiling for the whole recursive run, and
+        # 8 kB of it is spent by the time the REPL has run three iterations —
+        # `TokenLimitExceededError` after 118 s, which is a self-inflicted wound
+        # rather than a model problem. The run stays bounded by `max_iterations`
+        # and `max_timeout` instead.
+        sampling_args={"max_tokens": DAG_TOKENS},
+        sub_sampling_args={"max_tokens": DAG_TOKENS},
         **{k: v for k, v in kwargs.items() if v is not None},
     )
     return rlm.completion(prompt).response
@@ -382,7 +429,7 @@ def _refine(request: str, context: str, tasks: list[dict], max_refines: int) -> 
             tasks=json.dumps({"tasks": tasks}, ensure_ascii=False),
         )
         try:
-            text = chat(provider, model, messages=[{"role": "user", "content": prompt}], max_tokens=3072)
+            text = chat(provider, model, messages=[{"role": "user", "content": prompt}], max_tokens=DAG_TOKENS)
             verdict = _extract_first_json(text)
         except Exception as e:
             record["critique_error"] = str(e)[:200]
@@ -430,15 +477,32 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
 
     # Contingency ladder (plan): rlm on each candidate arm, then plain-LLM on
     # the same candidates. Never stall: the DAG shape is the contract, not the
-    # engine — and not the arm either.
+    # engine — and not the arm either. The whole walk shares one wall-clock
+    # budget (`rlm.maxTimeout`), with the last quarter reserved for the plain-LLM
+    # contingency, so a gateway that hangs cannot hold a plan open for
+    # N × the timeout.
+    budget = knobs.get("maxTimeout")
+    deadline = (time.monotonic() + float(budget)) if budget else None
+    rlm_deadline = (deadline - max(30.0, float(budget) / 4)) if deadline else None
+
     engine = "rlm"
     rlm_error = None
     raw = None
     candidates = _planner_fallbacks()
     planner_used: tuple[str, str] | None = None
-    for spec in candidates:
+    for index, spec in enumerate(candidates):
+        timeout = _attempt_timeout(rlm_deadline, len(candidates) - index)
+        if timeout is None or (timeout <= _MIN_ATTEMPT_SECONDS and index > 0):
+            rlm_error = (
+                f"stopped before {spec[0]}/{spec[1]}: the {budget:.0f}s budget (rlm.maxTimeout) is spent"
+            )
+            break
+        attempt_knobs = {**knobs}
+        if timeout is not None:
+            configured = attempt_knobs.get("maxTimeout")
+            attempt_knobs["maxTimeout"] = timeout if configured is None else min(float(configured), timeout)
         try:
-            raw = _rlm_decompose(prompt, knobs, spec)
+            raw = _rlm_decompose(prompt, attempt_knobs, spec)
             planner_used = spec
             break
         except Exception as e:
@@ -448,9 +512,10 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
     if raw is None:
         engine = "fallback-plain-llm"
 
+    plain_timeout = _attempt_timeout(deadline, len(candidates)) if deadline else None
     if engine == "fallback-plain-llm":
         try:
-            tasks = _validated(_normalize_tasks(_plain_llm_decompose(target, context)))
+            tasks = _validated(_normalize_tasks(_plain_llm_decompose(target, context, plain_timeout)))
         except Exception as e:
             detail = f" ({rlm_error})" if rlm_error else ""
             return {"ok": False, "error": f"decomposition failed: {str(e)[:200]}{detail}"}
@@ -463,7 +528,7 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
             engine = "fallback-plain-llm"
             rlm_error = f"rlm DAG unusable: {str(e)[:240]}"
             try:
-                tasks = _validated(_normalize_tasks(_plain_llm_decompose(target, context)))
+                tasks = _validated(_normalize_tasks(_plain_llm_decompose(target, context, plain_timeout)))
             except Exception as e2:
                 return {"ok": False, "error": f"decomposition failed: {str(e2)[:200]} ({rlm_error})"}
 

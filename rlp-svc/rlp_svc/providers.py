@@ -1,11 +1,13 @@
 """rlp providers — the endpoints RLP can spend on, and their credentials.
 
-Two files hold everything the harness needs to talk to a model:
+Two files hold everything the harness needs to talk to a model, both in RLP's
+own agent dir (`~/.rlp/agent` by default — see `paths.py`) rather than in pi's
+`~/.pi`:
 
-* ``~/.pi/agent/models.json`` — the endpoint (``baseUrl``, ``api``) and the
-  models attached to it. No secrets.
-* ``~/.pi/agent/auth.json`` — the credential per provider. ``0600``, and never
-  printed by anything in this module.
+* `models.json` — the endpoint (``baseUrl``, ``api``) and the models attached to
+  it. No secrets.
+* `auth.json` — the credential per provider. ``0600``, and never printed by
+  anything in this module.
 
 Both are shared with the harness itself, so a provider added here is
 immediately usable by ``/model``, by the RLP ladder arms, and by every worker.
@@ -42,6 +44,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+from . import paths
 
 #: Default shapes for a model the user attaches by hand. The harness normalises
 #: anything omitted, so these are a starting point, not a contract.
@@ -132,11 +136,11 @@ PRESETS: list[dict[str, Any]] = [
 
 
 def models_path() -> Path:
-    return Path(os.environ.get("RLP_PI_MODELS") or (Path.home() / ".pi" / "agent" / "models.json"))
+    return Path(os.environ.get("RLP_PI_MODELS") or (paths.agent_dir() / "models.json"))
 
 
 def auth_path() -> Path:
-    return Path(os.environ.get("RLP_PI_AUTH") or (Path.home() / ".pi" / "agent" / "auth.json"))
+    return Path(os.environ.get("RLP_PI_AUTH") or (paths.agent_dir() / "auth.json"))
 
 
 def _read_json(path: Path) -> dict:

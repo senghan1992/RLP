@@ -14,17 +14,24 @@ security team; there is no bug-bounty programme.
 
 ### Model credentials
 
-RLP reads and writes two files shared with the pi harness:
+RLP reads and writes two files, in its own agent dir (`~/.rlp/agent` by default —
+never pi's `~/.pi`):
 
 | File | Holds | Permissions |
 |---|---|---|
-| `~/.pi/agent/models.json` | endpoint URLs and model definitions | ordinary file |
-| `~/.pi/agent/auth.json` | bearer tokens and OAuth credentials, per provider | forced `0600` |
+| `<agent dir>/models.json` | endpoint URLs and model definitions | ordinary file |
+| `<agent dir>/auth.json` | bearer tokens and OAuth credentials, per provider | forced `0600` |
 
-`$RLP_PI_MODELS` / `$RLP_PI_AUTH` relocate them; `$RPI_CODING_AGENT_DIR` moves
-the whole agent dir. They are never inside the checkout, and `.gitignore` covers
-`auth.json`, `models.json`, `.env`, `*.pem` and `*.key` as a second line of
-defence.
+`RLP_CODING_AGENT_DIR` moves the agent dir (`RPI_CODING_AGENT_DIR`, the harness's
+own name for it, is still honoured); `$RLP_PI_MODELS` / `$RLP_PI_AUTH` relocate
+the two files individually. They live under `~/.rlp`, never inside the checkout,
+and `.gitignore` covers `auth.json`, `models.json`, `.env`, `*.pem` and `*.key`
+as a second line of defence.
+
+On install, an existing pi credential store is **copied** (never moved) into
+`~/.rlp/agent` so an upgrade does not force you to reconnect every provider;
+`RLP_NO_MIGRATE=1` skips that, and deleting the copies afterwards changes
+nothing for pi.
 
 The rules the code holds to, and where:
 

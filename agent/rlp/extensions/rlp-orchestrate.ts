@@ -54,7 +54,7 @@ import { Type } from "typebox";
  * the fallback. `$RLP_ROOT` still wins for a relocated or multi-checkout setup.
  */
 function installedRoot(): string | undefined {
-	for (const dir of [process.env.RPI_CODING_AGENT_DIR, join(homedir(), ".pi", "agent")]) {
+	for (const dir of [process.env.RLP_CODING_AGENT_DIR, process.env.RPI_CODING_AGENT_DIR, join(homedir(), ".rlp", "agent")]) {
 		if (!dir) continue;
 		try {
 			const marker = readFileSync(join(dir, "rlp-location.json"), "utf8");
@@ -700,7 +700,7 @@ function fail(text: string): AgentToolResult {
  * section) when the ladder carries no bindings, so a plain ladder stays plain.
  */
 function roleBindingsSection(): string {
-	const dir = process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+	const dir = process.env.RLP_CODING_AGENT_DIR || process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".rlp", "agent");
 	const path = process.env.RLP_ORCHESTRATION
 		? resolve(process.env.RLP_ORCHESTRATION)
 		: join(dir, "orchestration.json");

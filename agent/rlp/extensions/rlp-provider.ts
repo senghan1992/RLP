@@ -34,7 +34,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-const AGENT_DIR = process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+/** RLP's own agent dir — see the note in menus.ts; the rule is identical. */
+const AGENT_DIR = process.env.RLP_CODING_AGENT_DIR || process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".rlp", "agent");
 const SETTINGS_FILE = join(AGENT_DIR, "settings.json");
 /** Live checks talk to the network; a hung endpoint must not freeze the TUI. */
 const PROBE_TIMEOUT_MS = 45_000;
@@ -54,7 +55,7 @@ type Json = Record<string, unknown>;
 function findPython(cwd: string): string | undefined {
 	const roots: string[] = [];
 	if (process.env.RLP_ROOT) roots.push(resolve(process.env.RLP_ROOT));
-	for (const dir of [process.env.RPI_CODING_AGENT_DIR, join(homedir(), ".pi", "agent")]) {
+	for (const dir of [AGENT_DIR]) {
 		if (!dir) continue;
 		try {
 			const root = (JSON.parse(readFileSync(join(dir, "rlp-location.json"), "utf8")) as { root?: string }).root;

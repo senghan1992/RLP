@@ -393,8 +393,15 @@ def test_engine_protocol() -> None:
     must be verifiable in milliseconds. A protocol bug here breaks every tool at
     once, and the failure mode would be a hang rather than an error.
     """
+    import os
     import subprocess
     import sys as _sys
+
+    # Hermetic: the engine is pointed at the repo's own ladder, so this test says
+    # nothing about whether the host has been installed. It used to read the
+    # default agent dir, which made it a test of the developer's machine.
+    repo_ladder = Path(__file__).resolve().parents[2] / "agent" / "rlp" / "orchestration.json"
+    env = {**os.environ, "RLP_ORCHESTRATION": str(repo_ladder)}
 
     requests = [
         {"id": 1, "op": "ladder", "args": {}},
@@ -404,7 +411,7 @@ def test_engine_protocol() -> None:
     payload = "\n".join(json.dumps(r) for r in requests) + "\n"
     proc = subprocess.run(
         [_sys.executable, "-m", "rlp_svc", "engine", "--no-warm"],
-        input=payload, capture_output=True, text=True, timeout=120,
+        input=payload, capture_output=True, text=True, timeout=120, env=env,
     )
     events = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
     check(events and events[0].get("event") == "ready", f"engine announces ready first: {events[:1]}")
@@ -421,7 +428,7 @@ def test_engine_protocol() -> None:
     proc = subprocess.run(
         [_sys.executable, "-m", "rlp_svc", "engine", "--no-warm"],
         input="not json\n" + json.dumps({"id": 9, "op": "ladder", "args": {}}) + "\n",
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=120, env=env,
     )
     events = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
     check(any(e.get("ok") is False and "bad JSON" in (e.get("error") or "") for e in events), "bad JSON is reported")
@@ -631,6 +638,154 @@ def test_planner_fallbacks() -> None:
         check(env["ok"] is False and "gateway 500" in env["error"], f"the failure carries both layers: {env}")
     finally:
         (mod._rlm_decompose, mod.chat, mod._policy, mod._critique_spec, orchestration.load) = original
+
+
+def test_decompose_budget() -> None:
+    """A hung gateway cannot hold a plan open for N × the timeout.
+
+    The candidate walk is a *bounded* retry. When it was not, one `decompose()`
+    took a quarter of an hour on a three-arm ladder whose first arm hung rather
+    than errored — the failure that only shows up when someone actually waits.
+    `rlm.maxTimeout` is the budget for the whole walk, shared out fairly.
+    """
+    import time as _time
+
+    from . import decompose as mod
+    from . import orchestration
+
+    original = (mod._rlm_decompose, mod.chat, mod._policy, mod._critique_spec, mod._MIN_ATTEMPT_SECONDS, orchestration.load)
+    try:
+        mod._critique_spec = lambda: ("p", "m")
+        orchestration.load = lambda: orchestration.parse(json.dumps(LADDER), "test")
+
+        # The arithmetic, on its own.
+        check(mod._attempt_timeout(None, 3) is None, "no budget configured -> the client's own default")
+        slice_all = mod._attempt_timeout(_time.monotonic() + 90, 3)
+        check(slice_all is not None and 29 <= slice_all <= 31, f"a 90s budget over 3 arms is ~30s each: {slice_all}")
+        check(mod._attempt_timeout(_time.monotonic() - 5, 3) == mod._MIN_ATTEMPT_SECONDS,
+              "an exhausted budget floors at the minimum attempt, never at zero or negative")
+
+        # A hung arm: budget 0.4s, each attempt allowed 0.2s (floor lowered for the test).
+        mod._MIN_ATTEMPT_SECONDS = 0.05
+        mod._policy = lambda: (
+            {**mod._DEFAULT_RLM, "maxTimeout": 0.4},
+            {**mod._DEFAULT_PLANNING, "critique": False, "maxRefines": 0},
+        )
+        tried: list = []
+
+        def hung(prompt, knobs, spec=None):
+            tried.append(spec)
+            _time.sleep(0.25)
+            raise RuntimeError("gateway is hanging")
+
+        mod._rlm_decompose = hung
+        mod.chat = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("plain path also down"))
+        started = _time.monotonic()
+        env = mod.decompose("do the thing")
+        elapsed = _time.monotonic() - started
+        check(env["ok"] is False, f"every arm hanging is a failure, not a hang: {env.get('error', '')[:120]}")
+        check(elapsed < 2.0, f"the walk is bounded by the budget, took {elapsed:.1f}s")
+        check(len(tried) < len(mod._planner_fallbacks()), f"the budget stopped the walk early: {len(tried)} attempt(s)")
+        check("budget" in str(env.get("error", "")) or "hanging" in str(env.get("error", "")),
+              f"the failure says why: {env.get('error', '')[:160]}")
+
+        # A per-attempt ceiling is passed down, and never exceeds the configured one.
+        seen: list = []
+
+        def records(prompt, knobs, spec=None):
+            seen.append(knobs.get("maxTimeout"))
+            return json.dumps({"tasks": TASKS})
+
+        mod._rlm_decompose = records
+        mod._policy = lambda: (
+            {**mod._DEFAULT_RLM, "maxTimeout": 90.0},
+            {**mod._DEFAULT_PLANNING, "critique": False, "maxRefines": 0},
+        )
+        env = mod.decompose("do the thing")
+        check(env["ok"], "a healthy arm still answers")
+        check(seen and 0 < seen[0] <= 90.0, f"the attempt got a slice, not the whole budget: {seen}")
+    finally:
+        (
+            mod._rlm_decompose,
+            mod.chat,
+            mod._policy,
+            mod._critique_spec,
+            mod._MIN_ATTEMPT_SECONDS,
+            orchestration.load,
+        ) = original
+
+
+def test_paths() -> None:
+    """One rule for where RLP keeps its files, and it is not pi's directory.
+
+    RLP is its own tool: a credential written by /provider must land in the same
+    place the harness reads it from, and that place is RLP's own `~/.rlp/agent`
+    unless an override says otherwise. Four modules used to derive this path
+    themselves, which is how a tool ends up with two auth.json files.
+    """
+    import os
+
+    from . import paths
+
+    saved = {k: os.environ.get(k) for k in ("RLP_CODING_AGENT_DIR", "RPI_CODING_AGENT_DIR", "RLP_HOME")}
+    try:
+        for var in saved:
+            os.environ.pop(var, None)
+        check(paths.agent_dir() == Path.home() / ".rlp" / "agent", f"the default agent dir: {paths.agent_dir()}")
+        check("pi" not in str(paths.agent_dir()).split("/"), "the default is not inside pi's ~/.pi")
+        check(paths.orchestration_json() == paths.agent_dir() / "orchestration.json", "the ladder sits in the agent dir")
+
+        os.environ["RPI_CODING_AGENT_DIR"] = "/tmp/legacy-agent"
+        check(paths.agent_dir() == Path("/tmp/legacy-agent"), "the harness's own variable is still honoured")
+
+        os.environ["RLP_CODING_AGENT_DIR"] = "/tmp/rlp-agent"
+        check(paths.agent_dir() == Path("/tmp/rlp-agent"), "RLP's own variable wins over the harness's")
+
+        os.environ["RLP_HOME"] = "/tmp/rlp-home"
+        check(paths.home() == Path("/tmp/rlp-home"), "RLP_HOME moves the data dir")
+        check(
+            paths.agent_dir() == Path("/tmp/rlp-agent"),
+            "relocating the logs does not relocate the credentials",
+        )
+
+        os.environ.pop("RLP_CODING_AGENT_DIR")
+        os.environ.pop("RPI_CODING_AGENT_DIR")
+        check(
+            paths.agent_dir() == Path.home() / ".rlp" / "agent",
+            "dropping both overrides returns to the default",
+        )
+        check("default" in paths.described() or "$" in paths.described(), f"described(): {paths.described()}")
+
+        # The four callers agree with the rule (this is the whole point).
+        from . import doctor, llm, memory, orchestration, providers
+
+        os.environ["RPI_CODING_AGENT_DIR"] = "/tmp/agree-agent"
+        for name, value in (
+            ("llm auth", llm._auth_path()),
+            ("llm models", llm._models_path()),
+            ("ladder", str(orchestration.config_path())),
+            ("providers models", str(providers.models_path())),
+            ("providers auth", str(providers.auth_path())),
+        ):
+            check(value.startswith("/tmp/agree-agent/"), f"{name} follows the agent dir: {value}")
+        # doctor must look in that directory too: under the override the extensions are
+        # absent, where the real agent dir has them — so a FAIL here proves it followed.
+        ext = next((c for c in doctor._extensions() if c["name"] == "rlp-extensions"), None)
+        check(ext is not None, "doctor has an rlp-extensions check")
+        check(
+            ext is not None and ext["status"] == "fail",
+            f"doctor checks the overridden agent dir, not the real one: {ext}",
+        )
+        check(doctor._env()[0]["name"] == "agent-dir", "doctor reports the agent dir")
+        check("agree-agent" in doctor._env()[0]["detail"], f"doctor names it: {doctor._env()[0]['detail']}")
+        check(memory.home() == Path.home() / ".rlp" or memory.home() == Path("/tmp/rlp-home"),
+              f"memory follows RLP_HOME: {memory.home()}")
+    finally:
+        for var, value in saved.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
 
 
 def test_doctor() -> None:
@@ -1095,7 +1250,7 @@ def test_decompose_normalization() -> None:
     try:
         mod._policy = lambda: (dict(mod._DEFAULT_RLM), {**mod._DEFAULT_PLANNING, "critique": False})
         mod._rlm_decompose = lambda prompt, knobs: json.dumps({"tasks": [{"id": "t1"}]})  # missing fields
-        mod._plain_llm_decompose = lambda request, context: [dict(TASKS[0])]
+        mod._plain_llm_decompose = lambda request, context, timeout=None: [dict(TASKS[0])]
         env = mod.decompose("do x")
         check(env["ok"] and env["result"]["engine"] == "fallback-plain-llm",
               f"an unusable RLM DAG falls back instead of failing: {env.get('result', {}).get('engine')}")
@@ -1264,6 +1419,8 @@ def main() -> None:
         test_version_consistency,
         test_chat_contract,
         test_planner_fallbacks,
+        test_decompose_budget,
+        test_paths,
         test_doctor,
         tests_providers.test_providers_store,
         tests_providers.test_providers_probe,

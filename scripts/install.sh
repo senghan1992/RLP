@@ -93,8 +93,11 @@ fi
 if [ ! -f "$RPI_BIN" ]; then
   cat > "$RPI_BIN" <<'WRAPPER'
 #!/bin/sh
-RPI_DEFAULT_MODEL="${RPI_DEFAULT_MODEL:-agnes/agnes-3.0-flash}"
-export RPI_DEFAULT_MODEL
+# Regenerated fallback: scripts/rpi-bin is the real one (it also derives the
+# session default from the ladder's brain). This copy only exists so a tarball
+# export that lost the exec bit still boots.
+RPI_CODING_AGENT_DIR="${RPI_CODING_AGENT_DIR:-${RLP_CODING_AGENT_DIR:-$HOME/.rlp/agent}}"
+export RPI_CODING_AGENT_DIR
 exec node __RLP_ROOT__/fork/pi/packages/coding-agent/dist/bundle/cli.js "$@"
 WRAPPER
   sed -i "s|__RLP_ROOT__|$ROOT|g" "$RPI_BIN"
@@ -135,19 +138,38 @@ from huggingface_hub import snapshot_download
 snapshot_download('convaiinnovations/laya', allow_patterns=['rl_agent_config.json','model.safetensors','tokenizer/*','encoder/*'])
 " 2>/dev/null || echo "[rlp] laya checkpoint download skipped (offline, or already cached)"
 
-# --- 3. Harness slash extensions + ladder (the local plane needs these) -------
+# --- 3. Harness extensions + skills + ladder, in RLP's own agent dir --------
 # The /rlp* commands are dropped-in pi extensions, not a fork patch, so they
-# install and update without a rebuild. The directory is shared with unrelated,
-# optional extensions (myviking, …): RLP records exactly which files it owns so
-# /commands and `rlp doctor` can label the rest optional instead of implying a
-# dependency.
-PI_AGENT_DIR="${RPI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-mkdir -p "$PI_AGENT_DIR/extensions"
+# install and update without a rebuild. Everything goes to RLP's own agent dir
+# (`~/.rlp/agent`), never pi's `~/.pi`: RLP is its own tool, and the fork's
+# `piConfig.configDir` points here too, so the two agree by construction.
+# RLP records exactly which files it owns so /commands and `rlp doctor` can
+# label the rest optional instead of implying a dependency.
+RLP_AGENT_DIR="${RLP_CODING_AGENT_DIR:-${RPI_CODING_AGENT_DIR:-$HOME/.rlp/agent}}"
+mkdir -p "$RLP_AGENT_DIR"
+
+# Upgrade path for an install made before RLP had its own directory: copy the
+# credentials pi and RLP used to share, so an existing user is not asked to
+# reconnect every provider. Copy, never move — the harness keeps working, and
+# the user can delete the copies whenever they like. RLP_NO_MIGRATE=1 skips it.
+if [ -z "${RLP_NO_MIGRATE:-}" ] && [ ! -f "$RLP_AGENT_DIR/auth.json" ] && [ -f "$HOME/.pi/agent/auth.json" ]; then
+  echo "[rlp] migrating credentials from $HOME/.pi/agent (copy, not move)"
+  for f in auth.json models.json; do
+    if [ -f "$HOME/.pi/agent/$f" ]; then
+      cp "$HOME/.pi/agent/$f" "$RLP_AGENT_DIR/$f"
+      chmod 600 "$RLP_AGENT_DIR/$f" 2>/dev/null || true
+      echo "[rlp]   $f -> $RLP_AGENT_DIR/$f"
+    fi
+  done
+  echo "[rlp]   (RLP_NO_MIGRATE=1 skips this; /provider connects one from scratch)"
+fi
+
+mkdir -p "$RLP_AGENT_DIR/extensions"
 RLP_EXT_LIST=""
 for ext in "$ROOT"/agent/rlp/extensions/*.ts; do
   [ -e "$ext" ] || continue
   name=$(basename "$ext")
-  cp "$ext" "$PI_AGENT_DIR/extensions/"
+  cp "$ext" "$RLP_AGENT_DIR/extensions/"
   echo "[rlp] installed extension $name"
   RLP_EXT_LIST="${RLP_EXT_LIST}${RLP_EXT_LIST:+, }\"$name\""
 done
@@ -155,23 +177,23 @@ done
 # surface — the local plane never had them installed, so /commands advertised
 # whatever happened to be in the shared skills dir and RLP's own were missing.
 RLP_SKILL_LIST=""
-mkdir -p "$PI_AGENT_DIR/skills"
+mkdir -p "$RLP_AGENT_DIR/skills"
 for skill in "$ROOT"/agent/rlp/skills/*/SKILL.md; do
   [ -e "$skill" ] || continue
   name=$(basename "$(dirname "$skill")")
-  mkdir -p "$PI_AGENT_DIR/skills/$name"
-  cp "$skill" "$PI_AGENT_DIR/skills/$name/SKILL.md"
+  mkdir -p "$RLP_AGENT_DIR/skills/$name"
+  cp "$skill" "$RLP_AGENT_DIR/skills/$name/SKILL.md"
   echo "[rlp] installed skill $name"
   RLP_SKILL_LIST="${RLP_SKILL_LIST}${RLP_SKILL_LIST:+, }\"$name\""
 done
-printf '{\n  "root": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
-  "$ROOT" "$RLP_EXT_LIST" "$RLP_SKILL_LIST" > "$PI_AGENT_DIR/rlp-location.json"
+printf '{\n  "root": "%s",\n  "agentDir": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
+  "$ROOT" "$RLP_AGENT_DIR" "$RLP_EXT_LIST" "$RLP_SKILL_LIST" > "$RLP_AGENT_DIR/rlp-location.json"
 
-if [ -f "$PI_AGENT_DIR/orchestration.json" ] && [ -z "${RLP_ORCH_FORCE:-}" ]; then
-  echo "[rlp] kept existing $PI_AGENT_DIR/orchestration.json (RLP_ORCH_FORCE=1 to overwrite)"
+if [ -f "$RLP_AGENT_DIR/orchestration.json" ] && [ -z "${RLP_ORCH_FORCE:-}" ]; then
+  echo "[rlp] kept existing $RLP_AGENT_DIR/orchestration.json (RLP_ORCH_FORCE=1 to overwrite)"
 else
-  cp "$ROOT/agent/rlp/orchestration.json" "$PI_AGENT_DIR/orchestration.json"
-  echo "[rlp] installed orchestration ladder to $PI_AGENT_DIR/orchestration.json"
+  cp "$ROOT/agent/rlp/orchestration.json" "$RLP_AGENT_DIR/orchestration.json"
+  echo "[rlp] installed orchestration ladder to $RLP_AGENT_DIR/orchestration.json"
 fi
 
 # --- 4. Omnigent plane (optional) --------------------------------------------
@@ -181,7 +203,7 @@ if have omni; then
   cp -r "$ROOT/agent/rlp" "$HOME/.omnigent/agents/rlp"
   # Fill the spec's placeholders with this checkout's real paths, so the public
   # repo carries no host-specific absolute paths.
-  sed -i "s|__RLP_PYTHON__|$PY|g; s|__RLP_PI_AUTH__|$HOME/.pi/agent/auth.json|g; s|__RLP_PI_MODELS__|$HOME/.pi/agent/models.json|g" \
+  sed -i "s|__RLP_PYTHON__|$PY|g; s|__RLP_PI_AUTH__|$RLP_AGENT_DIR/auth.json|g; s|__RLP_PI_MODELS__|$RLP_AGENT_DIR/models.json|g" \
     "$HOME/.omnigent/agents/rlp/config.yaml"
   CFG="$HOME/.omnigent/config.yaml"
   if [ -f "$CFG" ] && grep -q "harness:" "$CFG" 2>/dev/null; then

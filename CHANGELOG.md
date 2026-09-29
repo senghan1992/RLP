@@ -8,6 +8,22 @@ offline suite fails if they drift.
 
 ## Unreleased
 
+### Changed
+
+- **RLP keeps its own state under `~/.rlp`, not pi's `~/.pi`.** The fork's
+  `piConfig.configDir` is `.rlp` and `paths.py` is the single rule every module
+  and extension resolves the agent dir with (`RLP_CODING_AGENT_DIR`, then the
+  harness's `RPI_CODING_AGENT_DIR`, then `~/.rlp/agent`). Settings, credentials,
+  models, sessions, extensions, skills and the ladder all move together, so RLP
+  no longer reads or writes another tool's directory — and a pi extension is no
+  longer loaded by `rlp` (copy or symlink one into `~/.rlp/agent/extensions` to
+  use it in both). `install.sh` copies an existing pi credential store into the
+  new directory on upgrade (never moves it; `RLP_NO_MIGRATE=1` skips it), and
+  `rlp doctor` prints which directory it resolved.
+- Four modules derived the agent dir themselves; they now share `paths.py`, so
+  the engine, the extensions and the harness cannot disagree about where
+  `auth.json` is.
+
 ### Added
 
 - **`/setup`** — the guided first run, in one flow: doctor → endpoints (and the
@@ -39,6 +55,32 @@ offline suite fails if they drift.
 - `SECURITY.md`, describing the credential model and what a dispatch can do.
 
 ### Fixed
+
+- **The completion budgets were sized for models that do not think.** Measured
+  against the host gateway: one DAG request put 1968 *reasoning* tokens inside a
+  2048-token budget, so a slightly longer train of thought truncates the answer
+  to nothing and surfaces as "the model returned no JSON". `llm` now names the
+  budgets (`DAG_TOKENS` 8192 for the decomposer, critic and the RLM call,
+  `VERDICT_TOKENS` 1500 for the verifier, `JSON_LINE_TOKENS` 1024 for triage and
+  routing) and every caller uses one. Both decomposer paths pass them down; the
+  RLM library's own default was the same too-small number.
+- **A hung gateway can no longer hold a plan open for the arm count times the
+  timeout.** Following the candidate-arm walk above, `decompose` took 15 minutes
+  on a three-arm ladder whose arms hung instead of erroring (found by running a
+  fresh install and waiting). `rlm.maxTimeout` is now the budget for the whole
+  walk — shared fairly across the candidate arms, with the last quarter reserved
+  for the plain-LLM contingency — so the same call returns in 226 s with a usable
+  DAG. A per-attempt stop is a stall in disguise: it is bounded only by the
+  ladder's length.
+- **`rlp doctor` no longer guesses which files RLP ships.** The expected extension
+  and skill lists are read from the checkout this engine belongs to, instead of a
+  literal list that went stale the moment a fourth extension was added (a fresh
+  install was told that *three* files were installed while the fourth was checked
+  by nothing). It also warns when the install marker records a file this version
+  does not ship.
+- **The slash index listed RLP's skills twice.** The same five skills exist in
+  RLP's agent dir and in the omnigent agent spec (the REPL loads them from
+  there); the index now lists a name once.
 
 - **A plan can no longer be ended by one unhelpful arm.** The decomposer walked
   a single model; on a gateway that answers with an empty completion it failed
@@ -82,7 +124,7 @@ reading a file.
 - `rlp` — the agent, triaging every request; `rlp plan | triage | decompose |
   route | replan | verify | ladder | roster | config | memory | doctor |
   serve | update`
-- the orchestration ladder (`~/.pi/agent/orchestration.json`) as the single
+- the orchestration ladder (`~/.rlp/agent/orchestration.json`) as the single
   source for the brain, the worker arms, role bindings, the gate, the RLM knobs
   and the planning policy
 - critique + repair of the DAG, recursive re-plan of a failed node, structured

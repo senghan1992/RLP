@@ -27,7 +27,7 @@ flowchart TB
   CLI["rlp (단일 진입점)"]
   CLI -->|plan/triage/route/ladder/doctor| SVC
   CLI -->|그 외 인자 (orchestrator)| SRV
-  subgraph host["호스트 (~/.omnigent, ~/.pi)"]
+  subgraph host["호스트 (~/.omnigent, ~/.rlp)"]
     subgraph omnigent["omnigent 0.14 — 오케스트레이션 평면"]
       SRV[server :6767<br/>세션 상태·웹UI]
       RUN[runner<br/>세션별 실행기]
@@ -57,7 +57,7 @@ flowchart TB
       RLM[("RLM engine<br/>qwen3.8-max 게이트웨이")]
     end
 
-    LADDER["orchestration.json (단일 소스)<br/>brain=agnes · 암 우선순위<br/>agnes(DEFAULT,벌크) → qwen-fast → deepseek<br/>escalateBelow=0.55 · crossVendor<br/>available:false → 라우터 roster에서 제외"]
+    LADDER["orchestration.json (단일 소스)<br/>~/.rlp/agent/ 에 위치<br/>brain=agnes · 암 우선순위<br/>agnes(DEFAULT,벌크) → qwen-fast → deepseek<br/>escalateBelow=0.55 · crossVendor<br/>available:false → 라우터 roster에서 제외"]
 
     WK1["pi 워커 #1<br/>rpi+agnes<br/>subtract+테스트"]
     WK2["pi 워커 #2<br/>rpi+qwen-fast<br/>USAGE.md"]

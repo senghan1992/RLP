@@ -1,7 +1,9 @@
 """Provider config + raw chat-completion client.
 
-Reads ~/.pi/agent/auth.json + ~/.pi/agent/models.json (paths overridable via
-RLP_PI_AUTH / RLP_PI_MODELS). No dependency on rlm's client classes.
+Reads `<agent dir>/auth.json` + `<agent dir>/models.json` — RLP's own
+`~/.rlp/agent` unless `RLP_CODING_AGENT_DIR` / `RPI_CODING_AGENT_DIR` says
+otherwise (see `paths.py`), with `RLP_PI_AUTH` / `RLP_PI_MODELS` overriding the
+two files individually. No dependency on rlm's client classes.
 """
 from __future__ import annotations
 
@@ -11,18 +13,31 @@ from pathlib import Path
 
 import httpx
 
+from . import paths
+
 DECOMP_PROVIDER = "qwen-token-plan"
 DECOMP_MODEL = "qwen3.8-max"
 ROUTE_PROVIDER = "qwen-token-plan"
 ROUTE_MODEL = "deepseek-v4.1-flash"
 
+#: Completion budgets, in tokens. A reasoning model spends a large part of its
+#: budget *thinking* before it writes anything: measured against the host
+#: gateway, one DAG request put 1968 reasoning tokens inside a 2048-token
+#: budget. A budget sized for a non-reasoning model therefore truncates the
+#: answer to nothing, which reaches the caller as "the model returned no JSON"
+#: — the least actionable sentence available. These are ceilings, not targets:
+#: the cost of headroom is zero, and the cost of too little is a failed plan.
+JSON_LINE_TOKENS = 1024  # triage, routing: one short JSON object
+VERDICT_TOKENS = 1500  # a verifier verdict, with room to think first
+DAG_TOKENS = 8192  # a 2-12 node DAG, or a critic returning a corrected one
+
 
 def _auth_path() -> str:
-    return os.environ.get("RLP_PI_AUTH", str(Path.home() / ".pi" / "agent" / "auth.json"))
+    return os.environ.get("RLP_PI_AUTH") or str(paths.agent_dir() / "auth.json")
 
 
 def _models_path() -> str:
-    return os.environ.get("RLP_PI_MODELS", str(Path.home() / ".pi" / "agent" / "models.json"))
+    return os.environ.get("RLP_PI_MODELS") or str(paths.agent_dir() / "models.json")
 
 
 def _provider_key(provider: str) -> str:
@@ -73,8 +88,13 @@ def chat(
     messages: list[dict[str, str]],
     max_tokens: int = 2048,
     temperature: float = 0.0,
+    timeout: float = 120.0,
 ) -> str:
     """Plain OpenAI-compatible chat-completions call. Returns the assistant text.
+
+    `timeout` is the whole-request ceiling in seconds. It is a parameter because
+    the callers that walk several candidate arms share one budget between them:
+    a hung gateway must not be able to hold a plan open for N × 120 s.
 
     Raises `RuntimeError` when the endpoint answers without any text. That case
     used to return `""`, which every caller then reported as "the model returned
@@ -96,7 +116,7 @@ def chat(
             "max_tokens": max_tokens,
             "temperature": temperature,
         },
-        timeout=120.0,
+        timeout=timeout,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -121,6 +141,7 @@ def chat_first(
     specs: list[tuple[str, str]],
     messages: list[dict[str, str]],
     chat_fn=None,
+    timeout: float | None = None,
     **kwargs,
 ) -> tuple[str, tuple[str, str]]:
     """First real reply from an ordered list of `(provider, model)` candidates.
@@ -131,6 +152,11 @@ def chat_first(
     makes "never stall" true rather than aspirational. Returns
     `(text, spec_used)` so a caller can record which arm carried it.
 
+    `timeout` is the per-candidate ceiling. A caller walking N candidates with a
+    budget shares it out before calling (see `decompose._attempt_timeout`): the
+    point of a candidate list is a *bounded* retry, and N × the single-call
+    timeout is not bounded in any sense that matters.
+
     `chat_fn` is the client to call, defaulting to this module's `chat`; a caller
     that has its own seam (the decomposer stubs one for the offline suite) passes
     it rather than being reached through two different patch points.
@@ -139,7 +165,8 @@ def chat_first(
     errors: list[str] = []
     for spec in specs:
         try:
-            return send(*spec, messages=messages, **kwargs), spec
+            extra = {"timeout": timeout} if timeout is not None else {}
+            return send(*spec, messages=messages, **extra, **kwargs), spec
         except Exception as e:  # noqa: BLE001 - each candidate is reported, not raised
             errors.append(f"{spec[0]}/{spec[1]}: {str(e)[:160]}")
     raise RuntimeError("every candidate model failed — " + "; ".join(errors))

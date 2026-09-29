@@ -20,11 +20,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import paths
+
 KINDS = ("note", "decision", "pitfall", "artifact", "blocked")
 
 
 def home() -> Path:
-    return Path(os.environ.get("RLP_HOME") or (Path.home() / ".rlp"))
+    """`$RLP_HOME`, else `~/.rlp` — the same rule the run ledgers use."""
+    return paths.home()
 
 
 def repo_root(cwd: str | None = None) -> Path:

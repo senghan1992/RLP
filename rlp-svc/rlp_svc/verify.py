@@ -18,7 +18,7 @@ import os
 from typing import Any
 
 from . import orchestration as orch
-from .llm import _split_spec, chat, route_spec
+from .llm import VERDICT_TOKENS, _split_spec, chat, route_spec
 
 VERIFY_PROMPT = """Return raw JSON only — the first character of your reply must be {{. No prose, no code fences.
 You are an independent verifier. Decide whether the work below meets its acceptance contract.
@@ -73,7 +73,7 @@ def _spec(avoid_family: str) -> tuple[str, str, str]:
 
 
 def _one(provider: str, model: str, prompt: str) -> dict:
-    text = chat(provider, model, messages=[{"role": "user", "content": prompt}], max_tokens=500, temperature=0.7)
+    text = chat(provider, model, messages=[{"role": "user", "content": prompt}], max_tokens=VERDICT_TOKENS, temperature=0.7)
     start = text.find("{")
     if start < 0:
         raise ValueError("no JSON in verifier reply")

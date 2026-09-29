@@ -85,9 +85,10 @@ def rlp_triage(request: str, context: str = "") -> str:
 def rlp_orchestration() -> str:
     """The resolved RLP orchestration ladder (brain + worker model arms + routing).
 
-    Reads $RLP_ORCHESTRATION or ~/.pi/agent/orchestration.json — the same file
-    the harness renders into the brain's system prompt. Returns a JSON envelope
-    with the ladder, or {"ok": false, "error": ...} when nothing is installed.
+    Reads $RLP_ORCHESTRATION or <RLP agent dir>/orchestration.json (RLP's own
+    `~/.rlp/agent` by default) — the same file the harness renders into the
+    brain's system prompt. Returns a JSON envelope with the ladder, or
+    {"ok": false, "error": ...} when nothing is installed.
     """
     try:
         config = orch_mod.load()

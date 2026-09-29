@@ -2,7 +2,9 @@
 system prompt, read here so the router's roster and the brain's prompt cannot
 drift apart.
 
-Path: `$RLP_ORCHESTRATION` when set, else `~/.pi/agent/orchestration.json`.
+Path: `$RLP_ORCHESTRATION` when set, else `<RLP agent dir>/orchestration.json` —
+`~/.rlp/agent` by default. RLP does not read pi's `~/.pi`: see `paths.py` for
+the one rule the harness, the extensions and this module share.
 """
 from __future__ import annotations
 
@@ -11,20 +13,20 @@ import os
 from pathlib import Path
 from typing import Any
 
+from . import paths
+
 
 def config_path() -> Path:
     """`$RLP_ORCHESTRATION`, else `<agent dir>/orchestration.json`.
 
-    The agent dir is the harness's `RPI_CODING_AGENT_DIR` (its `APP_NAME`-
-    derived variable), defaulting to `~/.pi/agent` — the same resolution the
-    harness uses, so both sides read one file.
+    The agent dir is RLP's own `~/.rlp/agent` (`RLP_CODING_AGENT_DIR`, or the
+    fork's `RPI_CODING_AGENT_DIR`, relocate it) — the same file the harness
+    renders into the prompt, so both sides read one file.
     """
     override = os.environ.get("RLP_ORCHESTRATION")
     if override:
         return Path(override).expanduser()
-    agent_dir = os.environ.get("RPI_CODING_AGENT_DIR")
-    base = Path(agent_dir).expanduser() if agent_dir else Path.home() / ".pi" / "agent"
-    return base / "orchestration.json"
+    return paths.orchestration_json()
 
 
 def _require(condition: bool, message: str) -> None:

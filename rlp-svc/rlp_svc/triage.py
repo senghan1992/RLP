@@ -27,7 +27,7 @@ import re
 from typing import Any
 
 from . import orchestration as orch
-from .llm import chat, route_spec
+from .llm import JSON_LINE_TOKENS, chat, route_spec
 
 MODES = ("direct", "orchestrate")
 
@@ -169,7 +169,7 @@ Context: {(context or '')[:600]}
 direct = {_CRITERIA['direct']}
 orchestrate = {_CRITERIA['orchestrate']}
 Respond ONLY with JSON: {{"mode": "direct" or "orchestrate", "reason": <one short sentence>}}"""
-    text = chat(*route_spec(), messages=[{"role": "user", "content": prompt}], max_tokens=256)
+    text = chat(*route_spec(), messages=[{"role": "user", "content": prompt}], max_tokens=JSON_LINE_TOKENS)
     data = json.loads(text.split("```")[1].split("\n")[1]) if "```" in text else json.loads(text)
     mode = data.get("mode")
     if mode not in MODES:

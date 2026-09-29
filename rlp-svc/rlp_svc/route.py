@@ -11,7 +11,7 @@ import os
 import threading
 from typing import Any
 
-from .llm import chat, route_spec
+from .llm import JSON_LINE_TOKENS, chat, route_spec
 
 ESCALATE_THRESHOLD = 0.55
 
@@ -90,7 +90,7 @@ Domain: {domain}
 Roster:
 {roster_text}
 Respond ONLY with JSON: {{"agent": <id>, "reason": <one short sentence>}}"""
-    text = chat(*route_spec(), messages=[{"role": "user", "content": prompt}], max_tokens=256)
+    text = chat(*route_spec(), messages=[{"role": "user", "content": prompt}], max_tokens=JSON_LINE_TOKENS)
     data = json.loads(text.split("```")[1].split("\n")[1]) if "```" in text else json.loads(text)
     return {
         "agent": data["agent"],

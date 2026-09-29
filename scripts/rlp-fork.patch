@@ -6,8 +6,9 @@ index c6c7a9d11..3975eb0da 100644
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"type": "module",
  	"piConfig": {
+-		"configDir": ".pi"
 +		"name": "rpi",
- 		"configDir": ".pi"
++		"configDir": ".rlp"
  	},
  	"bin": {
 diff --git a/packages/coding-agent/src/core/package-manager.ts b/packages/coding-agent/src/core/package-manager.ts
@@ -460,8 +461,8 @@ index c7bb2afdc..6d924dce3 100644
 +	 * Default provider for a new session.
 +	 *
 +	 * `RPI_DEFAULT_MODEL`'s provider half seeds a managed worker session so the
-+	 * `rpi` launcher pins its own gateway default without editing the shared
-+	 * `~/.pi/agent/settings.json` that polly and bare `pi` also read. An
++	 * `rpi` launcher pins its own gateway default without editing the saved
++	 * default in this tool's own `~/.rlp/agent/settings.json`. An
 +	 * interactive session keeps the user's saved default; an explicit `--model`
 +	 * still wins (see `resolveModel`).
 +	 */

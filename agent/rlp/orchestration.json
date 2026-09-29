@@ -48,7 +48,7 @@
   },
   "rlm": {
     "maxDepth": 1,
-    "maxIterations": 8,
+    "maxIterations": 3,
     "maxConcurrentSubcalls": 4,
     "maxTimeout": 300
   },

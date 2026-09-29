@@ -22,8 +22,14 @@ the orchestrating brain and the headless planner read the same file.
 ## The three surfaces
 
 RLP is one decision engine wearing three faces. All three read the same ladder
-(`~/.pi/agent/orchestration.json`) and none of them can name a model the
+(`~/.rlp/agent/orchestration.json`) and none of them can name a model the
 ladder does not contain.
+
+Everything RLP owns lives under `~/.rlp`: the harness state (settings,
+credentials, models, sessions, extensions, skills, the ladder) in
+`~/.rlp/agent/`, run ledgers in `~/.rlp/runs/`, project knowledge in
+`~/.rlp/memory/`. pi's `~/.pi` belongs to a different tool and RLP never reads or
+writes it — `RLP_CODING_AGENT_DIR` moves the agent dir, `RLP_HOME` the data.
 
 | Surface | Entry | What it is for |
 |---|---|---|
@@ -149,6 +155,26 @@ now walks its candidates in order and records which one answered (`planner`,
   by `planning.recursiveDepth`. This is RLM's recursion mapped onto the executor.
 - **RLM knobs.** `rlm.maxDepth|maxIterations|maxConcurrentSubcalls|maxBudget|`
   `maxTimeout` are passed through, so recursion is configured, not accidental.
+  `maxTimeout` is the budget for the *whole* decomposition: the candidate arms
+  (configured planner → the ladder's DEFAULT arm → the fast arm, then the same
+  list for the plain-LLM contingency) share it, with the last quarter reserved
+  for the contingency. Per attempt, a hung arm could hold a plan open for the arm
+  count times the timeout — 15 minutes on a three-arm ladder, which is a stall,
+  not a decision. `maxIterations` bounds the RLM loop, which costs ~45 s per
+  iteration on the host gateway, so it is 3 rather than the library's 30: a
+  planning prompt that needs more than three is a prompt problem, not a
+  recursion problem.
+
+  Worth knowing when reading a plan: on the host gateway the *plain-LLM*
+  contingency is the reliable path, not the RLM one. RLM frames its input as a
+  context to explore with a REPL and asks for the answer at the end, while
+  `DECOMPOSE_PROMPT` hands it a request and asks for a DAG immediately; the two
+  framings disagree, so the RLM loop sometimes spends its iterations exploring
+  and then reports "no usable tasks" (or, at three iterations, invents a DAG
+  about the wrong question) and the contingency produces the DAG that is used.
+  The reported `engine` and `planner_fallback` fields say which happened; fixing
+  the framing — RLM as the engine, the request as a prompt it can act on — is an
+  open question, not a completed one.
 - **Planner-side models are ladder roles.** `plan`, `critique` and `verify` name
   the models the planner itself calls; they resolve like worker roles
   (`RLP_DECOMPOSE_MODEL`/`RLP_CRITIQUE_MODEL`/`RLP_VERIFY_MODEL` override the
@@ -375,20 +401,24 @@ died.
 ### Optional integrations
 
 RLP depends on nothing outside its own checkout: the fork, `rlp-svc`, the ladder
-and its three dropped-in extensions. The harness agent dir is shared with
-extensions RLP does not own — `myviking.ts` (a knowledge library), and whatever
-else the user installed. Those are optional by construction: RLP records its own
-file list in `rlp-location.json`, `/commands` shows them under a separate
-*optional — not part of RLP* heading, and `rlp doctor` verifies only RLP's own
-and never fails on the others. No tool RLP ships names a third-party extension,
-so removing myviking cannot change a plan or a dispatch.
+and its four dropped-in extensions. They are installed into RLP's own agent dir,
+so a pi extension lives in pi's `~/.pi/agent/extensions` and is never loaded by
+`rlp` — and vice versa. To use one in both, copy or symlink it into
+`~/.rlp/agent/extensions`. RLP records its own file list in `rlp-location.json`,
+`/commands` shows anything else under a separate *optional — not part of RLP*
+heading, and `rlp doctor` verifies only RLP's own and never fails on the others.
+No tool RLP ships names a third-party extension, so removing myviking cannot
+change a plan or a dispatch.
 
 ### Environment knobs
 
 | Variable | Effect |
 |---|---|
 | `RLP_ORCHESTRATION` | ladder path, overriding `<agent dir>/orchestration.json` |
-| `RPI_CODING_AGENT_DIR` | harness agent dir (moves ladder, sessions, skills together) |
+| `RLP_CODING_AGENT_DIR` | RLP's agent dir (moves settings, credentials, models, sessions, skills, ladder together) |
+| `RPI_CODING_AGENT_DIR` | the same, under the harness's own name — still honoured |
+| `RLP_HOME` | run ledgers and project memory (default `~/.rlp`) — not the agent dir |
+| `RLP_NO_MIGRATE=1` | do not copy pi's credentials into `~/.rlp/agent` on install |
 | `RLP_IDENTITY` | `rlp` = brain (contract+tools+engine); unset/`worker` = bare harness |
 | `RPI_DEFAULT_MODEL` | the `rpi` session default, beating saved settings |
 | `RLP_DECOMPOSE_MODEL` | decomposer model, `provider/model` |
