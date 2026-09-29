@@ -1,0 +1,22 @@
+[project]
+name = "rlp-svc"
+version = "0.2.0"
+description = "RLP decision engine: laya triage gate, RLM decomposition, laya routing, headless plan, doctor. MCP server + CLI + library."
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1,<2",
+    "rlms>=0.1",
+    "laya>=0.3",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+# `rlp-svc` is the tool's own CLI; `rlp <subcommand>` in scripts/rlp forwards here.
+rlp-svc = "rlp_svc.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["rlp_svc*"]

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline-tests:
+    name: engine (offline suite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rlp-svc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install the engine's only test-time dependency
+        run: pip install httpx
+      - name: run the offline suite (stubbed models, milliseconds)
+        env:
+          # Point the engine at the repo's own ladder so the tests are hermetic.
+          RLP_ORCHESTRATION: ${{ github.workspace }}/agent/rlp/orchestration.json
+        run: python -m rlp_svc.tests
+
+  shell-syntax:
+    name: shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: POSIX sh syntax check
+        run: |
+          for f in scripts/rlp scripts/rpi-bin scripts/rlp-launch scripts/install.sh scripts/selftest.sh; do
+            sh -n "$f" && echo "ok $f"
+          done

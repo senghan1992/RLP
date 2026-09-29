@@ -1,0 +1,915 @@
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index c6c7a9d11..3975eb0da 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -4,6 +4,7 @@
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"type": "module",
+ 	"piConfig": {
++		"name": "rpi",
+ 		"configDir": ".pi"
+ 	},
+ 	"bin": {
+diff --git a/packages/coding-agent/src/core/package-manager.ts b/packages/coding-agent/src/core/package-manager.ts
+index be42365a9..dd625366b 100644
+--- a/packages/coding-agent/src/core/package-manager.ts
++++ b/packages/coding-agent/src/core/package-manager.ts
+@@ -480,6 +480,23 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
+ 
+ 	return skillDirs;
+ }
++/** Collect `~/.omnigent/agents/<agent>/skills` dirs that exist on this host. */
++function collectOmnigentAgentSkillDirs(): string[] {
++	const agentsDir = join(getHomeDir(), ".omnigent", "agents");
++	const dirs: string[] = [];
++	try {
++		for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
++			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
++			const skillsDir = join(agentsDir, entry.name, "skills");
++			if (existsSync(skillsDir)) {
++				dirs.push(skillsDir);
++			}
++		}
++	} catch {
++		// No ~/.omnigent/agents dir — fine.
++	}
++	return dirs;
++}
+ 
+ function collectAutoPromptEntries(dir: string): string[] {
+ 	const entries: string[] = [];
+@@ -2516,19 +2533,40 @@ export class DefaultPackageManager implements PackageManager {
+ 			globalBaseDir,
+ 		);
+ 
+-		// User skills from ~/.agents/ (with its own baseDir)
+-		const userAgentsBaseDir = dirname(userAgentsSkillsDir);
+-		const userAgentsMetadata: PathMetadata = {
+-			...userMetadata,
+-			baseDir: userAgentsBaseDir,
+-		};
+-		addResources(
+-			"skills",
+-			collectAutoSkillEntries(userAgentsSkillsDir, "agents"),
+-			userAgentsMetadata,
+-			userOverrides.skills,
+-			userAgentsBaseDir,
+-		);
++		// User skills from ~/.agents/ (shared across agents, with its own baseDir)
++		if (existsSync(userAgentsSkillsDir)) {
++			const userAgentsBaseDir = dirname(userAgentsSkillsDir);
++			const userAgentsMetadata: PathMetadata = {
++				...userMetadata,
++				baseDir: userAgentsBaseDir,
++			};
++			addResources(
++				"skills",
++				collectAutoSkillEntries(userAgentsSkillsDir, "agents"),
++				userAgentsMetadata,
++				userOverrides.skills,
++				userAgentsBaseDir,
++			);
++		}
++
++		// User skills from ~/.omnigent/agents/*/skills/ (RLP fork). Additive: the
++		// stock ~/.agents/skills discovery above must keep working, so a host
++		// running both conventions sees both sets.
++		for (const omnigentSkillsDir of collectOmnigentAgentSkillDirs()) {
++			if (resolve(omnigentSkillsDir) === resolve(userAgentsSkillsDir)) continue;
++			const omnigentBaseDir = dirname(dirname(omnigentSkillsDir)); // .../agents/<name>
++			const omnigentMetadata: PathMetadata = {
++				...userMetadata,
++				baseDir: omnigentBaseDir,
++			};
++			addResources(
++				"skills",
++				collectAutoSkillEntries(omnigentSkillsDir, "agents"),
++				omnigentMetadata,
++				userOverrides.skills,
++				omnigentBaseDir,
++			);
++		}
+ 
+ 		addResources(
+ 			"prompts",
+diff --git a/packages/coding-agent/src/core/rlp-orchestration.ts b/packages/coding-agent/src/core/rlp-orchestration.ts
+new file mode 100644
+index 000000000..d493b2a00
+--- /dev/null
++++ b/packages/coding-agent/src/core/rlp-orchestration.ts
+@@ -0,0 +1,302 @@
++/**
++ * RLP orchestration config — the model ladder the orchestrator plans and
++ * dispatches against.
++ *
++ * Loaded from `$RLP_ORCHESTRATION` when set, else `<agentDir>/orchestration.json`.
++ * When present it is rendered into its own `rlp_orchestration` system-prompt
++ * section, so the routing ladder is configuration rather than prose baked into
++ * an agent persona. Absent config = no section, and the harness behaves like
++ * plain pi.
++ *
++ * Shape:
++ *   {
++ *     "brain": "agnes/agnes-3.0-flash",
++ *     "workers": [
++ *       { "id": "pi", "harness": "pi",
++ *         "models": [
++ *           { "model": "qwen-token-plan/qwen3.8-flash",
++ *             "roles": ["explore", "docs", "review"], "when": "fast fan-out" }
++ *         ] }
++ *     ],
++ *     "routing": { "escalateBelow": 0.55, "maxDispatchesPerTurn": 4 },
++ *     "review": { "crossVendor": true }
++ *   }
++ */
++
++import { existsSync, readFileSync, statSync } from "node:fs";
++import { isAbsolute, resolve } from "node:path";
++import { getAgentDir } from "../config.ts";
++
++export interface OrchestrationModel {
++	/** `provider/model`, exactly as passed to `args.model` on a dispatch. */
++	model: string;
++	/** Task domains this model is preferred for. */
++	roles: string[];
++	/** One line of guidance: when to reach for this arm. */
++	when: string;
++}
++
++export interface OrchestrationWorker {
++	/** Worker/agent id, e.g. `pi`, `claude_code`. */
++	id: string;
++	/** Harness the worker boots on, e.g. `pi`, `claude-native`. */
++	harness?: string;
++	/**
++	 * Whether this host can currently serve the worker. Omitted means true.
++	 * An unavailable worker is kept in the ladder (so the operator can see and
++	 * re-enable it) but is never a routing target.
++	 */
++	available?: boolean;
++	/** Why the worker is unavailable, in the operator's words. */
++	availabilityNote?: string;
++	/** Model ladder for this worker, most-preferred first. */
++	models: OrchestrationModel[];
++}
++
++export interface OrchestrationConfig {
++	/** Provider/model the orchestrator itself runs on. */
++	brain: string;
++	workers: OrchestrationWorker[];
++	routing: {
++		/** Re-route when the router's confidence falls below this. */
++		escalateBelow?: number;
++		/** Cap on dispatches per turn. */
++		maxDispatchesPerTurn?: number;
++	};
++	review: {
++		/** Review nodes must run on a different vendor than the implementer. */
++		crossVendor: boolean;
++	};
++}
++
++const CONFIG_FILE_NAME = "orchestration.json";
++
++/** Path the config is read from, for display and diagnostics. */
++export function orchestrationConfigPath(): string {
++	const override = process.env.RLP_ORCHESTRATION;
++	if (!override) return resolve(getAgentDir(), CONFIG_FILE_NAME);
++	return isAbsolute(override) ? override : resolve(process.cwd(), override);
++}
++
++function nonEmptyString(value: unknown, where: string): string {
++	if (typeof value !== "string" || value.trim() === "") {
++		throw new Error(`${where} must be a non-empty string`);
++	}
++	return value;
++}
++
++function stringArray(value: unknown, where: string): string[] {
++	if (!Array.isArray(value) || value.length === 0) {
++		throw new Error(`${where} must be a non-empty array of strings`);
++	}
++	for (const entry of value) {
++		if (typeof entry !== "string" || entry === "") {
++			throw new Error(`${where} must be a non-empty array of strings`);
++		}
++	}
++	return value as string[];
++}
++
++function modelRef(value: unknown, where: string): string {
++	const ref = nonEmptyString(value, where);
++	if (!ref.includes("/")) throw new Error(`${where} must be a "provider/model" string`);
++	return ref;
++}
++
++function parseWorkers(value: unknown, source: string): OrchestrationWorker[] {
++	if (!Array.isArray(value) || value.length === 0) {
++		throw new Error(`${source}: 'workers' must be a non-empty array`);
++	}
++	const seenWorkerIds = new Set<string>();
++	const workers: OrchestrationWorker[] = [];
++	for (const [i, rawWorker] of value.entries()) {
++		const where = `workers[${i}]`;
++		const worker = rawWorker as Record<string, unknown>;
++		if (typeof rawWorker !== "object" || rawWorker === null || Array.isArray(rawWorker)) {
++			throw new Error(`${source}: ${where} must be an object`);
++		}
++		const id = nonEmptyString(worker.id, `${source}: ${where}.id`);
++		if (seenWorkerIds.has(id)) throw new Error(`${source}: duplicate worker id ${JSON.stringify(id)}`);
++		seenWorkerIds.add(id);
++		if (worker.harness !== undefined && typeof worker.harness !== "string") {
++			throw new Error(`${source}: ${where}.harness must be a string`);
++		}
++		if (worker.available !== undefined && typeof worker.available !== "boolean") {
++			throw new Error(`${source}: ${where}.available must be a boolean`);
++		}
++		if (worker.availabilityNote !== undefined && typeof worker.availabilityNote !== "string") {
++			throw new Error(`${source}: ${where}.availabilityNote must be a string`);
++		}
++
++		if (!Array.isArray(worker.models) || worker.models.length === 0) {
++			throw new Error(`${source}: worker ${JSON.stringify(id)} needs a non-empty 'models' array`);
++		}
++		const models: OrchestrationModel[] = [];
++		for (const [j, rawModel] of worker.models.entries()) {
++			const modelWhere = `${source}: worker ${JSON.stringify(id)} models[${j}]`;
++			if (typeof rawModel !== "object" || rawModel === null || Array.isArray(rawModel)) {
++				throw new Error(`${modelWhere} must be an object`);
++			}
++			const entry = rawModel as Record<string, unknown>;
++			models.push({
++				model: modelRef(entry.model, `${modelWhere}.model`),
++				roles: stringArray(entry.roles, `${modelWhere}.roles`),
++				when: nonEmptyString(entry.when, `${modelWhere}.when`),
++			});
++		}
++		workers.push({
++			id,
++			harness: worker.harness as string | undefined,
++			available: worker.available as boolean | undefined,
++			availabilityNote: worker.availabilityNote as string | undefined,
++			models,
++		});
++	}
++	return workers;
++}
++
++/**
++ * Parse and validate the config. Throws on malformed JSON or a shape that
++ * cannot render — a broken ladder is a setup error worth surfacing loudly, not
++ * something to silently drop from the prompt.
++ */
++export function parseOrchestration(raw: string, source: string): OrchestrationConfig {
++	let parsed: unknown;
++	try {
++		parsed = JSON.parse(raw);
++	} catch (e) {
++		throw new Error(`${source}: invalid JSON (${e instanceof Error ? e.message : String(e)})`);
++	}
++	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
++		throw new Error(`${source}: expected a JSON object`);
++	}
++	const config = parsed as Record<string, unknown>;
++
++	let escalateBelow: number | undefined;
++	let maxDispatchesPerTurn: number | undefined;
++	if (config.routing !== undefined) {
++		if (typeof config.routing !== "object" || config.routing === null || Array.isArray(config.routing)) {
++			throw new Error(`${source}: 'routing' must be an object`);
++		}
++		const routing = config.routing as Record<string, unknown>;
++		if (routing.escalateBelow !== undefined) {
++			if (typeof routing.escalateBelow !== "number" || routing.escalateBelow < 0 || routing.escalateBelow > 1) {
++				throw new Error(`${source}: routing.escalateBelow must be a number in [0, 1]`);
++			}
++			escalateBelow = routing.escalateBelow;
++		}
++		if (routing.maxDispatchesPerTurn !== undefined) {
++			const cap = routing.maxDispatchesPerTurn;
++			if (typeof cap !== "number" || !Number.isInteger(cap) || cap < 1) {
++				throw new Error(`${source}: routing.maxDispatchesPerTurn must be a positive integer`);
++			}
++			maxDispatchesPerTurn = cap;
++		}
++	}
++
++	let crossVendor = false;
++	if (config.review !== undefined) {
++		if (typeof config.review !== "object" || config.review === null || Array.isArray(config.review)) {
++			throw new Error(`${source}: 'review' must be an object`);
++		}
++		const review = config.review as Record<string, unknown>;
++		if (review.crossVendor !== undefined) {
++			if (typeof review.crossVendor !== "boolean") {
++				throw new Error(`${source}: review.crossVendor must be a boolean`);
++			}
++			crossVendor = review.crossVendor;
++		}
++	}
++
++	return {
++		brain: modelRef(config.brain, `${source}: 'brain'`),
++		workers: parseWorkers(config.workers, source),
++		routing: { escalateBelow, maxDispatchesPerTurn },
++		review: { crossVendor },
++	};
++}
++
++let cached: { path: string; mtimeMs: number; config: OrchestrationConfig } | undefined;
++
++/**
++ * The orchestration config for this process, or undefined when none is
++ * configured. Cached against the file's mtime so a long-lived session picks up
++ * an edit on the next prompt rebuild without re-reading every turn.
++ */
++export function loadOrchestration(): OrchestrationConfig | undefined {
++	const path = orchestrationConfigPath();
++	if (!existsSync(path)) {
++		cached = undefined;
++		return undefined;
++	}
++	const mtimeMs = statSync(path).mtimeMs;
++	if (cached && cached.path === path && cached.mtimeMs === mtimeMs) return cached.config;
++	const config = parseOrchestration(readFileSync(path, "utf-8"), path);
++	cached = { path, mtimeMs, config };
++	return config;
++}
++
++/** Drop the memoized config so the next load re-reads the file. */
++export function invalidateOrchestrationCache(): void {
++	cached = undefined;
++}
++
++/**
++ * Render the ladder as prompt text. Deterministic for a given config so the
++ * section stays stable across turns and the transcript's section diff is quiet.
++ */
++export function renderOrchestration(config: OrchestrationConfig): string {
++	const lines: string[] = [`Orchestrator model (yours): ${config.brain}`, ""];
++	lines.push(
++		"Worker ladder — arms are priority-ordered (first = the default arm, spend the bulk there); pick the arm per dispatch with `args.model`:",
++	);
++	for (const worker of config.workers) {
++		const isAvailable = worker.available !== false;
++		const mark = isAvailable ? "" : " — UNAVAILABLE on this host, never route here";
++		lines.push(`- ${worker.id}${worker.harness ? ` [harness: ${worker.harness}]` : ""}${mark}`);
++		if (!isAvailable && worker.availabilityNote) {
++			lines.push(`  - reason: ${worker.availabilityNote}`);
++		}
++		for (const entry of worker.models) {
++			lines.push(`  - ${entry.model} — roles: ${entry.roles.join(", ")} — ${entry.when}`);
++		}
++	}
++
++	const routing: string[] = [];
++	if (config.routing.escalateBelow !== undefined) {
++		routing.push(
++			`treat a router confidence below ${config.routing.escalateBelow} as advisory and re-justify it yourself`,
++		);
++	}
++	if (config.routing.maxDispatchesPerTurn !== undefined) {
++		routing.push(`at most ${config.routing.maxDispatchesPerTurn} dispatches per turn`);
++	}
++	if (routing.length > 0) {
++		lines.push("", `Routing: ${routing.join("; ")}.`);
++	}
++	if (config.review.crossVendor) {
++		lines.push("", "Review: a review node MUST run on a different vendor than the node it reviews.");
++	}
++
++	lines.push("", `This ladder is configuration, not advice: read it from ${orchestrationConfigPath()}.`);
++	return lines.join("\n");
++}
++
++/**
++ * Every model id in the ladder, for cross-checking against the configured
++ * providers (e.g. "is this arm actually reachable on this host?").
++ */
++export function orchestrationModels(config: OrchestrationConfig): string[] {
++	const models = [config.brain];
++	for (const worker of config.workers) {
++		for (const entry of worker.models) models.push(entry.model);
++	}
++	return models;
++}
++
++/** Split a `provider/model` id into its halves, or undefined when malformed. */
++export function splitModelRef(ref: string): { provider: string; id: string } | undefined {
++	const slash = ref.indexOf("/");
++	if (slash <= 0 || slash === ref.length - 1) return undefined;
++	return { provider: ref.slice(0, slash), id: ref.slice(slash + 1) };
++}
+diff --git a/packages/coding-agent/src/core/settings-manager.ts b/packages/coding-agent/src/core/settings-manager.ts
+index c7bb2afdc..6d924dce3 100644
+--- a/packages/coding-agent/src/core/settings-manager.ts
++++ b/packages/coding-agent/src/core/settings-manager.ts
+@@ -162,6 +162,47 @@ export interface Settings {
+ 	fullscreenCopyOnSelect?: boolean; // default: true; no effect in regular TUI mode
+ }
+ 
++/**
++ * Parse the RLP launcher's default-model override.
++ *
++ * `RPI_DEFAULT_MODEL` uses the same `provider/model` spelling as `--model`, so
++ * one variable pins both halves and
++ * `RPI_DEFAULT_MODEL=qwen-token-plan/deepseek-v4.1-flash rpi` works as typed.
++ * A value without a slash sets only the model id and leaves the provider to
++ * the saved setting.
++ */
++function rlpDefaultFromEnv(): { provider?: string; model?: string } {
++	const raw = process.env.RPI_DEFAULT_MODEL;
++	const slash = raw?.indexOf("/") ?? -1;
++	if (raw && slash > 0) {
++		return { provider: raw.slice(0, slash), model: raw.slice(slash + 1) };
++	}
++	return { model: raw };
++}
++
++/**
++ * Is pi running as an omnigent-managed worker rather than a person at a prompt?
++ *
++ * omnigent launches workers as `--mode rpc --no-session`, and passes `--model`
++ * explicitly when the dispatch named a model. The two cases want opposite
++ * things from a default:
++ *
++ *   - a worker with no `--model` should inherit the RLP ladder's default, or
++ *     dispatching outside the configured ladder arms is silent;
++ *   - an interactive session belongs to its user, and a default they chose in
++ *     `/settings` or pinned with Ctrl+S in `/model` must survive the next
++ *     launch. Shadowing it made those two commands look broken.
++ *
++ * So the env seed applies to managed sessions and to a first run with nothing
++ * saved, never over a default the user actually set.
++ */
++function isManagedSession(): boolean {
++	const argv = process.argv;
++	if (argv.includes("--no-session")) return true;
++	const modeFlag = argv.indexOf("--mode");
++	return modeFlag >= 0 && argv[modeFlag + 1] === "rpc";
++}
++
+ function isMergeableObject(value: unknown): value is Record<string, unknown> {
+ 	return typeof value === "object" && value !== null && !Array.isArray(value);
+ }
+@@ -731,12 +772,34 @@ export class SettingsManager {
+ 		return sessionDir ? normalizePath(sessionDir) : sessionDir;
+ 	}
+ 
++	/**
++	 * Default provider for a new session.
++	 *
++	 * `RPI_DEFAULT_MODEL`'s provider half seeds a managed worker session so the
++	 * `rpi` launcher pins its own gateway default without editing the shared
++	 * `~/.pi/agent/settings.json` that polly and bare `pi` also read. An
++	 * interactive session keeps the user's saved default; an explicit `--model`
++	 * still wins (see `resolveModel`).
++	 */
+ 	getDefaultProvider(): string | undefined {
+-		return this.settings.defaultProvider;
++		if (!isManagedSession() && this.settings.defaultProvider) {
++			return this.settings.defaultProvider;
++		}
++		return rlpDefaultFromEnv().provider || this.settings.defaultProvider;
+ 	}
+ 
++	/**
++	 * Default model id for a new session.
++	 *
++	 * Same precedence as {@link getDefaultProvider}: the RLP env override is a
++	 * seed for workers and first runs, not a permanent shadow of a choice the
++	 * user made in `/settings` or `/model`.
++	 */
+ 	getDefaultModel(): string | undefined {
+-		return this.settings.defaultModel;
++		if (!isManagedSession() && this.settings.defaultModel) {
++			return this.settings.defaultModel;
++		}
++		return rlpDefaultFromEnv().model || this.settings.defaultModel;
+ 	}
+ 
+ 	setDefaultProvider(provider: string): void {
+diff --git a/packages/coding-agent/src/core/slash-commands.ts b/packages/coding-agent/src/core/slash-commands.ts
+index 934de40a6..4f8e097e6 100644
+--- a/packages/coding-agent/src/core/slash-commands.ts
++++ b/packages/coding-agent/src/core/slash-commands.ts
+@@ -22,6 +22,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+ 	{ name: "tree", description: "Navigate session tree (switch branches)" },
+ 	{ name: "thinking", description: "Set thinking level", argumentHint: "<level>" },
+ 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
++	{ name: "orchestration", description: "Show the RLP orchestration model ladder" },
+ 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
+ 	{ name: "import", description: "Import and resume a session from a JSONL file" },
+ 	{ name: "share", description: "Share session as a secret GitHub gist" },
+diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
+index b69488e0c..7f268ee45 100644
+--- a/packages/coding-agent/src/core/system-prompt.ts
++++ b/packages/coding-agent/src/core/system-prompt.ts
+@@ -4,6 +4,7 @@
+ 
+ import { getSystemMessageText } from "@earendil-works/pi-ai";
+ import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
++import { type OrchestrationConfig, loadOrchestration, renderOrchestration } from "./rlp-orchestration.ts";
+ import { formatSkillsForPrompt, type Skill } from "./skills.ts";
+ 
+ export interface BuildSystemPromptOptions {
+@@ -23,6 +24,12 @@ export interface BuildSystemPromptOptions {
+ 	appendSystemPrompt?: string;
+ 	/** Additional XML-wrapped prompt sections keyed by tag name. */
+ 	sections?: Record<string, string>;
++	/**
++	 * RLP orchestration ladder rendered as its own `rlp_orchestration` section.
++	 * `undefined` loads it from disk; `null` suppresses the section regardless of
++	 * what is configured.
++	 */
++	orchestration?: OrchestrationConfig | null;
+ 	/** Working directory. */
+ 	cwd: string;
+ 	/** Pre-loaded context files. */
+@@ -161,6 +168,12 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
+ 	}
+ 
+ 	if (appendSystemPrompt) promptSections.addendum = appendSystemPrompt;
++	// RLP: the orchestration ladder is configuration, so it lands as its own
++	// tagged section the model can treat as authoritative for routing.
++	if (options.orchestration !== null) {
++		const orchestration = options.orchestration ?? loadOrchestration();
++		if (orchestration) promptSections.rlp_orchestration = renderOrchestration(orchestration);
++	}
+ 	if (contextFiles.length > 0) promptSections.project_context = renderProjectContext(contextFiles);
+ 	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
+ 	if (skillFileReadTool && skills.length > 0) {
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 92e9b2612..c4a50f842 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -24,6 +24,14 @@ export {
+ 	type SessionStats,
+ } from "./core/agent-session.ts";
+ export { readStoredCredential } from "./core/auth-storage.ts";
++// RLP: the built-in command list is exported so extensions can render a live
++// index of what the `/` menu offers. Hardcoding the names in an extension
++// drifts the moment upstream adds or renames one; reading the array the
++// interactive mode itself autocompletes from cannot.
++export {
++	BUILTIN_SLASH_COMMANDS,
++	type BuiltinSlashCommand,
++} from "./core/slash-commands.ts";
+ export type { CacheWarmingDecision, CacheWarmingStatus } from "./core/cache-warmer.ts";
+ // Compaction
+ export {
+diff --git a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
+index 9d345b4e9..c84a2f16a 100644
+--- a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
++++ b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
+@@ -1,5 +1,6 @@
+ import { Editor, type EditorOptions, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+ import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.ts";
++import { identity } from "./pi-logo.ts";
+ import type { StatusIndicator } from "./status-indicator.ts";
+ 
+ export type CustomEditorOptions = EditorOptions & {
+@@ -33,14 +34,28 @@ export class CustomEditor extends Editor {
+ 		this.workingStatusIndicator = indicator;
+ 	}
+ 
++	/**
++	 * Idle top border: the RLP mark sits at the left edge of the input box so the
++	 * active agent is obvious at a glance. Falls back to the plain rule when the
++	 * terminal is too narrow or the editor is scrolled.
++	 */
++	private renderIdleBorder(width: number, hiddenLineCount: number): string {
++		const mark = `── Ⓡ ${identity()} `;
++		const markWidth = visibleWidth(mark);
++		if (hiddenLineCount > 0 || width <= markWidth + 1) {
++			return super.renderTopBorder(width, hiddenLineCount);
++		}
++		return this.borderColor(mark + "─".repeat(width - markWidth));
++	}
++
+ 	protected override renderTopBorder(width: number, hiddenLineCount: number): string {
+ 		if (!this.embedWorkingStatus || !this.workingStatusIndicator || width <= 0) {
+-			return super.renderTopBorder(width, hiddenLineCount);
++			return this.renderIdleBorder(width, hiddenLineCount);
+ 		}
+ 
+ 		let status = this.workingStatusIndicator.renderInBorder(Math.max(1, width - 5));
+ 		let statusWidth = visibleWidth(status);
+-		if (statusWidth === 0) return super.renderTopBorder(width, hiddenLineCount);
++		if (statusWidth === 0) return this.renderIdleBorder(width, hiddenLineCount);
+ 
+ 		const overflowLabel = hiddenLineCount > 0 ? ` ↑ ${hiddenLineCount} more ` : undefined;
+ 		const overflowLabelWidth = overflowLabel ? visibleWidth(overflowLabel) : 0;
+diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
+index 51356a0a5..334abffcc 100644
+--- a/packages/coding-agent/src/modes/interactive/components/footer.ts
++++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
+@@ -234,7 +234,13 @@ export class FooterComponent implements Component {
+ 		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
+ 		const dimRemainder = theme.fg("dim", remainder);
+ 
+-		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
++		const pwdLine = truncateToWidth(
++			theme.bold(theme.fg("borderAccent", "Ⓡ")) +
++				theme.fg("dim", " ") +
++				theme.fg("dim", pwd),
++			width,
++			theme.fg("dim", "..."),
++		);
+ 		const lines = [pwdLine, dimStatsLeft + dimRemainder];
+ 
+ 		// Add extension statuses on a single line, sorted by key alphabetically
+diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
+index 57381d9aa..f04c4b5f3 100644
+--- a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
++++ b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
+@@ -4,23 +4,66 @@ import { theme } from "../theme/theme.ts";
+ const CORAL = rgbColor(228, 138, 122);
+ const BLUE = rgbColor(79, 142, 179);
+ const YELLOW = rgbColor(234, 182, 93);
++const GREEN = rgbColor(122, 179, 138);
+ const RESET = "\x1b[0m";
+ 
+ /**
+- * The pi logo: 4 cells wide and 2 lines tall. Each cell shows two square pixels with half blocks:
++ * Which identity this process is presenting.
+  *
+- *   coral coral coral .
+- *   blue  .     coral .
+- *   blue  blue  .     yellow
+- *   blue  .     .     yellow
++ * One binary, two names: `rpi` is the bare harness and `rlp` is the agent that
++ * orchestrates on it. The launcher sets `RLP_IDENTITY`, so the branding follows
++ * how the user actually invoked it instead of claiming one name for both.
++ */
++export type Identity = "rpi" | "rlp";
++
++/** The name to render, from the launcher's marker, defaulting to the fork's own. */
++export function identity(): Identity {
++	return process.env.RLP_IDENTITY === "rlp" ? "rlp" : "rpi";
++}
++
++/** Display name, upper-cased for the header. */
++export function identityName(): string {
++	return identity() === "rlp" ? "RLP" : "RPI";
++}
++
++/**
++ * The RLP mark: 6 cells wide and 2 lines tall, in the same half-block style as
++ * the pi logo, spelling the three layers the tool is made of —
+  *
+- * The brand colors stay fixed across themes; they follow the terminal's color mode.
++ *   L L L .        laya    left column, coral: the System-1 decision model
++ *   L . R M        rlm     middle, blue: the recursive decomposer
++ *   L L R R        pi      right, yellow: the harness everything runs on
++ *   . . . P P      pi      and the green cap that ties them together
++ *
++ * The reading is deliberate: decision on the left, decomposition through the
++ * middle, execution on the right — the order a request actually travels.
+  */
++export function rlpLogoLines(): [string, string] {
++	const mode = theme.getColorMode();
++	const fg = (color: typeof CORAL) => foregroundAnsi(color, mode);
++	const bg = (color: typeof CORAL) => backgroundAnsi(color, mode);
++
++	// Line 1: L block (2 wide), gap, R block (2 wide)
++	const top = `${fg(CORAL)}██${RESET}` + `${fg(BLUE)}▀▀${RESET}` + `${fg(YELLOW)}██${RESET}` + `${fg(GREEN)}▀${RESET}`;
++	// Line 2: same columns, filled to read as one mark
++	const bottom =
++		`${fg(CORAL)}${bg(BLUE)}▀${RESET}` +
++		`${fg(BLUE)}▀▀${RESET}` +
++		`${fg(YELLOW)}${bg(GREEN)}▀${RESET}${fg(GREEN)}█${RESET}`;
++
++	return [top, bottom];
++}
++
++/** The pi mark, unchanged, for the bare-harness identity. */
+ export function piLogoLines(): [string, string] {
+ 	const mode = theme.getColorMode();
+ 	const fg = (color: typeof CORAL) => foregroundAnsi(color, mode);
+-	// The fourth cell of the top line is empty, so it is padded to the same width as the bottom line.
+-	const top = `${fg(CORAL)}${backgroundAnsi(BLUE, mode)}▀${RESET}${fg(CORAL)}▀█${RESET} `;
++	const top = `${fg(CORAL)}${backgroundAnsi(BLUE, mode)}▀${RESET}${fg(CORAL)}▀█${RESET}`;
+ 	const bottom = `${fg(BLUE)}█▀${RESET} ${fg(YELLOW)}█${RESET}`;
+ 	return [top, bottom];
+ }
++
++/** The mark for whichever identity is active. */
++export function logoLines(): [string, string] {
++	return identity() === "rlp" ? rlpLogoLines() : piLogoLines();
++}
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+index e5ff3a6f8..28ec3f0e2 100644
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -101,6 +101,14 @@ import {
+ import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
+ import { DefaultPackageManager } from "../../core/package-manager.ts";
+ import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
++import {
++	invalidateOrchestrationCache,
++	loadOrchestration,
++	type OrchestrationConfig,
++	orchestrationConfigPath,
++	orchestrationModels,
++	splitModelRef,
++} from "../../core/rlp-orchestration.ts";
+ import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
+ import {
+ 	type SessionEntry,
+@@ -152,7 +160,7 @@ import {
+ 	formatAuthSelectorProviderType,
+ 	OAuthSelectorComponent,
+ } from "./components/oauth-selector.ts";
+-import { piLogoLines } from "./components/pi-logo.ts";
++import { identity, identityName, logoLines } from "./components/pi-logo.ts";
+ import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
+ import { SessionSelectorComponent } from "./components/session-selector.ts";
+ import { SettingsSelectorComponent } from "./components/settings-selector.ts";
+@@ -966,12 +974,33 @@ export class InteractiveMode {
+ 
+ 		// Add header with keybindings from config (unless silenced)
+ 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
+-			// Built on demand so the header follows theme changes. The logo's first line carries the version,
+-			// its second line the first line of key hints.
++			// RLP: upstream builds the header lazily so it follows theme changes, and that
++			// is worth keeping. The RLP mark replaces the pi logo art on the first line; the
++			// second line still carries the key hints, so the two-line shape is unchanged.
++			// The mark and the name follow how the binary was invoked: `rlp` is the
++			// agent that orchestrates, `rpi` the bare harness, and one binary serves
++			// both. Built lazily so the header still follows theme changes.
+ 			const withLogo = (hints: string) => {
+-				const [top, bottom] = piLogoLines();
+-				return `${top} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
++				const [top, bottom] = logoLines();
++				const isAgent = identity() === "rlp";
++				const name = theme.bold(theme.fg(isAgent ? "mdHeading" : "accent", identityName()));
++				const role = theme.fg("dim", isAgent ? "· laya · rlm · pi" : "· the harness RLP orchestrates on");
++				return `${top} ${name} ${role} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
+ 			};
++			// The six pipeline stages, colour-coded so the header reads as a diagram.
++			// Only the agent shows it: the bare harness does not orchestrate.
++			const pipelineLine = () =>
++				identity() !== "rlp"
++					? ""
++					: theme.fg("muted", "  ") +
++						["triage", "decompose", "route", "dispatch", "collect", "synthesize"]
++							.map((stage, i) =>
++								theme.fg(
++									(["error", "mdCode", "mdLink", "success", "warning", "customMessageLabel"] as const)[i],
++									stage,
++								),
++							)
++							.join(theme.fg("muted", " → "));
+ 
+ 			// Build startup instructions using keybinding hint helpers
+ 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
+@@ -1011,11 +1040,22 @@ export class InteractiveMode {
+ 				].join(theme.fg("muted", " · "));
+ 			const compactOnboarding = () =>
+ 				theme.fg("dim", `Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`);
++			// The agent explains orchestration; the bare harness has none to explain,
++			// so it keeps pi's own line rather than advertising a capability it does
++			// not have in this identity.
+ 			const onboarding = () =>
+-				theme.fg("dim", `Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`);
++				identity() === "rlp"
++					? theme.fg(
++							"dim",
++							`RLP triages every request: simple work runs inline like plain pi; multi-part work is decomposed by the RLM engine, routed by the laya decision model, and dispatched to workers in parallel.`,
++						)
++					: theme.fg(
++							"dim",
++							`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
++						);
+ 			this.builtInHeader = new ExpandableText(
+-				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
+-				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
++				() => `${withLogo(compactInstructions())}\n${pipelineLine()}\n${compactOnboarding()}\n\n${onboarding()}`,
++				() => `${withLogo(expandedInstructions())}\n${pipelineLine()}\n\n${onboarding()}`,
+ 				this.getStartupExpansionState(),
+ 				1,
+ 				0,
+@@ -3158,6 +3198,11 @@ export class InteractiveMode {
+ 				this.editor.setText("");
+ 				return;
+ 			}
++			if (text === "/orchestration") {
++				this.handleOrchestrationCommand();
++				this.editor.setText("");
++				return;
++			}
+ 			if (text === "/hotkeys") {
+ 				this.handleHotkeysCommand();
+ 				this.editor.setText("");
+@@ -6539,6 +6584,110 @@ export class InteractiveMode {
+ 		this.ui.requestRender();
+ 	}
+ 
++	/**
++	 * Print the resolved RLP orchestration ladder: where it came from, every
++	 * arm, and whether each arm actually resolves to a model this host has
++	 * credentials for. Read-only — edit the file the header names.
++	 */
++	private handleOrchestrationCommand(): void {
++		const configPath = orchestrationConfigPath();
++		let config: OrchestrationConfig | undefined;
++		let error: string | undefined;
++		try {
++			invalidateOrchestrationCache();
++			config = loadOrchestration();
++		} catch (e) {
++			error = e instanceof Error ? e.message : String(e);
++		}
++
++		this.chatContainer.addChild(new Spacer(1));
++		this.chatContainer.addChild(new DynamicBorder());
++		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "RLP orchestration ladder")), 1, 0));
++		this.chatContainer.addChild(new Spacer(1));
++
++		let markdown: string;
++		if (error) {
++			markdown = `${theme.fg("error", "invalid config")}\n\n\`${configPath}\`\n\n\`\`\`\n${error}\n\`\`\``;
++		} else if (!config) {
++			markdown = `${theme.fg("muted", "none configured")} — plain pi behaviour.\n\nExpected at \`${configPath}\` or \`$RLP_ORCHESTRATION\`.`;
++		} else {
++			const runtime = this.session.modelRuntime;
++			const rows = orchestrationModels(config).map((ref) => {
++				const split = splitModelRef(ref);
++				const reachable = split ? runtime.getModel(split.provider, split.id) !== undefined : false;
++				const mark = reachable ? theme.fg("success", "✓") : theme.fg("warning", "?");
++				return `| ${mark} | \`${ref}\` | ${split ? split.provider : theme.fg("error", "malformed")} |`;
++			});
++			const ladder = config.workers
++				.map((worker) => {
++					const unavailable = worker.available === false;
++					const mark = unavailable ? theme.fg("warning", " ⊘ unavailable") : "";
++					const head = `**${worker.id}**${worker.harness ? ` \`${worker.harness}\`` : ""}${mark}`;
++					const note = unavailable && worker.availabilityNote ? [`_${worker.availabilityNote}_`] : [];
++					const armLines = worker.models.map(
++						(entry) => `- \`${entry.model}\` — ${entry.roles.join(", ")} — ${entry.when}`,
++					);
++					return [head, ...note, ...armLines].join("\n");
++				})
++				.join("\n\n");
++			const routing: string[] = [];
++			if (config.routing.escalateBelow !== undefined) {
++				routing.push(`escalate below ${config.routing.escalateBelow}`);
++			}
++			if (config.routing.maxDispatchesPerTurn !== undefined) {
++				routing.push(`max ${config.routing.maxDispatchesPerTurn} dispatches/turn`);
++			}
++			routing.push(`cross-vendor review ${config.review.crossVendor ? "on" : "off"}`);
++
++			// The ladder's `brain` is what the agent spec should launch; the session
++			// model is what it actually did. A mismatch means one of them drifted.
++			const currentModel = this.session.model;
++			const currentRef = currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined;
++			const brainMatches = currentRef === config.brain;
++			const sessionRow = currentRef
++				? `| ${brainMatches ? theme.fg("success", "✓") : theme.fg("warning", "⚠")} | current session | \`${currentRef}\` |`
++				: `| ${theme.fg("muted", "–")} | current session | none |`;
++
++			markdown = [
++				`\`${configPath}\``,
++				"",
++				ladder,
++				"",
++				`Routing: ${routing.join(" · ")}`,
++				"",
++				"| | model | provider |",
++				"|---|---|---|",
++				`| ${theme.bold(theme.fg("accent", "brain"))} | \`${config.brain}\` | |`,
++				sessionRow,
++				...rows,
++				"",
++				theme.fg(
++					"dim",
++					"✓ resolves on this host · ? not in the configured model list · ⊘ marked unavailable in the ladder",
++				),
++				brainMatches
++					? theme.fg("dim", "session is running the ladder's brain arm")
++					: theme.fg(
++							"warning",
++							"session model differs from the ladder's brain — update executor.model in the agent spec",
++						),
++				"",
++				theme.fg("dim", "Engine commands: ") +
++					theme.fg("accent", "/rlp") +
++					theme.fg("dim", " · ") +
++					theme.fg("accent", "/rlp-plan") +
++					theme.fg("dim", " · ") +
++					theme.fg("accent", "/rlp-doctor") +
++					theme.fg("dim", " · or from a shell: ") +
++					theme.fg("accent", "rlp ladder / rlp doctor / rlp plan"),
++			].join("\n");
++		}
++
++		this.chatContainer.addChild(new Markdown(markdown, 1, 1, this.getMarkdownThemeWithSettings()));
++		this.chatContainer.addChild(new DynamicBorder());
++		this.ui.requestRender();
++	}
++
+ 	private handleChangelogCommand(): void {
+ 		const changelogPath = getChangelogPath();
+ 		const allEntries = parseChangelog(changelogPath);

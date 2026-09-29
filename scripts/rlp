@@ -1,0 +1,106 @@
+#!/bin/sh
+# rlp — the RLP tool. One entry point.
+#
+#   rlp                     the agent: the pi fork TUI, with RLP loaded
+#   rlp -p "request"        one shot, same agent, non-interactive
+#   rlp <subcommand>        the decision engine: plan, triage, decompose, route,
+#                           ladder, roster, doctor, serve, version
+#   rlp update              update the pi fork the way `pi update` does, and
+#                           re-apply RLP on top
+#   rlp --omnigent [args]   the previous orchestrator (omnigent REPL), opt-in
+#
+# Orchestration is local: the RLP extension dispatches headless rpi workers,
+# one git worktree per node, and collects their results back into this session.
+# The laya gate still decides whether to orchestrate at all, so a small request
+# never pays for a fan-out — and now it needs no server, daemon or runner to
+# do it. `--omnigent` keeps the old plane reachable for the things it still
+# does that this does not (session history, web UI).
+set -eu
+
+# Resolve $0 through any symlinks (~/.local/bin/rlp -> <checkout>/scripts/rlp)
+# so the project root is found from the real script location, not the link.
+SELF=$0
+while [ -L "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in
+    /*) SELF=$LINK ;;
+    *)  SELF=$(dirname -- "$SELF")/$LINK ;;
+  esac
+done
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+SVC_PY="$ROOT/rlp-svc/.venv/bin/python"
+
+# Subcommands owned by the decision engine. Anything else belongs to the
+# orchestrator, including omni's own flags (-p, --jsonl, ...).
+case "${1:-}" in
+  plan|triage|decompose|route|llm-route|ladder|roster|config|replan|verify|memory|remember|doctor|serve|engine|version)
+    if [ ! -x "$SVC_PY" ]; then
+      echo "rlp: decision engine not installed (no $SVC_PY)." >&2
+      echo "     run: sh $ROOT/scripts/install.sh" >&2
+      exit 1
+    fi
+    exec "$SVC_PY" -m rlp_svc "$@"
+    ;;
+  update)
+    # Shift off "update" and pass the rest; passing "${2:-}" would hand the
+    # script an empty argument when there are none, which it reads as a bad
+    # option.
+    shift
+    exec "$ROOT/scripts/rlp-update" "$@"
+    ;;
+  --omnigent)
+    shift
+    if ! command -v omni >/dev/null 2>&1; then
+      echo "rlp: 'omni' (omnigent) is not installed — that plane is optional." >&2
+      echo "     Local orchestration works with plain 'rlp'. Install omnigent to use --omnigent." >&2
+      exit 1
+    fi
+    exec omni run "$HOME/.omnigent/agents/rlp" "$@"
+    ;;
+esac
+
+if [ "${1:-}" = "help-tool" ] || [ "${1:-}" = "--rlp-help" ]; then
+  cat <<'USAGE'
+rlp — Recursive Laya Pi
+
+  rlp                        the agent (pi TUI) with RLP loaded: triage, then
+                             local waves of workers when the gate says so
+  rlp -p "<request>"         the same, non-interactive
+
+  rlp plan "<request>"       triage gate + DAG + per-node routing + dispatch waves
+  rlp triage "<request>"     direct vs orchestrate, one laya forward pass
+  rlp decompose "<request>"  the DAG on its own
+  rlp route --title T ...    route one subtask to a worker
+  rlp ladder | roster        the model ladder and the derived router cards
+  rlp config '<ops-json>'    edit the ladder (validated, backed up, atomic)
+  rlp verify --acceptance A  independent cross-vendor best-of-N verdict
+  rlp memory | remember T    the project's cross-run knowledge log
+  rlp replan FOCUS           recursively re-decompose one task into a sub-DAG
+  rlp doctor [--warm]        is this host runnable? (fixes per line)
+  rlp serve                  the MCP stdio server
+  rlp update [--check]       update the pi fork and re-apply RLP on top
+
+  rlp --omnigent             the omnigent REPL (session history, web UI)
+
+In-session: /rlp-plan /rlp-state /rlp-doctor /rlp-ladder /rlp-config /rlp-roles /models
+Machine-readable: add --json to any engine subcommand.
+USAGE
+  exit 0
+fi
+
+# Everything else is the agent: the fork's own CLI, so rlp is a superset of
+# rpi. Orchestration comes from the RLP extension, not from a launcher.
+RPI="$ROOT/scripts/rpi-bin"
+if [ ! -x "$RPI" ]; then
+  echo "rlp: the harness is not built (no $RPI)." >&2
+  echo "     run: sh $ROOT/scripts/install.sh" >&2
+  exit 1
+fi
+
+# One binary, two names. The fork renders whichever identity was asked for, so
+# `rlp` says RLP with an RLP mark and `rpi` stays the bare harness instead of
+# both claiming the same brand.
+RLP_IDENTITY=rlp
+RLP_ROOT="$ROOT"
+export RLP_IDENTITY RLP_ROOT
+exec "$RPI" "$@"

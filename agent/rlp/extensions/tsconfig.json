@@ -1,0 +1,25 @@
+{
+  "//": "Typechecks the dropped-in extensions against the harness's real API types.",
+  "//2": "A member that does not exist on ExtensionContext or ExtensionAPI (ctx.setModel,",
+  "//3": "ctx.modelRegistry, ...) is a runtime crash inside the TUI, so it is a build error here.",
+  "//4": "typeRoots is explicit because this config lives outside fork/pi, so node's normal",
+  "//5": "walk-up to fork/pi/node_modules does not find @types/node.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "typeRoots": ["../../../fork/pi/node_modules/@types"],
+    "paths": {
+      "@earendil-works/pi-coding-agent": [
+        "../../../fork/pi/packages/coding-agent/dist/index.d.ts"
+      ],
+      "typebox": ["../../../fork/pi/node_modules/typebox/build/index.d.mts"]
+    }
+  },
+  "include": ["*.ts"]
+}

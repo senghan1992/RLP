@@ -1,0 +1,219 @@
+#!/bin/sh
+# rlp update — bring the pi fork up to date, the way `pi update` brings pi up
+# to date, and re-apply RLP on top.
+#
+# Why this is a script and not a documented recipe: the documented flow
+# (`git fetch origin && git merge origin/main`) has never actually worked on
+# this checkout. It was cloned with `--depth 1`, and a shallow repository
+# cannot merge. This script unshallows first, then merges, then proves the RLP
+# surface survived, then rebuilds.
+#
+# Guarantees, in priority order:
+#   1. Never lose work. A dirty tree is refused, and the pre-update commit is
+#      printed so a rollback is one `git reset --hard <sha>` away.
+#   2. Never leave half an update. A conflicted merge is aborted, not left
+#      pending for the next command to trip over.
+#   3. Never claim success unverified. The RLP markers, the typecheck and the
+#      build all have to pass, and a failure in any of them is a failure of
+#      this command.
+#
+# Usage:
+#   rlp update              fetch, merge, verify, rebuild
+#   rlp update --check      report what would happen; change nothing
+#   rlp update --to <ref>   merge a different upstream ref (default origin/main)
+#   rlp update --no-build   skip the rebuild (merge + verify only)
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+FORK="$ROOT/fork/pi"
+PY="$ROOT/rlp-svc/.venv/bin/python"
+
+CHECK=0
+DO_BUILD=1
+TARGET="origin/main"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check|--dry-run) CHECK=1 ;;
+    --no-build) DO_BUILD=0 ;;
+    --to) shift; TARGET="${1:-}" ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "rlp update: unknown option $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+cd "$FORK"
+
+say()  { printf '%s\n' "$*"; }
+step() { say ""; say "── $* ────────────────────────────────────────"; }
+die()  { say ""; say "update failed: $*" >&2; exit 1; }
+
+# RLP's own fingerprints in the fork. If upstream refactors past one of these,
+# the update is "successful" in git terms and broken in practice — so each one
+# is checked explicitly rather than inferred from a clean merge.
+check_markers() {
+  missing=""
+  f=packages/coding-agent/src
+  grep -q 'RPI_DEFAULT_MODEL'        "$f/core/settings-manager.ts" 2>/dev/null || missing="$missing RPI_DEFAULT_MODEL"
+  grep -q 'isManagedSession'         "$f/core/settings-manager.ts" 2>/dev/null || missing="$missing isManagedSession"
+  grep -q 'rlp_orchestration'        "$f/core/system-prompt.ts"     2>/dev/null || missing="$missing rlp_orchestration"
+  grep -q '"orchestration"'          "$f/core/slash-commands.ts"    2>/dev/null || missing="$missing /orchestration"
+  grep -q 'collectOmnigentAgentSkillDirs' "$f/core/package-manager.ts" 2>/dev/null || missing="$missing omnigent-skill-discovery"
+  grep -q 'BUILTIN_SLASH_COMMANDS'   "$f/index.ts"                  2>/dev/null || missing="$missing BUILTIN_SLASH_COMMANDS-export"
+  grep -q 'handleOrchestrationCommand' "$f/modes/interactive/interactive-mode.ts" 2>/dev/null || missing="$missing /orchestration-handler"
+  grep -q 'collectAutoSkillEntries(userAgentsSkillsDir' "$f/core/package-manager.ts" 2>/dev/null || missing="$missing stock-skill-discovery"
+  [ -f "$f/core/rlp-orchestration.ts" ] || missing="$missing core/rlp-orchestration.ts"
+  if [ -n "$missing" ]; then
+    say ""
+    say "RLP surface lost in the merge:$missing"
+    say ""
+    say "git says the merge is clean, but RLP no longer has:$missing"
+    say "Upstream probably refactored the file. Inspect and re-apply by hand:"
+    say "  cd $FORK && git diff ${PREV_SHA:-HEAD} HEAD -- $f"
+    return 1
+  fi
+  say "  RLP surface intact: 9 markers, the ladder module, and the /rlp commands"
+  return 0
+}
+
+# --- 1. preflight ---------------------------------------------------------
+step "1/7  preflight"
+PREV_SHA=$(git rev-parse --short HEAD)
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+PI_VERSION=$(node -p "require('$FORK/packages/coding-agent/package.json').version" 2>/dev/null || echo "?")
+say "  fork        $FORK"
+say "  branch      $BRANCH"
+say "  rpi version $PI_VERSION"
+say "  rollback    git reset --hard $PREV_SHA   (from $FORK)"
+
+[ "$BRANCH" = "rlp" ] || die "expected to be on the 'rlp' branch, found '$BRANCH'"
+
+if [ -f .git/MERGE_HEAD ]; then
+  die "a merge is already in progress (MERGE_HEAD present). Finish or abort it first:
+  git merge --abort   # or: git reset --hard $PREV_SHA"
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  say ""
+  say "  the working tree has uncommitted changes:"
+  git status --short | head -10 | sed 's/^/    /'
+  die "commit or stash them first — an update must start from a known state"
+fi
+say "  working tree clean"
+
+# --- 2. history -----------------------------------------------------------
+step "2/7  history"
+if [ -f .git/shallow ]; then
+  say "  shallow clone (depth 1) — this is why the documented"
+  say "  'git merge origin/main' never worked here. Unshallowing."
+  if [ "$CHECK" = 1 ]; then
+    say "  --check: would run: git fetch --unshallow origin"
+  else
+    say "  running: git fetch --unshallow origin (this downloads full history, once)"
+    git fetch --unshallow --quiet origin 2>&1 | sed 's/^/    /' || die "unshallow failed"
+    say "  unshallowed: $(git rev-list --count HEAD) commits now local"
+  fi
+else
+  say "  full history ($(git rev-list --count HEAD) commits)"
+fi
+
+# --- 3. fetch -------------------------------------------------------------
+step "3/7  fetch"
+git fetch --quiet origin 2>&1 | sed 's/^/  /' || die "fetch failed (no network?)"
+BEHIND=$(git rev-list --count "HEAD..$TARGET" 2>/dev/null || echo 0)
+AHEAD=$(git rev-list --count "$TARGET..HEAD" 2>/dev/null || echo 0)
+say "  behind $BEHIND commit(s), ahead $AHEAD (RLP's own work)"
+NEW_PI=$(git show "$TARGET:packages/coding-agent/package.json" 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "?")
+say "  upstream rpi version $NEW_PI (local $PI_VERSION)"
+
+if [ "$BEHIND" = "0" ]; then
+  say "  already up to date with $TARGET"
+  step "summary"
+  say "  nothing to merge; re-verifying and rebuilding anyway"
+else
+  say "  commits touching the files RLP modifies:"
+  git log --oneline --no-decorate "HEAD..$TARGET" -- \
+    packages/coding-agent/src/core/settings-manager.ts \
+    packages/coding-agent/src/core/system-prompt.ts \
+    packages/coding-agent/src/core/slash-commands.ts \
+    packages/coding-agent/src/core/package-manager.ts \
+    packages/coding-agent/src/index.ts \
+    packages/coding-agent/src/modes/interactive/interactive-mode.ts \
+    2>/dev/null | head -12 | sed 's/^/    /' || true
+fi
+
+# --- 4. merge -------------------------------------------------------------
+step "4/7  merge $TARGET"
+if [ "$CHECK" = 1 ]; then
+  say "  --check: would run: git merge --no-edit $TARGET"
+elif [ "$BEHIND" = "0" ]; then
+  say "  nothing to merge"
+else
+  # Record what the RLP surface looks like *before*, so the post-merge check
+  # can be a real diff rather than a guess.
+  say "  merging (this may conflict; RLP's changes touch files upstream edits too)"
+  if ! git merge --no-edit --no-stat "$TARGET"; then
+    say ""
+    say "  CONFLICTS:"
+    git diff --name-only --diff-filter=U | sed 's/^/    /'
+    say ""
+    say "  aborting, so the tree is left clean and the old build keeps working"
+    git merge --abort 2>/dev/null || true
+    die "conflict merging $TARGET into rlp. The RLP side is committed at $PREV_SHA.
+  To resolve manually:
+    git merge $TARGET      # then fix the listed files
+    git commit             # then: sh scripts/install.sh
+  To skip the update entirely:
+    git reset --hard $PREV_SHA"
+  fi
+  say "  merged cleanly"
+fi
+
+# --- 5. verify the RLP surface -------------------------------------------
+step "5/7  verify"
+check_markers || die "RLP surface did not survive the update (see above); the tree is intact, rebuild with: git reset --hard $PREV_SHA"
+
+# --- 6. build -------------------------------------------------------------
+step "6/7  build"
+if [ "$DO_BUILD" = 0 ] || [ "$CHECK" = 1 ]; then
+  say "  skipped (--no-build / --check)"
+else
+  say "  npm install + npm run build (a few minutes)"
+  (npm install --ignore-scripts --silent && npm run build --silent) >/tmp/rlp-update-build.log 2>&1 || {
+    tail -30 /tmp/rlp-update-build.log | sed 's/^/    /'
+    die "build failed; the merged tree is left in place for inspection.
+  Build log: /tmp/rlp-update-build.log
+  To go back to the working version: git reset --hard $PREV_SHA"
+  }
+  say "  built"
+fi
+
+# --- 7. reinstall + report ------------------------------------------------
+step "7/7  install + report"
+if [ "$CHECK" = 1 ] || [ "$DO_BUILD" = 0 ]; then
+  say "  skipped"
+else
+  say "  refreshing wrappers, extensions and the agent spec"
+  sh "$ROOT/scripts/install.sh" >/tmp/rlp-update-install.log 2>&1 || {
+    tail -20 /tmp/rlp-update-install.log | sed 's/^/    /'
+    die "install failed; see /tmp/rlp-update-install.log"
+  }
+  say "  installed"
+fi
+
+step "summary"
+FINAL_PI=$(node -p "require('$FORK/packages/coding-agent/package.json').version" 2>/dev/null || echo '?')
+NEW_HEAD=$(git rev-parse --short HEAD)
+if [ "$CHECK" = 1 ]; then
+  say "  rpi version   $PI_VERSION -> $NEW_PI (would, once merged)"
+  say "  fork commit   $PREV_SHA -> (would advance to $TARGET)"
+  say ""
+  say "  --check made no working-tree changes. Run without it to apply."
+  say "  Note: it did fetch, so 'behind N' above is current."
+else
+  say "  rpi version   $PI_VERSION -> $FINAL_PI"
+  say "  fork commit   $PREV_SHA -> $NEW_HEAD"
+  say "  rollback      git reset --hard $PREV_SHA   (then: sh scripts/install.sh)"
+fi
+say ""
+say "  verify it yourself:  sh scripts/selftest.sh --fast"

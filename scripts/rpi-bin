@@ -1,0 +1,25 @@
+#!/bin/sh
+# rpi: the branded pi fork (RLP's harness).
+#
+# RPI_DEFAULT_MODEL is read by the fork's SettingsManager and beats
+# ~/.pi/agent/settings.json, so `rpi` starts on an orchestration-ladder model
+# instead of inheriting the shared pi default. Value uses the `provider/model`
+# spelling of `--model`; omnigent passes its own --model on managed sessions
+# and the CLI flag wins, so worker routing is unaffected.
+#
+# The fork is resolved relative to this checkout, so the project relocates.
+# The wrapper must resolve the fork relative to this checkout, not to a
+# hardcoded path, so a relocated clone keeps working. Same symlink chase as
+# scripts/rlp, because ~/.local/bin/rpi points here.
+SELF=$0
+while [ -L "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in
+    /*) SELF=$LINK ;;
+    *)  SELF=$(dirname -- "$SELF")/$LINK ;;
+  esac
+done
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+RPI_DEFAULT_MODEL="${RPI_DEFAULT_MODEL:-agnes/agnes-3.0-flash}"
+export RPI_DEFAULT_MODEL
+exec node "$ROOT/fork/pi/packages/coding-agent/dist/bundle/cli.js" "$@"

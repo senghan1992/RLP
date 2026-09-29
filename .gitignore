@@ -1,0 +1,30 @@
+# --- the pi fork: cloned and built by scripts/install.sh, never committed ----
+/fork/
+
+# --- the decision engine's runtime -------------------------------------------------
+rlp-svc/.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- harness / install runtime state ----------------------------------------------
+# ~/.pi agent dir contents, run ledgers, installed markers, backups
+.pi/
+rlp-location.json
+*.bak
+*.bak.*
+*.orig
+*.rej
+
+# --- local runs and scratch -------------------------------------------------------
+results/
+*.log
+.DS_Store
+
+# --- never commit credentials -----------------------------------------------------
+auth.json
+models.json
+.env
+*.pem
+*.key
