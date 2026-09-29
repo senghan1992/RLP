@@ -632,7 +632,20 @@ def run(*, warm: bool = False) -> dict:
 def render(report: dict) -> str:
     """Terminal report: status glyph, name, detail, then the fix per failure."""
     glyph = {OK: "  ok  ", WARN: " warn ", FAIL: " FAIL "}
-    lines = ["rlp doctor", ""]
+    # Where you are, before twenty lines of what is true. A beginner reading a
+    # doctor report cannot tell which line is the wall they are standing at;
+    # this names it, and `rlp progress` expands it.
+    header = ""
+    try:
+        from . import onboarding
+
+        header = onboarding.summary_line()
+    except Exception:
+        header = ""
+    lines = ["rlp doctor"]
+    if header:
+        lines.append(f"  {header}   (rlp progress for the full path)")
+    lines.append("")
     for c in report["checks"]:
         lines.append(f"[{glyph[c['status']]}] {c['name']:<22} {c['detail']}")
         if c["hint"] and c["status"] != OK:

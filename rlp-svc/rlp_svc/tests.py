@@ -563,7 +563,7 @@ def test_cli_surface() -> None:
     from .cli import EXIT_USAGE, build_parser
 
     parser = build_parser()
-    expected = {"triage", "decompose", "route", "llm-route", "ladder", "roster", "provider", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "serve", "version"}
+    expected = {"triage", "decompose", "route", "llm-route", "ladder", "roster", "provider", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "progress", "serve", "version"}
     actions = [a for a in parser._actions if hasattr(a, "choices") and isinstance(a.choices, dict)]
     check(bool(actions), "the parser declares subcommands")
     if actions:
@@ -1539,6 +1539,111 @@ def test_plan_reads_memory() -> None:
             os.environ.pop("RLP_HOME", None)
 
 
+def test_onboarding() -> None:
+    import os
+
+    from . import onboarding, paths
+
+    env = {k: os.environ.get(k) for k in ("RLP_HOME", "RLP_ORCHESTRATION", "RLP_PI_MODELS", "RLP_PI_AUTH")}
+    tmp = tempfile.mkdtemp(prefix="rlp-onboarding-")
+    root = Path(tmp)
+    try:
+        # The probes read only their own files: a fake home and agent dir keep
+        # this test honest on any host.
+        os.environ["RLP_HOME"] = str(root / "runs-home")
+        os.environ["RLP_ORCHESTRATION"] = str(root / "orchestration.json")
+        os.environ["RLP_PI_MODELS"] = str(root / "models.json")
+        os.environ["RLP_PI_AUTH"] = str(root / "auth.json")
+
+        def done(report, *names):
+            expect = {n: False for n in onboarding.MILESTONES}
+            for name in names:
+                expect[name] = True
+            got = {s["id"]: s["done"] for s in report["steps"]}
+            check(got == expect, f"{sorted(names)}: {got}")
+            return report
+
+        # The harness and engine probes read the host's own bundle, imports and
+        # checkpoint cache — pin them off so the sequence is the thing under
+        # test, and the suite is honest on any machine (this one included).
+        # Restore them, not the module, at the end: a relative-imported module
+        # cannot be reloaded mid-suite.
+        saved_harness, saved_engine = onboarding._harness, onboarding._engine
+        onboarding._harness = lambda: (False, "no bundle", "sh scripts/install.sh")
+        onboarding._engine = lambda: (False, "not importable", "sh scripts/install.sh")
+
+        # 1. Nothing has happened here: every step off, next is the first one.
+        r = done(onboarding.progress())
+        check(not r["complete"] and r["reached"] == 0, "a bare host is 0 of 7")
+        check(r["next"]["id"] == onboarding.MILESTONES[0], "next names the first step")
+        check(onboarding.summary_line(r).startswith("onboarding: 0/"), "the header line counts")
+
+        (root / "runs-home").mkdir()
+        (root / "runs-home" / "last-plan.json").write_text(json.dumps({"mode": "orchestrate", "tasks": [1, 2]}))
+        r = done(onboarding.progress(), "plan")
+        check(r["reached"] == 0, "a plan alone is not progress — the wall is still the harness")
+        check(r["next"]["id"] == "harness", "next is still the first unreached step")
+        check(r["steps"][onboarding.MILESTONES.index("plan")]["detail"].startswith("last plan: mode=orchestrate"),
+              "the plan step shows the mode and node count")
+
+        (root / "orchestration.json").write_text(json.dumps(LADDER))
+        (root / "models.json").write_text(json.dumps({"providers": {
+            "alpha": {"baseUrl": "https://alpha.example/v1", "models": [{"id": "alpha-large"}]},
+            "beta": {"baseUrl": "https://beta.example/v1", "models": [{"id": "beta-deep"}]},
+        }}))
+        (root / "auth.json").write_text(json.dumps({"alpha": {"key": "k"}, "beta": {}}))
+        r = done(onboarding.progress(), "plan", "ladder", "provider")
+        check(r["reached"] == 0, "a ladder and a plan are not progress without a harness to run on")
+        check("alpha" in r["steps"][onboarding.MILESTONES.index("provider")]["detail"],
+              "the provider step names the credentialed endpoint, not the count only")
+        check(r["next"]["id"] == "harness", "next lands on the first gap, however late it is")
+
+        run_defs = [
+            {"runId": "r0", "nodes": {"n1": {"status": "done", "startedAt": "t", "verdict": "pass"}}},
+            {"runId": "r1", "nodes": {"n1": {"status": "running", "startedAt": "t"},
+                                      "n2": {"status": "failed", "verdict": "ACCEPTANCE: fail", "startedAt": "t"}}},
+        ]
+        for run in run_defs:
+            d = root / "runs-home" / "runs" / run["runId"]
+            d.mkdir(parents=True)
+            (d / "ledger.json").write_text(json.dumps(run))
+        r = done(onboarding.progress(), "plan", "ladder", "provider", "dispatch", "result")
+        check(r["next"]["id"] == "harness", "the ledgers fill the last two steps, but the wall is still the harness")
+        check("3 worker dispatch(es)" in r["steps"][onboarding.MILESTONES.index("dispatch")]["detail"],
+              "the ledgers count every started worker")
+        check("1 node(s) met their acceptance" in r["steps"][onboarding.MILESTONES.index("result")]["detail"],
+              "only the passing node counts as a result")
+        check(not r["complete"], "harness and engine are still walls")
+
+        # Unreachable on any machine? Make it reachable here, and the report
+        # must celebrate it without crashing.
+        onboarding._harness = lambda: (True, "stub", "")
+        onboarding._engine = lambda: (True, "stub", "")
+        r = onboarding.progress()
+        check(r["complete"] and r["reached"] == 7, "every step done is complete")
+        check(onboarding.summary_line(r).endswith("a worker has met its acceptance here"),
+              "the header celebrates a finished host")
+        check("7/7" in onboarding.render(r), "the full report shows the ladder complete")
+        onboarding._harness, onboarding._engine = saved_harness, saved_engine
+
+        # Unreadable ledgers are skipped, not fatal. A fresh home with only the
+        # broken one, so the check is against garbage alone.
+        broken_home = root / "broken-home"
+        d = broken_home / "runs" / "broken"
+        d.mkdir(parents=True)
+        (d / "ledger.json").write_text("{not json")
+        os.environ["RLP_HOME"] = str(broken_home)
+        check(not onboarding._ledgers(), "garbage ledgers disappear quietly")
+        check(not onboarding._node_passed({"status": "failed"}), "a failed node never counts as pass")
+
+    finally:
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> None:
     # The provider store has its own file (it is long and hermetic on its own);
     # it shares this runner's `check` contract via its own module-level list.
@@ -1575,6 +1680,7 @@ def main() -> None:
         test_cli_surface,
         test_version_consistency,
         test_chat_contract,
+        test_onboarding,
         test_planner_fallbacks,
         test_decompose_budget,
         test_paths,

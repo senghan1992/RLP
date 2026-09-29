@@ -598,6 +598,15 @@ def _build_identity() -> dict:
     }
 
 
+def _cmd_progress(args: argparse.Namespace) -> int:
+    from . import onboarding
+
+    report = onboarding.progress()
+    # Exit 0 either way: "you are 3 of 7 through setting up" is an answer, not a
+    # failure. `doctor` owns the question of whether something is broken.
+    return _emit({"ok": True, "result": report}, args.json, onboarding.render(report))
+
+
 def _cmd_version(args: argparse.Namespace) -> int:
     identity = _build_identity()
     if getattr(args, "json", False):
@@ -759,6 +768,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not pay the model load up front",
     )
+    sp = sub.add_parser(
+        "progress", help="how far this host is from install to a first green worker"
+    )
+    sp.add_argument("--json", action="store_true")
+
     sp = sub.add_parser("version", help="RLP's version, and what this checkout was built from")
     sp.add_argument("--json", action="store_true")
     return p
@@ -783,6 +797,7 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": _cmd_doctor,
         "serve": _cmd_serve,
         "engine": _cmd_engine,
+        "progress": _cmd_progress,
         "version": _cmd_version,
     }
     try:
