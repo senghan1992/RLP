@@ -3,6 +3,11 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Mondays, 04:00 UTC — for the upstream-drift job only. Everything else runs
+    # on push; this one asks a question whose answer changes without us.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
 
 jobs:
   offline-tests:
@@ -49,9 +54,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      # The live harness checks (contract + provider) need a built fork, so CI
-      # only parses them. A syntax error there is invisible until someone runs
-      # the slow suite, which is too late.
+      # A fast fail-first pass. The `live-session` job below actually *runs*
+      # these, but it spends two minutes building the harness to get there, and
+      # a typo should not cost two minutes to discover.
       - name: parse the harness checks
         run: |
           node --check scripts/check-harness.mjs
@@ -87,3 +92,109 @@ jobs:
             echo "::error::scripts/release refuses to tag without notes, so this would block a release."
             exit 1
           fi
+
+  live-session:
+    name: harness + provider (live session)
+    runs-on: ubuntu-latest
+    # The only job that exercises the TUI. Everything else here checks text that
+    # describes the tool; this one builds the real harness, drops in the real
+    # extensions, and types slash commands into a real session over RPC —
+    # because a provider wizard is a conversation, and stubbing the conversation
+    # tests the stub.
+    #
+    # Affordable because of RLP_SKIP_MODELS: no torch, no laya, no 400 MB
+    # checkpoint. None of it is needed to prove the commands load and the
+    # dialogs behave, and without it this job could not exist.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Deliberately uninstrumented: the installer is itself under test here.
+      # Reimplementing its steps inline is how CI ends up passing against a
+      # sequence no user ever runs.
+      - name: install RLP (pinned upstream, no model stack)
+        run: RLP_SKIP_MODELS=1 sh scripts/install.sh
+
+      - name: the install has to be complete enough to be worth testing
+        run: |
+          ./scripts/rlp version
+          test -x fork/pi/packages/coding-agent/dist/bundle/cli.js ||
+            test -f fork/pi/packages/coding-agent/dist/bundle/cli.js ||
+            { echo "::error::the harness bundle was not built"; exit 1; }
+          # The fork must be a clean single-commit branch, or `rlp update` will
+          # refuse to run on a real install — which is how that stayed broken.
+          if [ -n "$(git -C fork/pi status --porcelain)" ]; then
+            git -C fork/pi status --short
+            echo "::error::install.sh left fork/pi dirty; 'rlp update' would refuse to start."
+            exit 1
+          fi
+          git -C fork/pi rev-parse --verify origin/main >/dev/null ||
+            { echo "::error::fork/pi has no origin/main; 'rlp update' has nothing to merge."; exit 1; }
+
+      - name: extension typecheck + offline suite
+        run: sh scripts/selftest.sh --fast
+
+      - name: every command loads, exactly once
+        run: node scripts/check-harness.mjs ./scripts/rlp
+
+      - name: /provider and /setup, driven as a person would
+        run: node scripts/check-provider.mjs ./scripts/rlp
+
+      - name: a fresh install reports what is missing, and only that
+        # The first-run report is a deliverable: every non-ok line must name a
+        # fix this host can act on, and the failure *set* is pinned so a new
+        # unresolvable line cannot appear unnoticed. That regression is the one
+        # users complained about loudest.
+        run: sh scripts/check-first-run ./scripts/rlp
+
+  upstream-drift:
+    name: upstream drift (scheduled)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Installs pin the upstream commit, which is what makes an install
+    # reproducible — and also what means nothing notices when upstream refactors
+    # past the patch. `rlp update` is the path that moves forward, so this job
+    # runs it for real and fails if the merge conflicts or an RLP marker is
+    # lost. The point is to find that out on a Monday rather than from a user.
+    #
+    # A failure here is not a broken release: installs still work. It is notice
+    # that the next `rlp update` will not.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install at the pinned base
+        run: RLP_SKIP_MODELS=1 sh scripts/install.sh
+      - name: run the real update against current upstream
+        # `rlp update --no-self`, unmodified: the merge, the marker check, the
+        # `npm install && npm run build` (upstream adds dependencies, so the
+        # install is not optional), and the agent-dir re-sync. Reproducing those
+        # steps inline is how a drift check ends up passing against a sequence
+        # `rlp update` does not actually run — which it did, on the first try,
+        # by skipping the npm install.
+        run: |
+          echo "pinned base:  $(grep -v '^#' scripts/rlp-fork.base | tr -d '[:space:]')"
+          echo "upstream now: $(git -C fork/pi ls-remote origin HEAD | cut -f1)"
+          sh scripts/rlp-update --no-self
+      - name: the extensions still typecheck against the merged harness
+        run: sh scripts/selftest.sh --fast
+      - name: and the merged harness still answers as itself
+        run: |
+          node scripts/check-harness.mjs ./scripts/rlp
+          sh scripts/check-first-run ./scripts/rlp
+      - name: what to do about it
+        if: failure()
+        run: |
+          echo "::warning::Upstream pi has moved past scripts/rlp-fork.base in a way RLP does not survive."
+          echo "::warning::Installs are unaffected (they pin the base). The next 'rlp update' is what breaks."
+          echo "::warning::Fix: resolve it in fork/pi, regenerate scripts/rlp-fork.patch and rlp-fork.base together."

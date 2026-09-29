@@ -10,6 +10,9 @@
 #                         (stubbed models, milliseconds)
 #   integration         — the real laya load, real decomposition, real routing
 #                         (~4 min on CPU; pays the checkpoint load once)
+#   harness contract    — every command loads, exactly once, in a real session
+#   provider / setup    — the wizards, driven through a real session over RPC
+#   first-run report    — every non-ok doctor line names an actionable fix
 #
 # Pass --fast to stop after the offline suite.
 set -eu
@@ -77,5 +80,15 @@ echo
 echo "== provider / setup (live session) =="
 node "$ROOT/scripts/check-provider.mjs" "$ROOT/scripts/rlp" || {
   echo "selftest: provider check FAILED" >&2
+  exit 1
+}
+
+# --- 5. the first-run report ---
+# Cheap, and it guards the property users judge the tool by: every non-ok
+# doctor line names a fix this host can act on.
+echo
+echo "== first-run report =="
+RLP_FIRST_RUN_EXPECT_MODELS=1 sh "$ROOT/scripts/check-first-run" "$ROOT/scripts/rlp" || {
+  echo "selftest: first-run check FAILED" >&2
   exit 1
 }

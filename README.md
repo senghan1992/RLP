@@ -406,8 +406,9 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | `RLP_SKIP_CREDENTIAL_PREFLIGHT=1` | skip the per-arm credential check |
 | `RLP_NO_MIGRATE=1` | do not copy credentials out of pi's `~/.pi` on install |
 | `RLP_HOME` | where run ledgers and project memory live (`~/.rlp`) |
-| `RLP_PI_REPO` · `RLP_PI_REF` | fork source + ref for `install.sh` |
+| `RLP_PI_REPO` · `RLP_PI_REF` | fork source · upstream ref, overriding the pin in `scripts/rlp-fork.base` |
 | `RLP_REBUILD=1` · `RLP_ORCH_FORCE=1` | force a fork rebuild · overwrite the installed ladder |
+| `RLP_SKIP_MODELS=1` | install without torch/laya/rlm and the checkpoint — everything that does not run a model still works |
 | `SSL_CERT_FILE` | CA bundle (needed behind a TLS-inspecting proxy) |
 
 ---
@@ -428,8 +429,9 @@ RLP/
     skills/           #   /skill:rlp-* — workflow, models, engine, doctor, commands
     orchestration.json#   the ladder: policy, and no model arms (see above)
   scripts/            # install, sync-agent-dir, rlp/rpi wrappers, rlp-update,
-                      #   release + changelog-section, selftest, fork patch,
-                      #   check-harness + check-provider (live-session checks)
+                      #   release + changelog-section, selftest,
+                      #   rlp-fork.patch + rlp-fork.base (the pinned upstream),
+                      #   check-harness + check-provider + check-first-run
   docs/               # CONCEPTS.md, ARCHITECTURE.md
 ```
 
@@ -437,19 +439,30 @@ RLP/
 
 ```bash
 sh scripts/selftest.sh --fast   # extension typecheck + offline suite (seconds)
-sh scripts/selftest.sh          # + real models, and the two live-session checks (~4 min)
+sh scripts/selftest.sh          # + real models and every live-session check (~4 min)
 
 node scripts/check-harness.mjs  # commands load, no duplicate registrations
 node scripts/check-provider.mjs # /provider and /setup, driven through a live session
+sh scripts/check-first-run      # every non-ok doctor line names an actionable fix
 ```
 
 The offline suite stubs every model layer (including the provider transport) and
-runs in milliseconds: `rlp-svc/.venv/bin/python -m rlp_svc.tests`. CI runs it,
-plus a `sh -n` pass over every shipped script, a `node --check` over the two
-harness checks, and a release-readiness check — see
-`.github/workflows/ci.yml`. The live-session checks need a built fork and
-installed extensions, so they run locally and in the full selftest rather than
-in CI.
+runs in milliseconds: `rlp-svc/.venv/bin/python -m rlp_svc.tests`.
+
+**CI runs the live-session checks too**, on every push. It builds the real
+harness, drops in the real extensions, and types slash commands into a real
+session over RPC — a provider wizard is a conversation, and stubbing the
+conversation tests the stub. That is affordable because of
+`RLP_SKIP_MODELS=1 sh scripts/install.sh`, which installs everything except
+torch, laya, rlm and the 400 MB checkpoint: none of it is needed to prove the
+commands load and the dialogs behave. The same flag is useful for a container
+image, or for anyone who only wants the parts that do not run a model.
+
+A scheduled `upstream-drift` job runs the real `rlp update --no-self` against
+current upstream pi once a week. Installs pin the upstream commit, which is what
+makes them reproducible — and also what means nothing would notice upstream
+refactoring past the patch until someone ran `rlp update`. A failure there is not
+a broken release; it is notice that the next update will not work.
 
 ### The fork patch
 
@@ -460,8 +473,17 @@ regenerate the patch rather than hand-editing it:
 ```bash
 cd fork/pi
 git add -A && git commit --amend --no-edit
-git diff "$(git merge-base origin/main HEAD)" HEAD > ../../scripts/rlp-fork.patch
+BASE=$(git merge-base origin/main HEAD)
+git diff "$BASE" HEAD > ../../scripts/rlp-fork.patch
+git rev-parse "$BASE"        # write this into scripts/rlp-fork.base
 ```
+
+`scripts/rlp-fork.base` records the upstream commit the patch applies to, and
+`install.sh` fetches exactly that commit. The two files are one fact in two
+places and only mean anything as a pair, so regenerate them together. Pinning is
+what makes an install reproducible: the installer used to clone upstream's
+default branch, and by the time anyone checked, upstream had moved past the
+patch and a fresh `curl | sh` failed for everyone.
 
 `scripts/rlp-update` greps the built fork for RLP's fingerprints
 (`check_markers`), so a marker removed from the patch has to be removed there

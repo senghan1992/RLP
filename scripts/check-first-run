@@ -1,0 +1,138 @@
+#!/bin/sh
+# Assert that a fresh install's `rlp doctor` report is one a person can act on.
+#
+#   sh scripts/check-first-run [<rlp binary>]
+#
+# The first-run experience is a deliverable, not a side effect, and it has one
+# property worth protecting mechanically: **every non-ok line names a fix this
+# host can act on.** RLP once shipped three warnings whose stated fix was to
+# re-run the installer, which then printed "skipping" and changed nothing — an
+# unresolvable loop with no explanation, and the single clearest complaint the
+# tool ever got. A check is what stops that coming back.
+#
+# It also pins the *set* of expected failures. A new failure on a host with no
+# provider is either a regression or a deliberate change that has to be recorded
+# here, and either way somebody should have to look at it.
+#
+# Env:
+#   RLP_FIRST_RUN_EXPECT_MODELS=1   the model stack is installed, so the
+#                                   laya/rlm/checkpoint lines must NOT fail
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+RLP="${1:-$ROOT/scripts/rlp}"
+PY="$ROOT/rlp-svc/.venv/bin/python"
+
+[ -x "$RLP" ] || { echo "check-first-run: no rlp binary at $RLP" >&2; exit 2; }
+[ -x "$PY" ] || { echo "check-first-run: no engine venv at $PY" >&2; exit 2; }
+
+TMP="${TMPDIR:-/tmp}/rlp-first-run.$$"
+trap 'rm -f "$TMP"' EXIT
+
+# Exit code 3 means "a failure was found", which is the expected answer on a
+# host with no provider — so the report is what is judged, not the status.
+"$RLP" doctor --json > "$TMP" 2>/dev/null || true
+[ -s "$TMP" ] || { echo "check-first-run: rlp doctor --json produced nothing" >&2; exit 1; }
+
+RLP_FIRST_RUN_EXPECT_MODELS="${RLP_FIRST_RUN_EXPECT_MODELS:-}" \
+"$PY" - "$TMP" <<'PY'
+import json
+import os
+import sys
+
+report = json.load(open(sys.argv[1]))
+checks = report["checks"]
+
+problems = []
+
+# 1. Every non-ok line carries a fix. This is the rule the doctor's own
+#    docstring states, and the one the tool was judged on.
+unactionable = [c for c in checks if c["status"] != "ok" and not (c["hint"] or "").strip()]
+if unactionable:
+    problems.append(
+        "these lines report a problem with no fix beside it:\n"
+        + "\n".join(f"    [{c['status']}] {c['name']}: {c['detail']}" for c in unactionable)
+    )
+
+# 2. No fix may point at a step that does nothing. The installer is the usual
+#    culprit: a line that says "run the installer" when the installer has
+#    already run and deliberately skipped that piece is the exact shape of the
+#    loop this check exists to prevent. Named pieces the installer really does
+#    install are fine; the model stack, which RLP_SKIP_MODELS omits on purpose,
+#    is checked separately below.
+MODEL_LINES = {"dep:laya", "dep:rlm", "laya-checkpoint"}
+expect_models = bool(os.environ.get("RLP_FIRST_RUN_EXPECT_MODELS"))
+
+# 3. The expected failure set on a host with no provider. Anything else is a
+#    regression or a change somebody has to come here and record.
+#
+#    `providers` and `ladder` are *required* to fail: they are the two lines
+#    that tell a new user what to do. The `creds:` lines are only allowed to,
+#    because the harness writes an empty `auth.json` the first time it starts —
+#    so whether they fail depends on whether `rlp` has ever been run here, and a
+#    check that depends on that is a flaky check rather than a strict one.
+REQUIRED_FAILURES = {"providers", "ladder"}
+CREDENTIAL_LINES = {"creds:auth.json", "creds:models.json"}
+allowed_failures = REQUIRED_FAILURES | CREDENTIAL_LINES
+if not expect_models:
+    allowed_failures |= MODEL_LINES
+
+failed = {c["name"] for c in checks if c["status"] == "fail"}
+unexpected = failed - allowed_failures
+if unexpected:
+    problems.append(
+        "unexpected failures on a fresh install: "
+        + ", ".join(sorted(unexpected))
+        + "\n    If one of these is intentional, add it to scripts/check-first-run."
+    )
+
+# The provider lines must actually be there. A doctor that stops reporting the
+# missing provider would "pass" this check while telling a new user nothing.
+missing = REQUIRED_FAILURES - failed
+if missing:
+    problems.append(
+        "the doctor no longer reports these on a host with no provider: "
+        + ", ".join(sorted(missing))
+        + "\n    A silent first run is worse than a noisy one."
+    )
+
+if expect_models:
+    still_failing = failed & MODEL_LINES
+    if still_failing:
+        problems.append(
+            "the model stack is supposed to be installed, but these fail: "
+            + ", ".join(sorted(still_failing))
+        )
+
+# 4. Every fix that names a slash command has to name one that exists. A hint
+#    pointing at a command nobody registered is a dead end dressed as help.
+KNOWN_COMMANDS = {
+    "/setup", "/provider", "/login", "/models", "/commands", "/reload",
+    "/rlp-plan", "/rlp-state", "/rlp-doctor", "/rlp-ladder", "/rlp-config",
+    "/rlp-roles", "/rlp-run", "/rlp", "/orchestration",
+}
+import re
+
+# A slash command starts a word. Matching a bare `/word` anywhere also matched
+# the `/model` inside `provider/model` — which is a spec, not a command — and
+# reported a fix as broken for naming the thing it was explaining.
+SLASH_COMMAND = re.compile(r"(?:^|(?<=[\s(`'\"]))(/[a-z][a-z-]*)(?![\w/-])")
+
+for c in checks:
+    for ref in SLASH_COMMAND.findall(c["hint"] or ""):
+        if ref not in KNOWN_COMMANDS and not ref.startswith("/skill:"):
+            problems.append(f"{c['name']}'s fix names {ref}, which is not an RLP command")
+
+if problems:
+    print("first-run check FAILED:\n")
+    for p in problems:
+        print(f"  - {p}")
+    sys.exit(1)
+
+s = report["summary"]
+print(
+    f"  first-run report ok: {s['pass']} passed, {s['warn']} warning(s), "
+    f"{s['fail']} failure(s) — every one actionable"
+)
+print(f"  expected failures present: {', '.join(sorted(failed))}")
+PY

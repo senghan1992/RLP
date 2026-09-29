@@ -1,0 +1,24 @@
+# The upstream pi commit that scripts/rlp-fork.patch applies to.
+#
+# An install pins this rather than tracking upstream's default branch. Tracking
+# HEAD meant every install was a bet on whether upstream had moved the lines the
+# patch touches — and by the time this file was written, it had: a fresh
+# `curl | sh` failed at "patch did not apply cleanly" for everyone, because a
+# `--depth 1` clone also has none of the blobs `git apply --3way` needs to
+# recover. Pinning makes an install reproducible and makes the failure mode
+# impossible.
+#
+# Moving to a newer upstream is `rlp update`'s job, deliberately: it merges,
+# re-checks every RLP marker survived, rebuilds, and rolls back cleanly. That is
+# a verified step someone chose, not a side effect of installing today rather
+# than yesterday.
+#
+# Regenerate this file together with the patch — they are one fact in two
+# places, and only in that pair does either mean anything:
+#
+#   cd fork/pi
+#   BASE=$(git merge-base origin/main HEAD)
+#   git diff "$BASE" HEAD > ../../scripts/rlp-fork.patch
+#   git rev-parse "$BASE"  # put it below, keeping this header
+#
+cb7969d212836b8939001dce159fbd2ed6ad395f

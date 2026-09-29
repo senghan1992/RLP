@@ -92,7 +92,7 @@ say "  $(printf '%s\n' "$BODY" | grep -c '^- \|^  - ' || true) note line(s) to p
 step "4/5  verify"
 for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh scripts/selftest.sh \
          scripts/rlp-update scripts/sync-agent-dir scripts/release \
-         scripts/changelog-section; do
+         scripts/changelog-section scripts/check-first-run; do
   sh -n "$ROOT/$f" || die "syntax error in $f"
 done
 say "  shell       every shipped script parses"

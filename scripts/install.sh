@@ -14,9 +14,14 @@
 #
 # Env:
 #   RLP_PI_REPO   git URL of the pi fork source   (default: upstream pi)
-#   RLP_PI_REF    branch/tag to check out         (default: upstream default)
+#   RLP_PI_REF    branch/tag to check out         (default: the pinned commit in
+#                 scripts/rlp-fork.base — an install is reproducible, and moving
+#                 upstream is `rlp update`'s verified job, not a side effect)
 #   RLP_REBUILD=1 force a rebuild of the fork
 #   RLP_ORCH_FORCE=1 overwrite an existing orchestration ladder
+#   RLP_SKIP_MODELS=1 install without torch/laya/rlm and without the checkpoint
+#                 (everything that does not run a model still works; this is
+#                  what CI installs so it can drive the real harness)
 #
 # Idempotent: re-running skips completed steps and is safe after an update.
 set -eu
@@ -48,14 +53,54 @@ have python3 || have python || {
 }
 
 # --- 1. pi fork (the rpi harness) --------------------------------------------
+#
+# The upstream commit is PINNED, to the sha in scripts/rlp-fork.base. Cloning
+# upstream's default branch instead made every install a bet on whether upstream
+# had moved the lines the patch touches, and that bet was already lost: a fresh
+# `curl | sh` failed for everyone at "patch did not apply cleanly", because
+# upstream had moved on *and* a `--depth 1` clone has none of the blobs
+# `git apply --3way` needs to recover. Pinning removes both halves of that.
+#
+# Moving to a newer upstream is `rlp update`'s job, which merges, re-checks that
+# every RLP marker survived, rebuilds, and rolls back cleanly. `RLP_PI_REF`
+# still overrides the pin for anyone who wants to try a newer upstream by hand.
 PI_REPO="${RLP_PI_REPO:-https://github.com/earendil-works/pi}"
+PI_BASE=$(grep -v '^#' "$ROOT/scripts/rlp-fork.base" 2>/dev/null | tr -d '[:space:]' || true)
 if [ ! -d "$FORK" ]; then
-  echo "[rlp] cloning pi fork from $PI_REPO ..."
   if [ -n "${RLP_PI_REF:-}" ]; then
+    echo "[rlp] cloning pi from $PI_REPO at $RLP_PI_REF (RLP_PI_REF overrides the pin) ..."
     git clone --depth 1 --branch "$RLP_PI_REF" "$PI_REPO" "$FORK"
+    git -C "$FORK" checkout -q -B rlp
+  elif [ -n "$PI_BASE" ]; then
+    echo "[rlp] cloning pi from $PI_REPO at the pinned base $(printf '%.10s' "$PI_BASE") ..."
+    mkdir -p "$FORK"
+    git -C "$FORK" init -q
+    git -C "$FORK" remote add origin "$PI_REPO"
+    # Fetch the exact commit: one commit, no history, and the blobs the patch
+    # needs are exactly the ones it came from. A server that refuses a
+    # by-sha fetch is handled below rather than left as a bare git error.
+    if git -C "$FORK" fetch -q --depth 1 origin "$PI_BASE" 2>/dev/null; then
+      git -C "$FORK" checkout -q -B rlp FETCH_HEAD
+      # `rlp update` merges `origin/main`, so that ref has to exist.
+      git -C "$FORK" fetch -q --depth 1 origin HEAD:refs/remotes/origin/main 2>/dev/null || true
+    else
+      echo "[rlp] $PI_REPO would not serve the pinned commit $PI_BASE directly;" >&2
+      echo "      falling back to a full clone so it can be checked out." >&2
+      rm -rf "$FORK"
+      git clone -q "$PI_REPO" "$FORK" || {
+        echo "[rlp] could not clone $PI_REPO (no network?)" >&2
+        exit 1
+      }
+      git -C "$FORK" checkout -q -B rlp "$PI_BASE" || {
+        echo "[rlp] $PI_REPO does not contain the pinned commit $PI_BASE." >&2
+        echo "      Set RLP_PI_REF to a ref it does have, or update scripts/rlp-fork.base." >&2
+        exit 1
+      }
+    fi
   else
+    echo "[rlp] no pinned base recorded — cloning $PI_REPO's default branch" >&2
     git clone --depth 1 "$PI_REPO" "$FORK"
-    git -C "$FORK" checkout -b rlp
+    git -C "$FORK" checkout -q -B rlp
   fi
 fi
 
@@ -66,9 +111,15 @@ NEEDS_BUILD=""
 if ! grep -q "RPI_DEFAULT_MODEL" "$FORK/packages/coding-agent/src/core/settings-manager.ts" 2>/dev/null; then
   echo "[rlp] applying fork patch set..."
   git -C "$FORK" apply --3way "$PATCH" || {
-    echo "[rlp] patch did not apply cleanly against $PI_REPO." >&2
-    echo "      If upstream moved, set RLP_PI_REPO/RLP_PI_REF to a fork that carries the rlp branch." >&2
-    echo "      Or resolve the conflicts in $FORK and re-run." >&2
+    echo "[rlp] the fork patch did not apply." >&2
+    echo "      Expected upstream at $PI_BASE (scripts/rlp-fork.base); the fork is at" >&2
+    echo "      $(git -C "$FORK" rev-parse HEAD 2>/dev/null || echo '?')." >&2
+    if [ -n "${RLP_PI_REF:-}" ]; then
+      echo "      RLP_PI_REF=$RLP_PI_REF overrode the pin — that is the likely cause." >&2
+      echo "      Unset it to install the combination this RLP was built and tested against." >&2
+    else
+      echo "      Delete $FORK and re-run to fetch the pinned base cleanly." >&2
+    fi
     exit 1
   }
   # Commit it. `git apply` leaves the patch in the working tree, which left every
@@ -133,23 +184,44 @@ if [ ! -d "$VENV" ]; then
 fi
 # mcp is pinned <2: `rlp serve` builds on FastMCP's 1.x API surface.
 TORCH_INDEX="https://download.pytorch.org/whl/cpu"   # CPU-only torch; the default index pulls multi-GB CUDA
-if have uv; then
-  uv pip install --python "$PY" torch --index-url "$TORCH_INDEX"
-  uv pip install --python "$PY" "mcp>=1,<2" rlms laya httpx
-  uv pip install --python "$PY" -e .
+#
+# RLP_SKIP_MODELS=1 installs everything except the model stack: no torch, no
+# laya, no rlm, no 400 MB checkpoint. What still works is every part that does
+# not run a model — the harness, the extensions, `rlp provider`, `rlp ladder`,
+# `rlp doctor`, the offline suite and the live-session checks — which is exactly
+# the subset CI can afford to exercise on every push, and is why the TUI surface
+# is now testable there at all. `rlp doctor` reports the missing pieces as the
+# failures they are, so nobody mistakes this for a complete install.
+if [ -n "${RLP_SKIP_MODELS:-}" ]; then
+  echo "[rlp] RLP_SKIP_MODELS=1 — installing the engine without torch/laya/rlm"
+  echo "[rlp]   triage, routing and decomposition will NOT run; everything else will"
+  if have uv; then
+    uv pip install --python "$PY" "mcp>=1,<2" httpx
+    uv pip install --python "$PY" --no-deps -e .
+  else
+    "$PY" -m pip install -q --upgrade pip
+    "$PY" -m pip install -q "mcp>=1,<2" httpx
+    "$PY" -m pip install -q --no-deps -e .
+  fi
 else
-  "$PY" -m pip install --upgrade pip
-  "$PY" -m pip install torch --index-url "$TORCH_INDEX"
-  "$PY" -m pip install "mcp>=1,<2" rlms laya httpx
-  "$PY" -m pip install -e .
-fi
-# laya checkpoints (CPU, ~400 MB) — cached after the first run.
-"$PY" -c "
+  if have uv; then
+    uv pip install --python "$PY" torch --index-url "$TORCH_INDEX"
+    uv pip install --python "$PY" "mcp>=1,<2" rlms laya httpx
+    uv pip install --python "$PY" -e .
+  else
+    "$PY" -m pip install --upgrade pip
+    "$PY" -m pip install torch --index-url "$TORCH_INDEX"
+    "$PY" -m pip install "mcp>=1,<2" rlms laya httpx
+    "$PY" -m pip install -e .
+  fi
+  # laya checkpoints (CPU, ~400 MB) — cached after the first run.
+  "$PY" -c "
 import os
 os.environ.setdefault('SSL_CERT_FILE', '/etc/ssl/certs/ca-certificates.crt')
 from huggingface_hub import snapshot_download
 snapshot_download('convaiinnovations/laya', allow_patterns=['rl_agent_config.json','model.safetensors','tokenizer/*','encoder/*'])
 " 2>/dev/null || echo "[rlp] laya checkpoint download skipped (offline, or already cached)"
+fi
 
 # --- 3. Harness extensions + skills + ladder, in RLP's own agent dir --------
 # One implementation, shared with `rlp update`: an update that moves the engine

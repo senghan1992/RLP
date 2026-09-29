@@ -248,22 +248,51 @@ if [ "$CHECK" = 1 ]; then
 elif [ "$BEHIND" = "0" ]; then
   say "  nothing to merge"
 else
-  # Record what the RLP surface looks like *before*, so the post-merge check
-  # can be a real diff rather than a guess.
+  # A merge commit needs a committer identity, and a fresh machine — a CI
+  # runner, a container, a new laptop — often has none. Without this the merge
+  # failed on "Committer identity unknown" and was reported as a *conflict*,
+  # which is a false diagnosis of the one thing this step exists to detect.
+  # `-c` only supplies a fallback: an existing identity is left alone, because
+  # the merge commit should carry the name of whoever ran the update when there
+  # is one to carry.
+  # Supplied as environment variables rather than `git -c name=value`, because
+  # a `-c` pair held in a shell variable word-splits on the space in the name
+  # and git then reads the second word as a subcommand. Nothing in POSIX sh
+  # makes that safe; these do, and git honours them only when no identity is
+  # configured for real.
+  if ! git config user.email >/dev/null 2>&1 || ! git config user.name >/dev/null 2>&1; then
+    say "  no git identity configured here — the merge commit will say 'RLP updater'"
+    GIT_AUTHOR_NAME="RLP updater"
+    GIT_AUTHOR_EMAIL="rlp@localhost"
+    GIT_COMMITTER_NAME="RLP updater"
+    GIT_COMMITTER_EMAIL="rlp@localhost"
+    export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+  fi
+
   say "  merging (this may conflict; RLP's changes touch files upstream edits too)"
   if ! git merge --no-edit --no-stat "$TARGET"; then
+    UNMERGED=$(git diff --name-only --diff-filter=U)
     say ""
-    say "  CONFLICTS:"
-    git diff --name-only --diff-filter=U | sed 's/^/    /'
-    say ""
-    say "  aborting, so the tree is left clean and the old build keeps working"
-    git merge --abort 2>/dev/null || true
-    die "conflict merging $TARGET into rlp. The RLP side is committed at $PREV_SHA.
+    if [ -n "$UNMERGED" ]; then
+      say "  CONFLICTS:"
+      printf '%s\n' "$UNMERGED" | sed 's/^/    /'
+      say ""
+      say "  aborting, so the tree is left clean and the old build keeps working"
+      git merge --abort 2>/dev/null || true
+      die "conflict merging $TARGET into rlp. The RLP side is committed at $PREV_SHA.
   To resolve manually:
     git merge $TARGET      # then fix the listed files
     git commit             # then: sh scripts/install.sh
   To skip the update entirely:
     git reset --hard $PREV_SHA"
+    fi
+    # No unmerged paths means the merge failed for some other reason. Saying
+    # "conflict" here would send someone looking for one that is not there.
+    say "  the merge failed, but no file is in conflict — so this is not a"
+    say "  content problem. git's own message is above."
+    git merge --abort 2>/dev/null || true
+    die "git could not complete the merge of $TARGET (see its message above).
+  Nothing was changed; the RLP side is still at $PREV_SHA."
   fi
   say "  merged cleanly"
 fi

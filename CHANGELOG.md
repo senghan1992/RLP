@@ -8,7 +8,61 @@ offline suite fails if they drift.
 
 ## Unreleased
 
+### Fixed
+
+- **A fresh `curl | sh` failed for everyone.** `install.sh` cloned upstream pi's
+  default branch and applied `scripts/rlp-fork.patch` to whatever it found
+  there. Upstream had moved past the patch's base, so the patch no longer
+  applied — and because the clone was `--depth 1`, it also had none of the blobs
+  `git apply --3way` needs to recover, so the 3-way fallback could not run
+  either. The install aborted at "patch did not apply cleanly". Nobody could
+  install RLP.
+
+  The upstream commit is now **pinned**, in `scripts/rlp-fork.base`, and the
+  installer fetches exactly that commit (a by-sha `--depth 1` fetch, with a full
+  clone as the fallback for a server that refuses one). An install is
+  reproducible; moving upstream is `rlp update`'s verified job, not a side
+  effect of installing today rather than yesterday. `RLP_PI_REF` still
+  overrides. The patch and the base are one fact in two places and are
+  regenerated together.
+- **`rlp update` reported a missing git identity as a merge conflict.** A merge
+  commit needs a committer, and a fresh machine — a CI runner, a container, a
+  new laptop — often has none. The merge failed on "Committer identity unknown"
+  and was announced as `CONFLICTS:` with an empty file list, which is a false
+  diagnosis of the one thing that step exists to detect. It now supplies a
+  fallback identity (only when none is configured, so a real one is kept), and a
+  merge that fails with no unmerged paths says so instead of blaming content.
+
 ### Added
+
+- **CI runs the live-session checks on every push.** They were parsed with
+  `node --check` and never executed, because they need a built harness — so the
+  entire TUI surface was covered by nothing automated. The new `live-session`
+  job installs RLP for real, then drives `/provider` and `/setup` through a live
+  session over RPC, runs the harness contract and the extension typecheck, and
+  asserts the first-run report. It is affordable because of `RLP_SKIP_MODELS`.
+- **`RLP_SKIP_MODELS=1 sh scripts/install.sh`** — install everything except the
+  model stack: no torch, no laya, no rlm, no 400 MB checkpoint. Triage, routing
+  and decomposition will not run; the harness, the extensions, `rlp provider`,
+  `rlp ladder`, `rlp doctor`, the offline suite and every live-session check
+  will. That subset is what made CI coverage of the TUI possible at all, and it
+  is also what a container image or a docs build wants.
+- **`scripts/check-first-run`** — asserts that a fresh install's `rlp doctor`
+  report is one a person can act on: every non-ok line carries a fix, no fix
+  names a slash command that does not exist, the lines that tell a new user what
+  to do are present, and the *set* of failures is pinned so a new unresolvable
+  line cannot appear unnoticed. This is the regression guard for the tool's
+  loudest complaint — three warnings whose stated fix was to re-run the
+  installer, which then skipped that step and changed nothing. Run by CI and by
+  `scripts/selftest.sh`.
+- **A scheduled `upstream-drift` job** (weekly, or on demand) runs the real
+  `rlp update --no-self` against current upstream pi, then rebuilds, typechecks,
+  and re-runs the harness and first-run checks. Pinning makes installs
+  reproducible and also means nothing would notice upstream refactoring past the
+  patch until a user ran `rlp update`. A failure there is not a broken release —
+  installs are unaffected — it is notice that the next update will not work.
+  Verified against current upstream at the time of writing: seven commits ahead,
+  merge clean, all nine RLP markers intact, builds, typechecks.
 
 - **Versioned releases.** `install.sh` resolved `RLP_REF` to `main`, so every
   `curl | sh` installed whatever was pushed most recently — a mid-refactor
