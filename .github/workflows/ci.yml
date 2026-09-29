@@ -34,3 +34,19 @@ jobs:
           for f in install.sh scripts/rlp scripts/rpi-bin scripts/rlp-launch scripts/install.sh scripts/selftest.sh; do
             sh -n "$f" && echo "ok $f"
           done
+
+  node-syntax:
+    name: node syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # The live harness checks (contract + provider) need a built fork, so CI
+      # only parses them. A syntax error there is invisible until someone runs
+      # the slow suite, which is too late.
+      - name: parse the harness checks
+        run: |
+          node --check scripts/check-harness.mjs
+          node --check scripts/check-provider.mjs

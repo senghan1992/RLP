@@ -1,26 +1,24 @@
 /**
- * Harness menus for RLP: a command index, a model browser, and provider
- * management.
+ * Harness menus for RLP: a command index, a model browser, and the ladder
+ * editor.
  *
  * Why this exists as a dropped-in extension rather than fork patches: the
  * built-in `/` menu is long, flat, and silent about the harness's own
  * configuration. Finding `/scoped-models` in 25 rows, or working out which of
- * 487 models belong to *you*, is friction every session. And "attach another
- * model" currently means hand-editing two JSON files that hold credentials.
+ * 487 models belong to *you*, is friction every session.
  *
  * Commands:
  *   /commands              everything the slash menu offers, grouped, live
  *   /models [filter]       models grouped by provider, marked, optionally pick
  *   /models --pick         interactive: provider -> model -> use / set default
- *   /provider              list providers: endpoint, models, credential state
- *   /provider add <id> <baseUrl> <modelId> [name]
- *   /provider remove <id>
+ *   /rlp-config            show or edit the orchestration ladder
+ *   /rlp-roles             the model each RLP role resolves to
  *
- * Safety rules this file keeps, because it writes to a credential store:
- *   - never print a secret: keys are reported only as present/absent;
- *   - always back up before writing models.json / auth.json / settings.json;
- *   - merge, never replace: unrelated keys in those files are preserved;
- *   - a bad argument is a printed line, never a stack and never a partial write.
+ * Provider endpoints and credentials are NOT managed here: they belong to the
+ * engine (`rlp provider …`), which validates, backs up, writes atomically and
+ * keeps auth.json at 0600. `rlp-provider.ts` is the TUI in front of it. This
+ * file still writes `settings.json` — a preference, not a secret — the same
+ * way, backed up first.
  */
 import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -29,8 +27,6 @@ import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 const AGENT_DIR = process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-const MODELS_FILE = process.env.RLP_PI_MODELS || join(AGENT_DIR, "models.json");
-const AUTH_FILE = process.env.RLP_PI_AUTH || join(AGENT_DIR, "auth.json");
 const SETTINGS_FILE = join(AGENT_DIR, "settings.json");
 
 type Json = Record<string, unknown>;
@@ -53,39 +49,6 @@ function writeJson(path: string, data: Json): string {
 	}
 	writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
 	return backup;
-}
-
-// --- providers ------------------------------------------------------------------
-
-interface ProviderEntry {
-	name: string;
-	baseUrl: string;
-	api?: string;
-	apiKey?: string;
-	models?: Array<{ id: string; name?: string }>;
-}
-
-function loadProviders(): Record<string, ProviderEntry> {
-	const doc = readJson(MODELS_FILE);
-	const providers = doc?.providers;
-	return providers && typeof providers === "object" ? (providers as Record<string, ProviderEntry>) : {};
-}
-
-/** Auth state without ever exposing the secret itself. */
-function authState(provider: string): "oauth" | "key" | "none" {
-	const auth = readJson(AUTH_FILE);
-	const entry = auth?.[provider];
-	if (!entry || typeof entry !== "object") return "none";
-	const e = entry as Json;
-	if (typeof e.access === "string" && e.access) return "oauth";
-	if (typeof e.key === "string" && e.key) return "key";
-	return "none";
-}
-
-function credentialsHint(provider: string): string {
-	return authState(provider) === "none"
-		? `no credentials — run /login ${provider}`
-		: "credential present";
 }
 
 // --- the RLP ladder (optional decoration) -----------------------------------------
@@ -788,9 +751,25 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 			rows.filter((r) => r.authenticated).map((r) => r.provider),
 		),
 	].sort();
+	if (providers.length === 0) {
+		// Nothing to switch to: the useful answer is how to fix that, not an
+		// empty dialog.
+		ctx.ui.notify(
+			[
+				"◈ no provider has a credential, so there is no model to switch to.",
+				"",
+				"  /setup                 guided: connect a provider and build the ladder",
+				"  /provider connect      attach one endpoint",
+				`  ${rows.length} model(s) are configured but unusable without a key.`,
+			].join("\n"),
+			"warning",
+		);
+		return;
+	}
 	const provider = await ctx.ui.select("Which provider?", providers);
 	if (!provider) return;
-	const inProvider = rows.filter((r) => r.provider === provider);	const model = await ctx.ui.select(
+	const inProvider = rows.filter((r) => r.provider === provider);
+	const model = await ctx.ui.select(
 		`${provider} models`,
 		inProvider.map((r) => {
 			const marks = [r.current ? "●" : " ", r.isDefault ? "★" : " ", r.authenticated ? " " : "○"].join("");
@@ -914,149 +893,6 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 	);
 }
 
-// --- /provider ---------------------------------------------------------------------
-
-function renderProviders(): string {
-	const providers = loadProviders();
-	const ids = Object.keys(providers);
-	if (ids.length === 0) {
-		return [
-			"◈ providers",
-			"",
-			`  no endpoints configured (${MODELS_FILE})`,
-			"",
-			"  /provider add <id> <baseUrl> <modelId> [display name]",
-		].join("\n");
-	}
-	const lines = [`◈ providers · ${ids.length} in ${MODELS_FILE}`, ""];
-	for (const id of ids) {
-		const p = providers[id];
-		const count = Array.isArray(p.models) ? p.models.length : 0;
-		const state = authState(id);
-		const badge = state === "none" ? "○" : state === "oauth" ? "◆" : "●";
-		lines.push(`${badge} ${id}  —  ${p.baseUrl}`);
-		lines.push(`   ${count} model(s) · ${credentialsHint(id)}`);
-		if (count > 0) {
-			const preview = p.models!.slice(0, 4).map((m) => m.id).join(", ");
-			lines.push(`   ${preview}${count > 4 ? `, +${count - 4} more` : ""}`);
-		}
-		lines.push("");
-	}
-	lines.push("  ● api key   ◆ oauth   ○ no credentials");
-	lines.push("  /provider add <id> <baseUrl> <modelId> [name]   attach a new endpoint");
-	lines.push("  /provider remove <id>                           detach one");
-	lines.push("  /login <id>                                    set or replace a credential");
-	return lines.join("\n").trimEnd();
-}
-
-async function addProvider(ctx: ExtensionCommandContext, args: string): Promise<void> {
-	// add <id> <baseUrl> <modelId> [displayName]
-	const parts = args.split(/\s+/).filter(Boolean);
-	if (parts.length < 3) {
-		ctx.ui.notify(
-			[
-				"usage: /provider add <id> <baseUrl> <modelId> [display name]",
-				"",
-				"  e.g. /provider add myllm https://api.myllm.com/v1 large \"My LLM Large\"",
-				"",
-				"  Then paste the API key when asked; it is written to auth.json and never shown again.",
-			].join("\n"),
-			"warning",
-		);
-		return;
-	}
-	const [id, baseUrl, modelId, ...rest] = parts;
-	if (!/^[a-zA-Z0-9._-]+$/.test(id)) {
-		ctx.ui.notify(`◈ "${id}" is not a usable provider id (letters, digits, . _ -).`, "warning");
-		return;
-	}
-	if (!/^https?:\/\//.test(baseUrl)) {
-		ctx.ui.notify(
-			[
-				`◈ "${baseUrl}" is not an http(s) endpoint.`,
-				"If the provider id contains a space, quote it:",
-				`  /provider add "${id}" ${baseUrl} ${modelId}`,
-			].join("\n"),
-			"warning",
-		);
-		return;
-	}
-	const providers = loadProviders();
-	const replacing = Boolean(providers[id]);
-	if (replacing) {
-		const replace = await ctx.ui.confirm(
-			`Provider "${id}" already exists`,
-			`${providers[id].baseUrl}\n\nOverwrite it? The old entry is backed up.`,
-		);
-		if (!replace) return;
-	}
-	const apiKey = ctx.hasUI
-		? await ctx.ui.input(`API key for ${id} (blank to add later via /login ${id})`, "sk-…")
-		: undefined;
-
-	const doc = readJson(MODELS_FILE) ?? {};
-	const bag = (doc.providers && typeof doc.providers === "object" ? doc.providers : {}) as Json;
-	bag[id] = {
-		name: rest.join(" ") || id,
-		baseUrl,
-		api: "openai-completions",
-		// The credential goes to auth.json only. Some older entries also inline
-		// `apiKey` here; duplicating a secret into a second file doubles the
-		// places a leak can come from for no gain.
-		models: [
-			{
-				id: modelId,
-				name: rest.join(" ") || modelId,
-				reasoning: false,
-				input: ["text"],
-				contextWindow: 128000,
-				maxTokens: 8192,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			},
-		],
-	};
-	const backup = writeJson(MODELS_FILE, { ...doc, providers: bag });
-
-	if (apiKey) {
-		const auth = readJson(AUTH_FILE) ?? {};
-		auth[id] = { type: "api_key", key: apiKey };
-		writeJson(AUTH_FILE, auth);
-	}
-	ctx.ui.notify(
-		[
-			`◈ provider "${id}" ${replacing ? "replaced" : "added"}`,
-			"",
-			`  endpoint  ${baseUrl}`,
-			`  model     ${modelId}`,
-			`  auth      ${apiKey ? "key written to auth.json" : `none yet — /login ${id}`}`,
-			backup ? `  backup    ${backup}` : "  backup    none (new file)",
-			"",
-			"  /reload picks it up without restarting, then /models --pick to try it.",
-		].join("\n"),
-	);
-}
-
-function removeProvider(ctx: ExtensionCommandContext, id: string): void {
-	const providers = loadProviders();
-	if (!providers[id]) {
-		ctx.ui.notify(`◈ no provider "${id}" in ${MODELS_FILE}`, "warning");
-		return;
-	}
-	const bag = { ...providers };
-	delete bag[id];
-	const doc = readJson(MODELS_FILE) ?? {};
-	const backup = writeJson(MODELS_FILE, { ...doc, providers: bag });
-	ctx.ui.notify(
-		[
-			`◈ provider "${id}" removed from models.json`,
-			"",
-			backup ? `  backup  ${backup}` : "  backup  none",
-			"  its credential in auth.json was left alone — remove it there if unwanted.",
-			"  /reload to apply.",
-		].join("\n"),
-	);
-}
-
 // --- /commands --------------------------------------------------------------------
 
 const OMNIGENT: Array<[string, string]> = [
@@ -1154,6 +990,7 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 	bucket((n) => ["orchestration"].includes(n), "RLP ladder (harness)");
 
 	const rlpAll: Array<[string, string]> = [
+		["/setup", "guided first run: connect providers, pick the brain and the worker arms"],
 		["/rlp", "status card and action menu"],
 		["/rlp-plan <request>", "headless plan: gate → DAG → routing → waves"],
 		["/rlp-triage <request>", "the gate alone, one forward pass"],
@@ -1165,8 +1002,9 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 		["/commands", "this index"],
 		["/models [filter]", "models grouped by provider, marked"],
 		["/models --pick", "switch model, or set the default"],
-		["/provider", "endpoints and credential state"],
-		["/provider add|remove", "attach or detach a provider"],
+		["/provider", "endpoints and credentials; connect, test, set a key"],
+		["/provider connect", "guided: preset → endpoint → key → live model discovery"],
+		["/provider test <id>", "one real round trip, with the failure classified"],
 	];
 	const rlp: Array<[string, string]> = rlpAll.filter(([n]) => wanted(n) || wanted("rlp"));
 	groups.push(["RLP engine & menus", rlp]);
@@ -1226,20 +1064,9 @@ export default function harnessMenus(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("provider", {
-		description: "List / add / remove model providers (endpoints + credentials)",
-		handler: async (args, ctx) => {
-			const raw = args.trim();
-			if (!raw) return void ctx.ui.notify(renderProviders());
-			const [verb, ...rest] = raw.split(/\s+/);
-			if (verb === "add") return addProvider(ctx, rest.join(" "));
-			if (verb === "remove" || verb === "rm") {
-				if (!rest[0]) return void ctx.ui.notify("usage: /provider remove <id>", "warning");
-				return removeProvider(ctx, rest[0]);
-			}
-			return void ctx.ui.notify(renderProviders());
-		},
-	});
+	// `/provider` and `/setup` are registered by rlp-provider.ts, which drives
+	// the engine's validated `rlp provider …` commands. Registering them here
+	// too would make the loader disambiguate them as /provider:1 and /provider:2.
 
 	pi.registerCommand("rlp-config", {
 		description: "Show or edit the RLP orchestration ladder: brain, worker arms, per-role models, gate",

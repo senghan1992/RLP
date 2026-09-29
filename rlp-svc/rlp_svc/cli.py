@@ -366,6 +366,11 @@ def _cmd_provider(args: argparse.Namespace) -> int:
         # `rlp-svc provider` with no subcommand reaches here without the
         # subparser's own flag, and a missing attribute is not a reason to fail.
         args.json = False
+    if getattr(args, "key_stdin", False):
+        # A key on argv is visible in `ps` to every other process on the host.
+        # `--key-stdin` lets the TUI hand the secret over a pipe instead, which
+        # is the only reason this flag exists.
+        args.key = sys.stdin.read().strip() or None
     verb = args.provider_command
     if verb in (None, "show"):
         verb = "list"
@@ -603,6 +608,7 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("base_url", help="API root, e.g. https://api.example.com/v1")
     pa.add_argument("model", nargs="*", help="model id(s) to attach")
     pa.add_argument("--key", default=None, help="API key; written to auth.json (0600), never printed")
+    pa.add_argument("--key-stdin", action="store_true", help="read the API key from stdin (keeps it out of ps)")
     pa.add_argument("--name", default=None, help="display name")
     pa.add_argument("--api", default="openai-completions", help="api shape (default: openai-completions)")
     pa.add_argument("--replace-models", action="store_true", help="replace the model list instead of merging into it")
@@ -615,7 +621,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pk = psub.add_parser("key", help="set, replace, or (--drop) remove a provider's credential")
     pk.add_argument("id")
-    pk.add_argument("key", nargs="?", help="the credential; omit with --drop")
+    pk.add_argument("key", nargs="?", help="the credential; omit with --drop or --key-stdin")
+    pk.add_argument("--key-stdin", action="store_true", help="read the credential from stdin (keeps it out of ps)")
     pk.add_argument("--drop", action="store_true", help="remove the stored credential")
     pk.add_argument("--json", action="store_true")
 
@@ -623,12 +630,14 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("id", nargs="?", default="", help="a configured provider to read the URL and key from")
     pd.add_argument("--base-url", default="", help="probe this URL instead")
     pd.add_argument("--key", default=None, help="credential for --base-url")
+    pd.add_argument("--key-stdin", action="store_true", help="read the credential from stdin")
     pd.add_argument("--json", action="store_true")
 
     pp = psub.add_parser("probe", help="one real completion round trip: does this endpoint answer?")
     pp.add_argument("id", nargs="?", default=None, help="a configured provider")
     pp.add_argument("--base-url", default=None, help="check this URL before writing it")
     pp.add_argument("--key", default=None, help="credential for --base-url")
+    pp.add_argument("--key-stdin", action="store_true", help="read the credential from stdin")
     pp.add_argument("--model", default=None, help="model to test")
     pp.add_argument("--json", action="store_true")
 

@@ -61,12 +61,21 @@ echo "== integration suite (real models, slow) =="
 # --- 4. harness contract ---
 # Only reachable from the running harness: two extensions registering one
 # command name type-checks fine and then shows up in the menu as /name:1 and
-# /name:2, where neither invocation looks like what you typed.
-if [ "${1:-}" != "--fast" ] && [ -x "$ROOT/scripts/rlp" ]; then
-  echo
-  echo "== harness contract =="
-  node "$ROOT/scripts/check-harness.mjs" "$ROOT/scripts/rlp" || {
-    echo "selftest: harness contract FAILED" >&2
-    exit 1
-  }
+# /name:2, where neither invocation looks like what you typed. Then the same
+# live session is used to drive /provider and /setup as a person would, which is
+# the only way to test a wizard: stubbing the conversation tests the stub.
+if [ "${1:-}" = "--fast" ] || [ ! -x "$ROOT/scripts/rlp" ]; then
+  exit 0
 fi
+echo
+echo "== harness contract =="
+node "$ROOT/scripts/check-harness.mjs" "$ROOT/scripts/rlp" || {
+  echo "selftest: harness contract FAILED" >&2
+  exit 1
+}
+echo
+echo "== provider / setup (live session) =="
+node "$ROOT/scripts/check-provider.mjs" "$ROOT/scripts/rlp" || {
+  echo "selftest: provider check FAILED" >&2
+  exit 1
+}

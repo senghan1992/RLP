@@ -268,6 +268,7 @@ def test_providers_surface() -> None:
     def body(mod, models, auth):
         import contextlib
         import io
+        import sys
 
         with tempfile.TemporaryDirectory() as tmp:
             ladder = Path(tmp) / "orchestration.json"
@@ -319,6 +320,18 @@ def test_providers_surface() -> None:
                 with contextlib.redirect_stdout(sink):
                     code = cli.main(["provider", "key", "cli-added", "--drop"])
                 check(code == 0 and mod.credential_state("cli-added") == "none", "provider key --drop clears it")
+
+                # a credential handed over a pipe must never appear on argv
+                real_stdin = sys.stdin
+                try:
+                    sys.stdin = io.StringIO("sk-from-stdin\n")
+                    sink = io.StringIO()
+                    with contextlib.redirect_stdout(sink):
+                        code = cli.main(["provider", "key", "cli-added", "--key-stdin"])
+                finally:
+                    sys.stdin = real_stdin
+                check(code == 0 and mod.stored_credential("cli-added") == "sk-from-stdin", "the stdin key is stored")
+                check("sk-from-stdin" not in sink.getvalue(), "the stdin key is not echoed back")
 
                 # provider with no subcommand is the list view, not a crash
                 sink = io.StringIO()

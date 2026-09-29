@@ -15,6 +15,8 @@
  *   /rlp-doctor                 is this host runnable, with a fix per failure
  *   /rlp-ladder                the resolved model ladder and the router roster
  *   /rlp-run is registered by rlp-orchestrate.ts, which actually runs it.
+ *   /provider and /setup are registered by rlp-provider.ts, which owns the
+ *   endpoint/credential conversation.
  *
  * Two rules the commands keep:
  *   - never raise into the TUI: every failure is a rendered line, not a stack;
@@ -70,12 +72,22 @@ function run(python: string, args: string[], cwd: string): Promise<RunResult> {
 			["-m", "rlp_svc", ...args],
 			{ cwd, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: process.env },
 			(error, stdout, stderr) => {
+				// `execFile` reports *any* non-zero exit as an error, even when the
+				// process wrote a complete report to stdout — `doctor` exits 3 when a
+				// check fails, and still prints the whole table. Collapsing that to 0
+				// is how the status card came to say "runnable" on a host doctor had
+				// just failed on, and how `/rlp-doctor` never showed a warning.
+				const code =
+					error && typeof (error as { code?: unknown }).code === "number"
+						? ((error as { code: number }).code as number)
+						: error
+							? 1
+							: 0;
 				if (error && !stdout) {
-					const code = typeof (error as { code?: unknown }).code === "number" ? 1 : 1;
-					settle({ code, stdout: "", stderr: error.message });
+					settle({ code, stdout: "", stderr: String(stderr || error.message) });
 					return;
 				}
-				settle({ code: 0, stdout, stderr });
+				settle({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
 			},
 		);
 	});
@@ -194,7 +206,28 @@ const orchestrate: Handler = async (args, ctx) => {
 	if (ctx.hasUI) ctx.ui.pasteToEditor(command);
 };
 
+/**
+ * `/setup` lives in rlp-provider.ts (with /provider), and registering it in two
+ * files would show up as /setup:1 and /setup:2. The menu entry therefore puts
+ * the real command in the editor, where it runs as the command the user typed.
+ */
+const setup: Handler = async (_args, ctx) => {
+	report(
+		ctx,
+		[
+			"◈ RLP setup",
+			"",
+			"The guided first run: doctor → connect providers → orchestrator model →",
+			"worker arms → role bindings. Every step is skippable.",
+			"",
+			"It is in the editor now — press enter to start it.",
+		].join("\n"),
+	);
+	if (ctx.hasUI) ctx.ui.pasteToEditor("/setup");
+};
+
 const MENU: Array<{ label: string; run: Handler; prompt?: string }> = [
+	{ label: "Set up RLP (connect providers, choose models)", run: setup },
 	{ label: "Plan a request (gate → DAG → waves)", run: plan, prompt: "Plan which request?" },
 	{ label: "Triage a request (gate only)", run: triage, prompt: "Triage which request?" },
 	{ label: "Doctor (is this host runnable?)", run: doctor },
@@ -219,9 +252,10 @@ const status: Handler = async (args, ctx) => {
 	const python = findPython(ctx.cwd);
 	if (!python) return missingEngine(ctx);
 
-	const [health, ladderJson] = await Promise.all([
+	const [health, ladderJson, providerJson] = await Promise.all([
 		run(python, ["doctor", "--json"], ctx.cwd),
 		run(python, ["ladder", "--json"], ctx.cwd),
+		run(python, ["provider", "list", "--json"], ctx.cwd),
 	]);
 
 	const lines = [`◈ RLP · ${health.code === 0 ? "runnable" : "NOT runnable — /rlp-doctor for fixes"}`];
@@ -238,8 +272,22 @@ const status: Handler = async (args, ctx) => {
 	} catch {
 		lines.push("  ladder    unavailable — run /rlp-doctor");
 	}
+	try {
+		const providers = JSON.parse(providerJson.stdout)?.result;
+		if (providers) {
+			const withKey = providers.credentialed ?? [];
+			lines.push(`  endpoints ${providers.providers.length} (${withKey.length} with a credential)`);
+			for (const orphan of (providers.orphanArms ?? []).slice(0, 4)) {
+				lines.push(`  UNUSABLE  ${orphan.arm} — ${orphan.why}`);
+			}
+		}
+	} catch {
+		/* an older engine without `provider`: the ladder line still stands */
+	}
 	lines.push(`  here      ${ctx.cwd}`);
 	lines.push("");
+	lines.push("  /setup                 guided: connect providers, pick the brain and the worker arms");
+	lines.push("  /provider              endpoints, credentials, a live connection test");
 	lines.push("  /rlp-plan <request>    decide what to do, without dispatching");
 	lines.push("  /rlp-triage <request>  the gate alone, one forward pass");
 	lines.push("  /rlp-doctor            why something would not run");
