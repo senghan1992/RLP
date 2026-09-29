@@ -101,8 +101,20 @@ for f in scripts/check-harness.mjs scripts/check-provider.mjs; do
 done
 say "  node        the live-session checks parse"
 if [ -x "$PY" ]; then
-  (cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc.tests >/dev/null) || die "the offline suite fails — fix it before tagging"
-  say "  engine      offline suite passes"
+  # Captured, not streamed: the suite deliberately exercises a bad CLI argument,
+  # so it prints an argparse error on stderr *while passing*. Left visible, that
+  # line reads like a broken release and is exactly the sort of thing that makes
+  # someone abort one. The whole log is shown if the suite actually fails.
+  LOG="${TMPDIR:-/tmp}/rlp-release-tests.$$"
+  if (cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc.tests) >"$LOG" 2>&1; then
+    say "  engine      offline suite passes ($(grep -c '^— ' "$LOG" || true) tests)"
+    rm -f "$LOG"
+  else
+    say ""
+    sed 's/^/    /' "$LOG"
+    rm -f "$LOG"
+    die "the offline suite fails — fix it before tagging"
+  fi
 else
   die "no venv at $PY — run sh scripts/install.sh, so the suite actually runs before a tag"
 fi
