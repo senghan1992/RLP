@@ -1,8 +1,8 @@
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index c6c7a9d11..3975eb0da 100644
+index c6c7a9d..78ae054 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
-@@ -4,6 +4,7 @@
+@@ -4,7 +4,8 @@
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"type": "module",
  	"piConfig": {
@@ -11,35 +11,12 @@ index c6c7a9d11..3975eb0da 100644
 +		"configDir": ".rlp"
  	},
  	"bin": {
+ 		"pi": "dist/bundle/cli.js"
 diff --git a/packages/coding-agent/src/core/package-manager.ts b/packages/coding-agent/src/core/package-manager.ts
-index be42365a9..dd625366b 100644
+index be42365..e461e6e 100644
 --- a/packages/coding-agent/src/core/package-manager.ts
 +++ b/packages/coding-agent/src/core/package-manager.ts
-@@ -480,6 +480,23 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
- 
- 	return skillDirs;
- }
-+/** Collect `~/.omnigent/agents/<agent>/skills` dirs that exist on this host. */
-+function collectOmnigentAgentSkillDirs(): string[] {
-+	const agentsDir = join(getHomeDir(), ".omnigent", "agents");
-+	const dirs: string[] = [];
-+	try {
-+		for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
-+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-+			const skillsDir = join(agentsDir, entry.name, "skills");
-+			if (existsSync(skillsDir)) {
-+				dirs.push(skillsDir);
-+			}
-+		}
-+	} catch {
-+		// No ~/.omnigent/agents dir — fine.
-+	}
-+	return dirs;
-+}
- 
- function collectAutoPromptEntries(dir: string): string[] {
- 	const entries: string[] = [];
-@@ -2516,19 +2533,40 @@ export class DefaultPackageManager implements PackageManager {
+@@ -2516,19 +2516,21 @@ export class DefaultPackageManager implements PackageManager {
  			globalBaseDir,
  		);
  
@@ -71,31 +48,12 @@ index be42365a9..dd625366b 100644
 +				userAgentsBaseDir,
 +			);
 +		}
-+
-+		// User skills from ~/.omnigent/agents/*/skills/ (RLP fork). Additive: the
-+		// stock ~/.agents/skills discovery above must keep working, so a host
-+		// running both conventions sees both sets.
-+		for (const omnigentSkillsDir of collectOmnigentAgentSkillDirs()) {
-+			if (resolve(omnigentSkillsDir) === resolve(userAgentsSkillsDir)) continue;
-+			const omnigentBaseDir = dirname(dirname(omnigentSkillsDir)); // .../agents/<name>
-+			const omnigentMetadata: PathMetadata = {
-+				...userMetadata,
-+				baseDir: omnigentBaseDir,
-+			};
-+			addResources(
-+				"skills",
-+				collectAutoSkillEntries(omnigentSkillsDir, "agents"),
-+				omnigentMetadata,
-+				userOverrides.skills,
-+				omnigentBaseDir,
-+			);
-+		}
  
  		addResources(
  			"prompts",
 diff --git a/packages/coding-agent/src/core/rlp-orchestration.ts b/packages/coding-agent/src/core/rlp-orchestration.ts
 new file mode 100644
-index 000000000..d493b2a00
+index 0000000..d493b2a
 --- /dev/null
 +++ b/packages/coding-agent/src/core/rlp-orchestration.ts
 @@ -0,0 +1,302 @@
@@ -402,7 +360,7 @@ index 000000000..d493b2a00
 +	return { provider: ref.slice(0, slash), id: ref.slice(slash + 1) };
 +}
 diff --git a/packages/coding-agent/src/core/settings-manager.ts b/packages/coding-agent/src/core/settings-manager.ts
-index c7bb2afdc..6d924dce3 100644
+index c7bb2af..7ea7101 100644
 --- a/packages/coding-agent/src/core/settings-manager.ts
 +++ b/packages/coding-agent/src/core/settings-manager.ts
 @@ -162,6 +162,47 @@ export interface Settings {
@@ -428,10 +386,10 @@ index c7bb2afdc..6d924dce3 100644
 +}
 +
 +/**
-+ * Is pi running as an omnigent-managed worker rather than a person at a prompt?
++ * Is this a dispatched worker rather than a person at a prompt?
 + *
-+ * omnigent launches workers as `--mode rpc --no-session`, and passes `--model`
-+ * explicitly when the dispatch named a model. The two cases want opposite
++ * A worker is launched headless (`--mode rpc`, or `--no-session`) and is passed
++ * `--model` explicitly when the dispatch named one. The two cases want opposite
 + * things from a default:
 + *
 + *   - a worker with no `--model` should inherit the RLP ladder's default, or
@@ -491,7 +449,7 @@ index c7bb2afdc..6d924dce3 100644
  
  	setDefaultProvider(provider: string): void {
 diff --git a/packages/coding-agent/src/core/slash-commands.ts b/packages/coding-agent/src/core/slash-commands.ts
-index 934de40a6..4f8e097e6 100644
+index 934de40..4f8e097 100644
 --- a/packages/coding-agent/src/core/slash-commands.ts
 +++ b/packages/coding-agent/src/core/slash-commands.ts
 @@ -22,6 +22,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
@@ -503,7 +461,7 @@ index 934de40a6..4f8e097e6 100644
  	{ name: "import", description: "Import and resume a session from a JSONL file" },
  	{ name: "share", description: "Share session as a secret GitHub gist" },
 diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
-index b69488e0c..7f268ee45 100644
+index b69488e..7f268ee 100644
 --- a/packages/coding-agent/src/core/system-prompt.ts
 +++ b/packages/coding-agent/src/core/system-prompt.ts
 @@ -4,6 +4,7 @@
@@ -541,7 +499,7 @@ index b69488e0c..7f268ee45 100644
  	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
  	if (skillFileReadTool && skills.length > 0) {
 diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
-index 92e9b2612..c4a50f842 100644
+index 92e9b26..c4a50f8 100644
 --- a/packages/coding-agent/src/index.ts
 +++ b/packages/coding-agent/src/index.ts
 @@ -24,6 +24,14 @@ export {
@@ -560,7 +518,7 @@ index 92e9b2612..c4a50f842 100644
  // Compaction
  export {
 diff --git a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
-index 9d345b4e9..976c87535 100644
+index 9d345b4..976c875 100644
 --- a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
 @@ -1,5 +1,6 @@
@@ -602,7 +560,7 @@ index 9d345b4e9..976c87535 100644
  		const overflowLabel = hiddenLineCount > 0 ? ` ↑ ${hiddenLineCount} more ` : undefined;
  		const overflowLabelWidth = overflowLabel ? visibleWidth(overflowLabel) : 0;
 diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
-index 51356a0a5..f04ea8735 100644
+index 51356a0..f04ea87 100644
 --- a/packages/coding-agent/src/modes/interactive/components/footer.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
 @@ -5,6 +5,7 @@ import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
@@ -629,7 +587,7 @@ index 51356a0a5..f04ea8735 100644
  
  		// Add extension statuses on a single line, sorted by key alphabetically
 diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
-index 57381d9aa..1b0b3a732 100644
+index 57381d9..1b0b3a7 100644
 --- a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 @@ -4,23 +4,75 @@ import { theme } from "../theme/theme.ts";
@@ -718,7 +676,7 @@ index 57381d9aa..1b0b3a732 100644
 +	return identity() === "rlp" ? rlpLogoLines() : piLogoLines();
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index e5ff3a6f8..de98ea7f0 100644
+index e5ff3a6..de98ea7 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -101,6 +101,14 @@ import {

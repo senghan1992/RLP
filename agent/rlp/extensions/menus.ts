@@ -168,7 +168,7 @@ async function applyConfig(ctx: ExtensionCommandContext, ops: unknown[], dryRun 
 			lines: [
 				`◈ ladder updated${r.dry_run ? " (dry run)" : ""} — ${r.path}`,
 				r.backup ? `  backup  ${r.backup}` : "",
-				`  brain   ${r.ladder.brain}`,
+				`  brain   ${r.ladder.brain ?? "(not set)"}`,
 				...workers.map((w) => {
 					const arms = (w.models as Json[] | undefined) ?? [];
 					return `  [${w.id}]${w.available === false ? " [UNAVAILABLE]" : ""} ${arms.map((m) => m.model).join(", ")}`;
@@ -191,7 +191,7 @@ function renderLadder(): string {
 	const routing = (doc.routing as Json) ?? {};
 	const lines = [
 		`◈ RLP ladder · ${ladderPath()}`,
-		`  brain  ${doc.brain}`,
+		`  brain  ${doc.brain ?? "(not chosen yet — /setup, or /rlp-config brain <provider/model>)"}`,
 		`  gate   ${routing.gate ?? "hybrid"} · escalateBelow=${routing.escalateBelow ?? "-"} · cap=${routing.maxDispatchesPerTurn ?? "-"} · timeout=${routing.workerTimeoutMs ?? "-"}ms`,
 		`  review crossVendor=${((doc.review as Json) ?? {}).crossVendor ?? false}`,
 		`  plan   critique=${((doc.planning as Json) ?? {}).critique ?? true} · maxRefines=${((doc.planning as Json) ?? {}).maxRefines ?? 1} · recursion=${((doc.planning as Json) ?? {}).recursiveDepth ?? 1} · artifacts=${((doc.planning as Json) ?? {}).artifactPassing ?? true} · verify=${((doc.planning as Json) ?? {}).verifySamples ?? 3}`,
@@ -206,7 +206,19 @@ function renderLadder(): string {
 			lines.push(`           when: ${collapse(String(arm.when ?? ""), 90)}`);
 		});
 	}
+	const armTotal = ((doc.workers as Json[]) ?? []).reduce(
+		(n, w) => n + (((w.models as Json[]) ?? []).length),
+		0,
+	);
 	lines.push("");
+	if (doc.brain == null || armTotal === 0) {
+		// The shipped state. Saying so here is the difference between "the ladder
+		// is empty, is that a bug?" and "one command left".
+		lines.push("  This ladder carries policy but no model arms, so nothing can be dispatched");
+		lines.push("  and every request is handled inline. /setup reads your endpoint's own model");
+		lines.push("  list and writes the brain and the arms.");
+		lines.push("");
+	}
 	lines.push("  /rlp-config brain <provider/model>        make it the orchestrator model");
 	lines.push("  /rlp-roles --pick                         set the model for each role");
 	lines.push("  /rlp-config add-arm <worker> <ref> [roles] append a worker arm");
@@ -904,18 +916,25 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 
 // --- /commands --------------------------------------------------------------------
 
-const OMNIGENT: Array<[string, string]> = [
-	["omni run <agent>", "start an omnigent session (the orchestrator plane)"],
-	["omni session", "list and manage omnigent sessions"],
-	["omni attach", "attach a REPL to a live session"],
-	["omni resume", "resume a conversation"],
-	["omni config", "omnigent defaults and credentials"],
-	["omni doctor", "omnigent maintenance checks"],
-	["omni diagnose", "read-only environment snapshot"],
-	["omni usage", "usage and cost report"],
-	["omni setup", "first-time setup (also enables optional harnesses)"],
-	["omni server", "start or manage the background server"],
-	["omni start | stop", "run omnigent on this machine, or stop it"],
+/**
+ * The shell side of RLP: the decision engine, and the bare harness.
+ *
+ * Listed here because half of what RLP can do is reachable without a session at
+ * all — a CI job, a script or a second tool can ask for a plan — and a slash
+ * index that only shows slash commands hides that half.
+ */
+const SHELL: Array<[string, string]> = [
+	["rlp", "the agent: triage, then local waves of workers when the gate says so"],
+	["rlp -p \"<request>\"", "the same agent, one shot, non-interactive"],
+	["rlp plan \"<request>\"", "gate + DAG + per-node routing + dispatch waves, nothing executed"],
+	["rlp triage \"<request>\"", "direct vs orchestrate, one laya forward pass"],
+	["rlp ladder | roster", "the model ladder, and the router cards derived from it"],
+	["rlp provider", "endpoints and credentials: list | add | remove | key | discover | probe"],
+	["rlp doctor [--warm]", "is this host runnable? one fix per line"],
+	["rlp memory | remember", "this project's cross-run knowledge log"],
+	["rlp serve", "the decision engine as an MCP stdio server"],
+	["rlp update [--check]", "update the harness fork and re-apply RLP on top"],
+	["rpi", "the bare harness, with no orchestration surface at all"],
 ];
 
 /**
@@ -953,21 +972,10 @@ function extensionFiles(): { rlp: string[]; optional: string[] } {
 }
 
 function skillCommands(): Array<[string, string]> {
-	// RLP's own skills live in RLP's agent dir. The omnigent agent spec carries
-	// its own copy of the same five (the REPL loads them from there), so the same
-	// name can appear in two directories — which listed it twice in the index.
-	// A slash index answers "what can I type", so a skill is listed once, from
-	// the first place it was found: RLP's own dir first.
+	// RLP's skills live in RLP's own agent dir, and a skill is listed once even
+	// if two directories carry the same name: a slash index answers "what can I
+	// type", and the same name typed twice is one command.
 	const dirs = [join(AGENT_DIR, "skills")];
-	const omnigent = join(homedir(), ".omnigent", "agents");
-	try {
-		for (const agent of readdirSync(omnigent)) {
-			const skills = join(omnigent, agent, "skills");
-			if (existsSync(skills)) dirs.push(skills);
-		}
-	} catch {
-		/* no omnigent agents */
-	}
 	const found: Array<[string, string]> = [];
 	const seen = new Set<string>();
 	for (const dir of dirs) {
@@ -1046,8 +1054,8 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 	if (optionalExt.length > 0) groups.push(["Other extensions (optional — not part of RLP)", optionalExt]);
 	const skills: Array<[string, string]> = skillCommands().filter(([n]) => wanted(n) || wanted("skill"));
 	if (skills.length > 0) groups.push(["Skills", skills]);
-	const omni: Array<[string, string]> = OMNIGENT.filter(([n]) => wanted(n) || wanted("omni"));
-	groups.push(["Omnigent (shell)", omni]);
+	const shell: Array<[string, string]> = SHELL.filter(([n]) => wanted(n) || wanted("rlp") || wanted("shell"));
+	if (shell.length > 0) groups.push(["RLP in the shell (no session needed)", shell]);
 
 	const total = groups.reduce((n, [, items]) => n + items.length, 0);
 	const lines = [`◈ commands · ${total}${filter ? ` matching "${filter}"` : ""}`, ""];
@@ -1059,7 +1067,7 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 		lines.push("");
 	}
 	lines.push(`  ${byName.size} harness built-ins live in this harness; /orchestration shows the RLP ladder.`);
-	lines.push("  Shell equivalents: rlp plan | rlp doctor | rlp ladder | rpi | omni run");
+	lines.push("  New here? /setup connects a provider and fills the ladder's model arms.");
 	return lines.join("\n").trimEnd();
 }
 
@@ -1067,7 +1075,7 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 
 export default function harnessMenus(pi: ExtensionAPI): void {
 	pi.registerCommand("commands", {
-		description: "Everything the slash menu offers, grouped (harness, RLP, skills, omnigent)",
+		description: "Everything the slash menu offers, grouped (harness, RLP, extensions, skills, shell)",
 		handler: async (args, ctx) => {
 			ctx.ui.notify(await renderCommands(ctx, args.trim()));
 		},

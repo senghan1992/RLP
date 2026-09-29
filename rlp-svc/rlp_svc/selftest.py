@@ -118,7 +118,7 @@ def main() -> None:
             failures += 1
 
     # 5. llm fallback must never raise, even with unreadable credentials.
-    from .llm import chat, route_spec
+    from .llm import chat, route_spec  # noqa: F401 - probed below
     from .route import llm_route
 
     try:

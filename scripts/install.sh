@@ -7,13 +7,10 @@
 #   1. clones + builds the pi fork that RLP runs on (the harness `rpi`), applying
 #      the RLP patch set
 #   2. creates rlp-svc/.venv and installs the decision engine + laya checkpoint
-#   3. installs RLP's dropped-in slash extensions and the orchestration ladder
-#   4. OPTIONALLY wires the omnigent plane, only if `omni` is on PATH
+#   3. installs RLP's dropped-in slash extensions, skills and the ladder
 #
 # Requirements: git, node >= 18 and npm, python >= 3.10.
 #   `uv` is used when present; otherwise a stdlib venv + pip.
-#   `omni` (omnigent) is OPTIONAL — local orchestration (`rlp`, `rlp -p`) does
-#   not need it. It is only used by `rlp --omnigent`.
 #
 # Env:
 #   RLP_PI_REPO   git URL of the pi fork source   (default: upstream pi)
@@ -26,7 +23,6 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 RPI_BIN="$ROOT/scripts/rpi-bin"
-RLP_LAUNCH="$ROOT/scripts/rlp-launch"
 RLP_BIN="$ROOT/scripts/rlp"
 FORK="$ROOT/fork/pi"
 PATCH="$ROOT/scripts/rlp-fork.patch"
@@ -102,7 +98,7 @@ exec node __RLP_ROOT__/fork/pi/packages/coding-agent/dist/bundle/cli.js "$@"
 WRAPPER
   sed -i "s|__RLP_ROOT__|$ROOT|g" "$RPI_BIN"
 fi
-chmod +x "$RPI_BIN" "$RLP_BIN" "$RLP_LAUNCH"
+chmod +x "$RPI_BIN" "$RLP_BIN"
 
 mkdir -p "$HOME/.local/bin"
 ln -sf "$RPI_BIN" "$HOME/.local/bin/rpi"
@@ -118,7 +114,7 @@ if [ ! -d "$VENV" ]; then
     "${PYTHON:-python3}" -m venv .venv
   fi
 fi
-# mcp is pinned <2: omnigent's MCP client is 1.x and rejects a 2.x server.
+# mcp is pinned <2: `rlp serve` builds on FastMCP's 1.x API surface.
 TORCH_INDEX="https://download.pytorch.org/whl/cpu"   # CPU-only torch; the default index pulls multi-GB CUDA
 if have uv; then
   uv pip install --python "$PY" torch --index-url "$TORCH_INDEX"
@@ -189,56 +185,43 @@ done
 printf '{\n  "root": "%s",\n  "agentDir": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
   "$ROOT" "$RLP_AGENT_DIR" "$RLP_EXT_LIST" "$RLP_SKILL_LIST" > "$RLP_AGENT_DIR/rlp-location.json"
 
+# The ladder ships with RLP's orchestration *policy* (gate, waves, dispatch cap,
+# cross-vendor review, RLM and planning budgets) and no model arms: which models
+# orchestrate depends on which providers you connect, and RLP will not guess. A
+# ladder with no arms is a documented state — `rlp doctor` names it and `/setup`
+# fills it from your real endpoints.
 if [ -f "$RLP_AGENT_DIR/orchestration.json" ] && [ -z "${RLP_ORCH_FORCE:-}" ]; then
   echo "[rlp] kept existing $RLP_AGENT_DIR/orchestration.json (RLP_ORCH_FORCE=1 to overwrite)"
 else
   cp "$ROOT/agent/rlp/orchestration.json" "$RLP_AGENT_DIR/orchestration.json"
-  echo "[rlp] installed orchestration ladder to $RLP_AGENT_DIR/orchestration.json"
+  echo "[rlp] installed the orchestration ladder to $RLP_AGENT_DIR/orchestration.json"
+  echo "[rlp]   policy only, no model arms yet — /setup fills them from your providers"
 fi
 
-# --- 4. Omnigent plane (optional) --------------------------------------------
-if have omni; then
-  mkdir -p "$HOME/.omnigent/agents"
-  rm -rf "$HOME/.omnigent/agents/rlp"
-  cp -r "$ROOT/agent/rlp" "$HOME/.omnigent/agents/rlp"
-  # Fill the spec's placeholders with this checkout's real paths, so the public
-  # repo carries no host-specific absolute paths.
-  sed -i "s|__RLP_PYTHON__|$PY|g; s|__RLP_PI_AUTH__|$RLP_AGENT_DIR/auth.json|g; s|__RLP_PI_MODELS__|$RLP_AGENT_DIR/models.json|g" \
-    "$HOME/.omnigent/agents/rlp/config.yaml"
-  CFG="$HOME/.omnigent/config.yaml"
-  if [ -f "$CFG" ] && grep -q "harness:" "$CFG" 2>/dev/null; then
-    if grep -q "local/bin/rlp" "$CFG"; then
-      cp "$CFG" "$CFG.bak.$(date +%s)"
-      sed -i 's|local/bin/rlp$|local/bin/rpi|; s|local/bin/rlp *$|local/bin/rpi|' "$CFG"
-      echo "[rlp] repointed harness.pi.command -> $HOME/.local/bin/rpi"
-    fi
-  else
-    mkdir -p "$(dirname "$CFG")"
-    cp "$CFG" "$CFG.bak.$(date +%s)" 2>/dev/null || true
-    printf '\nharness:\n  pi:\n    command: %s\n' "$HOME/.local/bin/rpi" >> "$CFG"
-    echo "[rlp] wired harness.pi.command -> $HOME/.local/bin/rpi"
-  fi
-  omni stop 2>/dev/null || true
-  omni start 2>/dev/null || echo "[rlp] 'omni start' failed — run it later if you want the web UI"
-  echo "[rlp] omnigent plane installed (rlp --omnigent)"
-else
-  echo "[rlp] omnigent not found — skipping the optional --omnigent plane."
-  echo "      Local orchestration needs nothing here: rlp, rlp -p, rlp plan all work."
-fi
-
-# --- 5. Verify, do not assume ------------------------------------------------
+# --- 4. Verify, do not assume ------------------------------------------------
+# A fresh install has no provider and no model arms, so the doctor *will* report
+# failures here and that is the correct answer, not a broken install. Saying so
+# before the report is the difference between "next step" and "it crashed".
 echo ""
-echo "[rlp] doctor:"
-(cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc doctor) || echo "[rlp] doctor reported failures — see FAIL lines above"
+echo "[rlp] doctor — on a first install the provider and ladder-arm lines are"
+echo "[rlp] expected to FAIL; /setup is what clears them."
+echo ""
+(cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc doctor) || true
 
 cat <<EOF
 
-[rlp] done.
-  use:      cd <any project> && rlp            # the agent (triage -> local workers)
-  set up:   /setup                             # in the session: connect providers,
-                                               #   pick the brain and the worker arms
-  one-shot: rlp -p "add a --wc flag, test it, document it"
-  decide:   rlp plan "<request>"               # plan only, nothing executed
-  health:   rlp doctor --warm
-  verify:   sh $ROOT/scripts/selftest.sh --fast
+[rlp] installed. One step left — connect a provider:
+
+  cd <any project> && rlp      # start the agent
+  /setup                       # guided: providers -> brain -> worker arms -> roles
+
+  \`/setup\` is what turns the ladder from policy into something dispatchable:
+  it reads your endpoint's own model list and writes the arms. Until then RLP
+  runs every request inline, and \`rlp doctor\` says exactly what is missing.
+
+Then:
+  rlp -p "add a --wc flag, test it, document it"   # one shot, same agent
+  rlp plan "<request>"                             # plan only, nothing executed
+  rlp doctor --warm                                # health, incl. a real laya pass
+  sh $ROOT/scripts/selftest.sh --fast              # the offline suite
 EOF

@@ -49,26 +49,25 @@ DOMAIN_INTENT: dict[str, tuple[str, str]] = {
 #: implement one: the ladder reserves its deep/slow arms for exactly that.
 _DEBUG_CUES = ("debug", "bug", "regression", "stack trace", "traceback", "root cause", "investigate")
 
-#: Vendor families for the cross-vendor rule. Two nodes on the same family do
-#: not review each other, however different the model. Informational: `family()`
-#: derives from the provider prefix, so a provider added to the ladder still
-#: gets a correct family without editing this set.
-FAMILIES = {"agnes", "qwen-token-plan", "anthropic"}
-
 
 def family(model_ref: str) -> str:
-    """Vendor family of a `provider/model` ref."""
+    """Vendor family of a `provider/model` ref, for the cross-vendor review rule.
+
+    The family *is* the provider prefix, with no table to keep in step: two arms
+    on the same endpoint do not independently review each other however
+    different the two models are, and a provider added to the ladder gets a
+    correct family the moment it is added.
+    """
     return model_ref.partition("/")[0]
 
 
 def credential_state(provider: str) -> str:
     """Does this host hold a credential for `provider`? present|missing|unknown.
 
-    The dispatch-plane analogue of omnigent's `sys_session_get_info` readiness
-    preflight: an arm whose provider has no credential cannot run, so the
-    planner should not spend a dispatch on it. `unknown` (no auth file, or an
-    unreadable one) is deliberately permissive — a missing file is not proof a
-    provider is dead, and a preflight must never be the thing that blocks a run.
+    An arm whose provider has no credential cannot run, so the planner should
+    not spend a dispatch on it. `unknown` (no auth file, or an unreadable one)
+    is deliberately permissive — a missing file is not proof a provider is dead,
+    and a preflight must never be the thing that blocks a run.
     Set `RLP_SKIP_CREDENTIAL_PREFLIGHT=1` to disable the check entirely.
     """
     if os.environ.get("RLP_SKIP_CREDENTIAL_PREFLIGHT"):
@@ -105,17 +104,25 @@ def intent(domain: str, title: str = "", brief: str = "") -> tuple[str, str]:
     return role, purpose
 
 
-def _load_ladder() -> dict:
-    """The installed ladder. Planning without one would mean inventing models."""
+def _load_ladder(*, require_arms: bool = True) -> dict:
+    """The installed ladder. Planning without one would mean inventing models.
+
+    `require_arms` is what separates "no ladder" from "a ladder with no arms":
+    both mean nothing can be dispatched, but they have different fixes, and a
+    caller that only wants to read the policy (budgets, gate, review rule) does
+    not need arms at all.
+    """
     try:
         config = orch.load()
     except Exception as e:
         raise ValueError(f"orchestration ladder is invalid: {str(e)[:300]}") from None
     if config is None:
         raise ValueError(
-            f"no orchestration ladder at {orch.config_path()} — run `rlp doctor` "
-            "or set RLP_ORCHESTRATION"
+            f"no orchestration ladder at {orch.config_path()} — run `sh scripts/install.sh` "
+            "to install it, or set RLP_ORCHESTRATION to one you already have"
         )
+    if require_arms and not config.get("configured"):
+        raise ValueError(orch.NOT_CONFIGURED)
     return config
 
 
@@ -361,17 +368,30 @@ def plan(
          "gate_table": ["id | title | …", …],
          "recommended": "…one line for the caller to act on…" }}
     """
+    # A ladder with no arms is not an error here: with nothing to dispatch to,
+    # `direct` is the only truthful verdict, and it is also a perfectly good one
+    # — RLP is a working coding agent without orchestration. Returning ok:false
+    # instead would hand the brain an error for a question that has an answer.
     try:
-        config = _load_ladder()
+        config = _load_ladder(require_arms=False)
     except ValueError as e:
         return {"ok": False, "error": str(e)[:300]}
-    if not orch.workers(config):
+    if not config.get("configured") or not orch.roster(config):
+        why = (
+            orch.NOT_CONFIGURED
+            if not config.get("configured")
+            else "every worker in the ladder is marked unavailable — set \"available\": true on at "
+            f"least one of {[w['id'] for w in orch.excluded(config)]}"
+        )
         return {
-            "ok": False,
-            "error": (
-                "every worker in the ladder is marked unavailable — set \"available\": true on at "
-                f"least one of {orch.excluded(config)}"
-            ),
+            "ok": True,
+            "result": {
+                "ladder": config["path"],
+                "brain": config["brain"],
+                "mode": "direct",
+                "orchestration_unavailable": why,
+                "recommended": "handle inline; orchestration is not available on this host yet",
+            },
         }
 
     result: dict[str, Any] = {"ladder": config["path"], "brain": config["brain"]}

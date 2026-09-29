@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -154,7 +155,7 @@ def _cmd_ladder(args: argparse.Namespace) -> int:
     c = envelope["result"]
     lines = [
         f"ladder: {c['path']}",
-        f"brain:  {c['brain']}",
+        f"brain:  {c['brain'] or '(not chosen yet)'}",
         f"gate:   escalateBelow={c['routing'].get('escalateBelow')} "
         f"mode={c['routing'].get('gate')} signalThreshold={c['routing'].get('signalThreshold')} "
         f"maxDispatchesPerTurn={c['routing'].get('maxDispatchesPerTurn')} "
@@ -171,6 +172,13 @@ def _cmd_ladder(args: argparse.Namespace) -> int:
         f"maxTimeout={(c.get('rlm') or {}).get('maxTimeout')}",
         "",
     ]
+    if not c.get("configured"):
+        lines[1:1] = [
+            "status: NOT CONFIGURED — policy is set, but there are no model arms, so nothing",
+            "        can be dispatched and every request is handled inline.",
+            "        Fix: run /setup in a session (it reads your endpoint's own model list),",
+            "        or `rlp provider add <id> <baseUrl> <model>` then /rlp-config.",
+        ]
     for w in c["workers"]:
         flag = "" if w.get("available", True) else "  [UNAVAILABLE]"
         lines.append(f"[{w['id']}]" + (f" on {w['harness']}" if w.get("harness") else "") + flag)
@@ -219,7 +227,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
     lines = [f"config {verb} {len(ops)} op(s)", f"ladder: {applied['path']}"]
     if applied.get("backup"):
         lines.append(f"backup: {applied['backup']}")
-    lines.append(f"brain:  {applied['ladder']['brain']}")
+    lines.append(f"brain:  {applied['ladder']['brain'] or '(not set)'}")
     for w in applied["ladder"]["workers"]:
         flag = "" if w.get("available", True) else " [UNAVAILABLE]"
         lines.append(f"[{w['id']}]{flag} " + ", ".join(a["model"] for a in w["models"]))
@@ -269,6 +277,15 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         )
     if r.get("note"):
         head.append(f"note:       {r['note']}")
+    # The reason orchestration was unavailable is the whole answer in that case:
+    # `recommended` alone says "not available on this host yet", which names no
+    # cause and no fix — the report that sends someone reading source code.
+    if r.get("orchestration_unavailable"):
+        head.append("")
+        head.append("why:        orchestration is unavailable, so direct is the only verdict:")
+        for chunk in textwrap.wrap(str(r["orchestration_unavailable"]), 74):
+            head.append(f"            {chunk}")
+        head.append("")
     if r["mode"] == "direct" or r.get("tasks") is None:
         head.append(f"recommended: {r['recommended']}")
         return _emit(envelope, False, "\n".join(head))
@@ -302,7 +319,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from . import doctor
 
-    report = doctor.run(warm=args.warm, host=not args.no_host)
+    report = doctor.run(warm=args.warm)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -665,10 +682,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("doctor", help="diagnose this host: deps, creds, ladder, checkpoint, wiring")
     sp.add_argument("--warm", action="store_true", help="also pay one real laya load (~170 s cold)")
-    sp.add_argument("--no-host", action="store_true", help="skip omnigent wiring checks")
     sp.add_argument("--json", action="store_true")
 
-    sub.add_parser("serve", help="run the MCP stdio server the orchestrator launches")
+    sub.add_parser("serve", help="run the MCP stdio server (the decision engine, as MCP tools)")
     sp = sub.add_parser(
         "engine",
         help="run the resident engine (JSON lines on stdio; loads laya once)",

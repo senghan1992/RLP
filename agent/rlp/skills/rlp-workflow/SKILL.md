@@ -52,7 +52,10 @@ Call `rlp_triage(request, context)` before any planning.
 - The model ladder lives in `orchestration.json`, never in prose: read
   `<rlp_orchestration>` / `rlp_orchestration` and route from it. Arms are
   priority-ordered; the first arm carries the bulk.
-- Cross-vendor: review runs on a different provider family than implement
-  (agnes / qwen-token-plan / anthropic).
+- Cross-vendor: review runs on a different provider family than implement. The
+  family *is* the provider prefix of the arm (`openai/…`, `anthropic/…`), so the
+  families available are whichever ones the ladder's arms name — there is no
+  fixed list. `rlp_plan` applies this when it picks arms; do not override it
+  back onto the same family.
 - Gate before first dispatch: DAG table + routing confidences, same turn.
 - A turn that ends after only announcing intent is a bug.

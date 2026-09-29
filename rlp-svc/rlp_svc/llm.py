@@ -15,10 +15,24 @@ import httpx
 
 from . import paths
 
-DECOMP_PROVIDER = "qwen-token-plan"
-DECOMP_MODEL = "qwen3.8-max"
-ROUTE_PROVIDER = "qwen-token-plan"
-ROUTE_MODEL = "deepseek-v4.1-flash"
+#: The engine's own model needs — decomposition, routing, verdicts — are
+#: answered from the ladder, never from a literal model id in this file.
+#:
+#: They used to be four constants naming one host's gateway. Every other host
+#: then had a decomposer and a router pointed at a provider it had never heard
+#: of: the laya gate worked, the LLM fallbacks behind it did not, and the
+#: failure read as "the model returned no JSON". A model ref only means
+#: something relative to a configured endpoint, so the ladder — the file that
+#: knows which endpoints exist — is the only honest source for one.
+#:
+#: Resolution order, per role:
+#:   1. the explicit env override (`RLP_DECOMPOSE_MODEL`, `RLP_ROUTE_MODEL`)
+#:   2. the ladder's `roles.<role>` binding, when the operator set one
+#:   3. the first ladder arm declaring that role
+#:   4. the ladder's brain
+#: Anything left after that is a ladder with no arms, which the caller reports
+#: as "not configured" rather than inventing a fifth answer.
+_ROLE_FOR = {"plan": "RLP_DECOMPOSE_MODEL", "route": "RLP_ROUTE_MODEL", "verify": "RLP_VERIFY_MODEL"}
 
 #: Completion budgets, in tokens. A reasoning model spends a large part of its
 #: budget *thinking* before it writes anything: measured against the host
@@ -61,25 +75,99 @@ def _provider_base_url(provider: str) -> str:
     return entry["baseUrl"]
 
 
-def _split_spec(spec: str) -> tuple[str, str]:
-    """Split 'provider/model' into (provider, model)."""
+def _split_spec(spec: str) -> tuple[str, str] | None:
+    """Split 'provider/model' into (provider, model), or None if it is not one.
+
+    A bare model name with no provider is rejected rather than paired with some
+    default endpoint: which endpoint serves `gpt-4o-mini` is exactly the thing
+    that cannot be assumed, and guessing here is how a wrong provider reaches
+    the network as a 404 that reads like a wrong model id.
+    """
     provider, sep, model = spec.partition("/")
-    if not sep:
-        return DECOMP_PROVIDER, spec
+    if not sep or not provider.strip() or not model.strip():
+        return None
     return provider, model
 
 
-def decomp_spec() -> tuple[str, str]:
-    """Effective decompose model spec, honouring RLP_DECOMPOSE_MODEL (provider/model)."""
-    raw = os.environ.get("RLP_DECOMPOSE_MODEL")
-    if raw:
-        return _split_spec(raw)
-    return DECOMP_PROVIDER, DECOMP_MODEL
+def _ladder_spec(role: str) -> tuple[str, str] | None:
+    """The ladder's model for a planner-side role, as (provider, model), or None."""
+    try:
+        from . import orchestration as orch
+
+        config = orch.load()
+        if config is None:
+            return None
+        ref = orch.resolve_model_for_role(config, role) or config.get("brain")
+        return _split_spec(ref) if isinstance(ref, str) else None
+    except Exception:
+        # A missing or unreadable ladder is not this module's error to raise:
+        # the caller already reports "not configured" with the fix attached.
+        return None
 
 
-def route_spec() -> tuple[str, str]:
-    """Effective route model spec (fixed to the fast arm)."""
-    return ROUTE_PROVIDER, ROUTE_MODEL
+def _role_spec(role: str) -> tuple[str, str] | None:
+    """Resolve one engine role: env override, then the ladder. See `_ROLE_FOR`."""
+    env = _ROLE_FOR.get(role)
+    raw = os.environ.get(env) if env else None
+    if raw and raw.strip():
+        explicit = _split_spec(raw.strip())
+        if explicit:
+            return explicit
+        raise ValueError(f"{env}={raw!r} must be a 'provider/model' string")
+    return _ladder_spec(role)
+
+
+def decomp_spec() -> tuple[str, str] | None:
+    """Model for decomposition: `RLP_DECOMPOSE_MODEL`, else the ladder's `plan` role."""
+    return _role_spec("plan")
+
+
+def route_spec() -> tuple[str, str] | None:
+    """Model for the LLM routing/triage fallback: `RLP_ROUTE_MODEL`, else the ladder."""
+    return _role_spec("route")
+
+
+def verify_spec() -> tuple[str, str] | None:
+    """Model for independent verdicts: `RLP_VERIFY_MODEL`, else the ladder."""
+    return _role_spec("verify")
+
+
+def role_candidates(role: str) -> list[tuple[str, str]]:
+    """Ordered, deduped `(provider, model)` candidates for an engine-side role.
+
+    The preferred spec first, then every other ladder arm, then the brain. This
+    is what `chat_first` walks, and the reason it is a list rather than one spec
+    is that a single arm answering with nothing used to end the call: the LLM
+    fallbacks behind the laya gate are the last line, so they of all callers
+    must not have a single point of failure.
+
+    Empty means the ladder has no arms — "not configured", which the caller
+    reports with its own fix rather than dressing up as a network error.
+    """
+    candidates: list[tuple[str, str]] = []
+
+    def add(spec: tuple[str, str] | None) -> None:
+        if spec and spec not in candidates:
+            candidates.append(spec)
+
+    add(_role_spec(role))
+    try:
+        from . import orchestration as orch
+
+        config = orch.load()
+    except Exception:
+        config = None
+    if config is not None:
+        for worker in config["workers"]:
+            for arm in worker["models"]:
+                if role in arm["roles"]:
+                    add(_split_spec(arm["model"]))
+        for worker in config["workers"]:
+            for arm in worker["models"]:
+                add(_split_spec(arm["model"]))
+        if isinstance(config.get("brain"), str):
+            add(_split_spec(config["brain"]))
+    return candidates
 
 
 def chat(

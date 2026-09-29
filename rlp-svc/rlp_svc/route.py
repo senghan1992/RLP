@@ -11,7 +11,7 @@ import os
 import threading
 from typing import Any
 
-from .llm import JSON_LINE_TOKENS, chat, route_spec
+from .llm import JSON_LINE_TOKENS, chat_first, role_candidates
 
 ESCALATE_THRESHOLD = 0.55
 
@@ -90,7 +90,14 @@ Domain: {domain}
 Roster:
 {roster_text}
 Respond ONLY with JSON: {{"agent": <id>, "reason": <one short sentence>}}"""
-    text = chat(*route_spec(), messages=[{"role": "user", "content": prompt}], max_tokens=JSON_LINE_TOKENS)
+    candidates = role_candidates("route")
+    if not candidates:
+        raise RuntimeError(
+            "no model to route with: the orchestration ladder has no arms — run /setup"
+        )
+    text, used = chat_first(
+        candidates, messages=[{"role": "user", "content": prompt}], max_tokens=JSON_LINE_TOKENS
+    )
     data = json.loads(text.split("```")[1].split("\n")[1]) if "```" in text else json.loads(text)
     return {
         "agent": data["agent"],
@@ -98,6 +105,7 @@ Respond ONLY with JSON: {{"agent": <id>, "reason": <one short sentence>}}"""
         "engine": "llm",
         "escalate": False,
         "reason": data.get("reason", ""),
+        "router_model": f"{used[0]}/{used[1]}",
     }
 
 

@@ -37,9 +37,6 @@ writes it — `RLP_CODING_AGENT_DIR` moves the agent dir, `RLP_HOME` the data.
 | **Planner** | `rlp plan "<request>"` · `/rlp-plan` | A pure function: request in, executable plan out, nothing executed. For a script, a bot, a CI check, or just reading. |
 | **Harness** | `rpi` | The same binary with no RLP identity (`RLP_IDENTITY` unset): pi's own branding, no contract, no `rlp_*` tools, no engine. This is what workers run on — `rlp` is the brain identity that adds all of it. |
 
-`rlp --omnigent` still reaches the older external plane, which owns the
-conversation database and the web UI that local orchestration does not.
-
 ```
 rlp plan "…"      think      (1 laya pass; instant for direct, ~4 min for orchestrate)
 rlp -p "…"        do it      (plan + dispatch + collect + synthesize)
@@ -47,7 +44,7 @@ rpi               just work  (no orchestration at all)
 ```
 
 `rlp help-tool` prints this surface. The subcommand split is not cosmetic:
-planning is local and cheap, dispatching needs a session plane, and a caller
+planning is local and cheap, dispatching needs a session, and a caller
 that only wants to know *what to do* should never pay for the second.
 
 ### The same surface, inside the session
@@ -74,7 +71,7 @@ command is a file drop plus `/reload`, never a rebuild.
 
 | Command | What it does |
 |---|---|
-| `/commands [filter]` | the whole menu, grouped: harness built-ins, RLP, skills, extensions, omnigent shell commands |
+| `/commands [filter]` | the whole menu, grouped: harness built-ins, RLP, extensions, skills, and the shell side |
 | `/setup` | the guided first run: doctor → connect/key the endpoints → pick the brain → pick the worker arms (cross-vendor rule stated) → bind the planner roles → re-check. Every step is skippable |
 | `/models [filter]` | models grouped by provider — `●` this session, `★` your default, `⚑` ladder arm, `○` no credentials |
 | `/models --pick` | provider → model → use for this session, set as default, add as an RLP ladder arm, or make it the orchestrator |
@@ -235,9 +232,30 @@ it into the brain's `<rlp_orchestration>` system-prompt section, `rlp ladder`
 prints it, and the router derives its roster from it. A model name is never
 written twice.
 
+### What ships, and what does not
+
+The ladder has two halves, and only one of them can be shipped:
+
+- **Policy** — the gate, the dispatch cap, the worker watchdog, cross-vendor
+  review, the RLM and planning budgets. Provider-independent, so RLP ships real
+  defaults for all of it.
+- **Arms** — `brain`, and each worker's `models`. A `provider/model` ref only
+  means something on a host that has that provider, so RLP ships **none** of
+  them: `"brain": null` and an empty `models` array.
+
+"Installed but not configured" is therefore a first-class state, not a broken
+file. `rlp ladder` prints `NOT CONFIGURED`, `rlp doctor` fails one line with
+`/setup` as the fix, `rlp plan` answers `direct` with
+`orchestration_unavailable` set, and the agent works as an ordinary coding
+agent in the meantime. The alternative — shipping a plausible default arm —
+means every fresh install plans dispatches onto a model the host cannot serve,
+and that failure surfaces at the worker, three steps from its cause.
+
+Filled in by `/setup`, with whatever providers you connected:
+
 ```jsonc
 {
-  "brain": "agnes/agnes-3.0-flash",
+  "brain": "openai/gpt-5.1",
   "workers": [
     {
       "id": "pi", "harness": "pi",
@@ -245,20 +263,20 @@ written twice.
         // Arms are priority-ordered. The FIRST arm is the default: that is
         // where the bulk of the spend goes. `when` is the operator's
         // reasoning, kept next to the model it justifies.
-        { "model": "agnes/agnes-3.0-flash", "roles": ["code","research","docs","review"],
-          "when": "DEFAULT arm — carries the most usage headroom on this host …" },
-        { "model": "qwen-token-plan/deepseek-v4.1-flash", "roles": ["code","debug","review"],
+        { "model": "openai/gpt-5.1", "roles": ["code","research","docs","review"],
+          "when": "DEFAULT arm — carries the most usage headroom here …" },
+        { "model": "anthropic/claude-opus-5-5", "roles": ["code","debug","review"],
           "when": "the deep arm — multi-file refactors and hard debugging …" }
       ]
     },
     {
-      "id": "claude_code", "harness": "claude-native",
+      "id": "solo", "harness": "claude-native",
       // Availability is configuration, not prose. An arm the host cannot
       // serve is excluded from the roster, so a plan is never dispatched
       // onto it. Omit the field to re-enable.
       "available": false,
-      "availabilityNote": "Claude entitlement is routinely exhausted on this host; opt-in.",
-      "models": [ { "model": "anthropic/claude-opus-4-8", "roles": ["code","review"], "when": "…" } ]
+      "availabilityNote": "spend-limited on this host; opt-in.",
+      "models": [ { "model": "gamma/gamma-opus", "roles": ["code","review"], "when": "…" } ]
     }
   ],
   "routing": { "escalateBelow": 0.55, "maxDispatchesPerTurn": 4 },
@@ -266,9 +284,13 @@ written twice.
 }
 ```
 
+Only `harness: "pi"` workers are dispatchable: orchestration spawns the `rpi`
+harness, and a worker naming anything else fails its preflight with that said
+rather than dying mid-dispatch.
+
 `rlp ladder` shows the resolved file; `rlp roster` shows the cards the decision
 model actually sees; `rlp doctor` validates both. A malformed ladder fails at
-load naming the exact field. An absent ladder means no section and plain-pi
+load naming the exact field. An absent ladder means no section and plain-harness
 behaviour.
 
 **It is editable in-session.** The same file the harness renders is written by
@@ -288,9 +310,9 @@ review?": you want to name the model for the *role*, the way `/model` names the
 model for the session. So a role can be bound explicitly:
 
 ```jsonc
-"roles": { "review": ["qwen-token-plan/qwen3.8-flash",
-                       "qwen-token-plan/deepseek-v4.1-flash"],
-           "debug":  "qwen-token-plan/deepseek-v4.1-flash" }
+"roles": { "review": ["anthropic/claude-opus-5-5",
+                       "openai/gpt-5.1"],
+           "debug":  "anthropic/claude-opus-5-5" }
 ```
 
 A role may bind to **one model or an ordered list** of them. A list is a
@@ -302,7 +324,7 @@ can run, reports it (`binding_warnings`) instead of hiding the mismatch.
 /rlp-roles                  every role -> chain, and which entry resolved
 /rlp-roles --pick           pick a role, then a provider, then multi-select its models
                             (numbers/ranges, or "all") — order is priority
-/rlp-roles review qwen-token-plan/qwen3.8-flash,qwen-token-plan/deepseek-v4.1-flash
+/rlp-roles review anthropic/claude-opus-5-5,openai/gpt-5.1
 /rlp-roles review off       back to arm priority
 ```
 
@@ -391,9 +413,12 @@ sh scripts/selftest.sh          # + the real models, and the live-session checks
 ```
 
 `doctor` grades instead of failing flat: `ok` / `warn` / `fail`, with the fix
-on the failure line. A missing ladder, an unparseable credential file, a
-missing checkpoint, an unwired omnigent harness and a single-family ladder
-claiming `crossVendor: true` are all named explicitly. It also checks the
+on the failure line. A missing ladder, a ladder with no arms, an unparseable
+credential file, a missing checkpoint, an unbuilt fork (so a dispatch would die
+the moment it started) and a single-family ladder claiming `crossVendor: true`
+are all named explicitly. Every non-`ok` line carries a fix *this host can act
+on*: a check whose only remedy is a step the installer deliberately skips is
+noise, not a diagnostic, and does not appear. It also checks the
 provider store: which endpoints have no credential, and which ladder arms
 therefore cannot run — the failure that used to appear only when a dispatch
 died.

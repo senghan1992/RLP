@@ -1,15 +1,19 @@
 """rlp doctor — one command that answers "is RLP actually runnable here?".
 
-Every RLP failure mode is silent-ish: a missing ladder makes the router fall
-back, a stalled laya load looks like a hang, an unwired omnigent harness makes
-workers launch the wrong binary, an exhausted Claude arm burns a dispatch
-before anyone notices. `doctor` turns all of them into one report with a fix
-per line.
+Every RLP failure mode is silent-ish: a ladder with no arms makes every request
+go inline, a stalled laya load looks like a hang, an unbuilt fork makes a
+dispatch die the moment it starts, a provider with no credential burns a
+dispatch before anyone notices. `doctor` turns all of them into one report with
+a fix per line.
 
 Checks are graded, not binary:
   ok    — good
-  warn  — degraded but the run proceeds (e.g. the opt-in claude arm)
+  warn  — degraded but the run proceeds (e.g. an opt-in arm)
   fail  — the named capability will not work
+
+Every `fail` and `warn` carries a hint that *this host can act on*. A check
+whose only fix is a step the installer deliberately skips is not a diagnostic,
+it is noise, and it does not belong here.
 
 Model loading is *not* triggered by default: a fresh laya load costs ~170 s on
 CPU and a diagnostic must never be the slow thing. `--warm` opts into one real
@@ -71,7 +75,32 @@ def _credentials() -> list[dict]:
         except Exception as e:
             out.append(_check(FAIL, f"creds:{label}", f"unparseable: {str(e)[:120]}", "re-login with `rpi`"))
 
-    provider, model = llm.decomp_spec()
+    # The decomposer model comes from the ladder, so with no arms there is no
+    # model to check and the ladder line already says why. Reporting a second
+    # failure for the same cause just makes the report harder to act on.
+    try:
+        spec = llm.decomp_spec()
+    except ValueError as e:
+        out.append(
+            _check(
+                FAIL,
+                "decompose-model",
+                str(e)[:160],
+                "unset it, or set it to a 'provider/model' string naming a configured endpoint",
+            )
+        )
+        return out
+    if spec is None:
+        out.append(
+            _check(
+                WARN,
+                "decompose-model",
+                "not resolved — the ladder has no arms (see the `ladder` line)",
+                "/setup writes the arms; RLP_DECOMPOSE_MODEL=provider/model overrides them",
+            )
+        )
+        return out
+    provider, model = spec
     try:
         llm._provider_base_url(provider)
         llm._provider_key(provider)
@@ -105,6 +134,27 @@ def _ladder() -> list[dict]:
                 "ladder",
                 f"not installed at {path}",
                 "sh scripts/install.sh, or set RLP_ORCHESTRATION=<file>",
+            )
+        )
+        return out
+    # "Installed with no arms" is the shipped state, and it is a different
+    # problem from a missing or broken file: the policy is fine, nobody has
+    # chosen the models yet. One line, one fix, and no pretence that a ladder
+    # with nothing to dispatch to is ok.
+    if not config["configured"]:
+        missing = []
+        if config["brain"] is None:
+            missing.append("no brain")
+        if config["arm_count"] == 0:
+            missing.append("no model arms")
+        out.append(
+            _check(
+                FAIL,
+                "ladder",
+                f"{path} — policy is set, but {' and '.join(missing)}: nothing can be dispatched, "
+                "so every request is handled inline",
+                "run /setup in a session — it reads your endpoint's model list and writes the "
+                "brain and the arms (`rlp provider add …` then /rlp-config does the same by hand)",
             )
         )
         return out
@@ -294,6 +344,18 @@ def _providers() -> list[dict]:
                 "sh scripts/install.sh installs the default ladder",
             )
         )
+    elif ladder["arm_count"] == 0:
+        # "Every arm is reachable" is vacuously true of zero arms, and reading it
+        # as `ok` next to a failing ladder line is the kind of report that makes
+        # a person stop trusting the whole thing.
+        out.append(
+            _check(
+                WARN,
+                "ladder-arms-reachable",
+                "no arms on the ladder yet, so there is nothing to reach",
+                "/setup writes them (see the `ladder` line)",
+            )
+        )
     elif orphans:
         out.append(
             _check(
@@ -451,32 +513,41 @@ def _extensions() -> list[dict]:
     return out
 
 
-def _host() -> list[dict]:
-    """Optional host wiring: the orchestrator plane behind the planner."""
+def _dispatch() -> list[dict]:
+    """Can this host actually start a worker?
+
+    Dispatch is local: `rlp_dispatch` spawns the `rpi` harness in a git worktree.
+    That makes the whole plane two binaries — the harness and git — and both are
+    checkable. This is the group that used to ask about an external orchestration
+    plane and answer in warnings nothing could clear; the question worth asking
+    is whether a worker can be spawned, and it has a real answer.
+    """
     out: list[dict] = []
-    for tool in ("omni",):
-        out.append(
-            _check(OK if shutil.which(tool) else WARN, f"bin:{tool}", shutil.which(tool) or "not on PATH",
-                   "needed only to dispatch workers, not to plan")
-        )
-    spec = Path.home() / ".omnigent" / "agents" / "rlp"
-    out.append(
-        _check(OK if (spec / "config.yaml").is_file() else WARN, "agent-spec", str(spec),
-               "sh scripts/install.sh" if not (spec / "config.yaml").is_file() else "")
-    )
-    cfg = Path.home() / ".omnigent" / "config.yaml"
-    if cfg.is_file():
-        text = cfg.read_text()
+    repo = Path(__file__).resolve().parents[2]
+    rpi = repo / "scripts" / "rpi-bin"
+    bundle = repo / "fork" / "pi" / "packages" / "coding-agent" / "dist" / "bundle" / "cli.js"
+    if not rpi.is_file():
+        out.append(_check(FAIL, "worker-harness", f"no {rpi}", "sh scripts/install.sh builds the harness"))
+    elif not bundle.is_file():
         out.append(
             _check(
-                OK if "harness:" in text and "rpi" in text else WARN,
-                "harness-override",
-                "omnigent pi harness -> rpi" if "rpi" in text else "no rpi harness override",
-                "re-run scripts/install.sh so workers boot the fork",
+                FAIL,
+                "worker-harness",
+                f"{rpi} is present but the fork is not built ({bundle} missing)",
+                "sh scripts/install.sh (or RLP_REBUILD=1 sh scripts/install.sh)",
             )
         )
     else:
-        out.append(_check(WARN, "harness-override", f"no {cfg}", "sh scripts/install.sh"))
+        out.append(_check(OK, "worker-harness", str(rpi), ""))
+    git = shutil.which("git")
+    out.append(
+        _check(
+            OK if git else WARN,
+            "bin:git",
+            git or "not on PATH",
+            "without git every worker shares one working tree instead of its own worktree",
+        )
+    )
     return out
 
 
@@ -522,24 +593,33 @@ def _warm() -> list[dict]:
     return out
 
 
-def run(*, warm: bool = False, host: bool = True) -> dict:
+def run(*, warm: bool = False) -> dict:
     """Collect every check. Returns {"ok", "summary", "checks"}; never raises."""
     checks: list[dict] = []
-    for group in (_python, _credentials, _providers, _ladder, _laya, _env, _extensions):
+    for group in (_python, _credentials, _providers, _ladder, _laya, _dispatch, _env, _extensions):
         try:
             checks.extend(group())
         except Exception as e:  # a broken group must not hide the others
-            checks.append(_check(FAIL, group.__name__.lstrip("_"), f"check crashed: {str(e)[:160]}", ""))
-    if host:
-        try:
-            checks.extend(_host())
-        except Exception as e:
-            checks.append(_check(WARN, "host", f"check crashed: {str(e)[:160]}", ""))
+            checks.append(
+                _check(
+                    FAIL,
+                    group.__name__.lstrip("_"),
+                    f"check crashed: {type(e).__name__}: {str(e)[:160]}",
+                    "this is a bug in rlp doctor, not in your setup — the other lines are still valid",
+                )
+            )
     if warm:
         try:
             checks.extend(_warm())
         except Exception as e:
-            checks.append(_check(FAIL, "warm", f"round trip crashed: {str(e)[:160]}", ""))
+            checks.append(
+                _check(
+                    FAIL,
+                    "warm",
+                    f"round trip crashed: {type(e).__name__}: {str(e)[:160]}",
+                    "see the laya-checkpoint and dep: lines above; `sh scripts/install.sh` re-fetches both",
+                )
+            )
     failures = sum(1 for c in checks if c["status"] == FAIL)
     warnings = sum(1 for c in checks if c["status"] == WARN)
     return {

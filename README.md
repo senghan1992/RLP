@@ -20,20 +20,20 @@ earns it is decomposed, routed across models, and dispatched to parallel workers
 in isolated git worktrees. Everything else is handled inline like a normal
 coding agent.
 
-RLP composes four open-source projects, each used for what it is good at, plus a
-decision layer that exists nowhere else:
+RLP is built on three things, each used for what it is good at, plus a decision
+layer that exists nowhere else:
 
 - **[pi](https://github.com/earendil-works/pi)** — the terminal harness the agent
-  and every worker run on (RLP builds a lightly-patched fork of it).
+  and every worker run on. RLP builds a lightly-patched fork of it (`rpi`) and is
+  a superset of it: everything pi does, plus the orchestration surface.
 - **[laya](https://huggingface.co/convaiinnovations/laya)** — the
-  non-autoregressive System-1 decision model used for triage and routing.
+  non-autoregressive System-1 decision model behind the triage gate and the router.
 - **RLM (Recursive Language Models)** — recursive, model-driven decomposition of
-  a request into a task DAG.
-- **[omnigent](https://omnigent.ai)** *(optional)* — an older orchestration plane,
-  reachable only via `rlp --omnigent`.
+  a request into a task DAG, and the recursion that re-splits a node that failed.
 
-Local orchestration needs no server, no daemon, no runner: dispatch is a
-`spawn`, collection is reading a file.
+Orchestration needs no server, no daemon and no runner: dispatch is a `spawn`,
+collection is reading a file, and the run directory (`~/.rlp/runs/<id>/`) holds
+the ledger, every worker's log and every worker's report.
 
 ---
 
@@ -88,8 +88,6 @@ never type it).
   provider works. Configure them inside `rlp` with `/setup` (or
   `/provider connect`), which is the guided path; a hand-edited file works too,
   and `rlp provider` is the scriptable equivalent.
-- `omni` (omnigent) is **optional** — only `rlp --omnigent` needs it.
-
 The installer uses [`uv`](https://github.com/astral-sh/uv) when it is present and
 falls back to a stdlib `venv` + `pip` otherwise.
 
@@ -99,6 +97,12 @@ falls back to a stdlib `venv` + `pip` otherwise.
 rlp            # the agent, in the project you are working on
 /setup         # guided: doctor → providers → brain → worker arms → roles
 ```
+
+**`/setup` is not optional.** A fresh install has no provider and a ladder that
+carries policy but no model arms, so until you run it RLP behaves as a plain
+coding agent: every request is handled inline, and `rlp doctor` and `rlp ladder`
+both say why in one line. This is on purpose — RLP ships no default model names
+because a model ref only means something on a host that has that provider.
 
 `/setup` asks the four questions that decide whether RLP can do anything at all,
 in order, with the defaults stated: which endpoints exist and which have no
@@ -147,7 +151,7 @@ into clauses) may raise the call to `orchestrate` and name the signal that fired
 merges, never force-pushes, never touches a protected branch.
 
 Deep dives: [docs/CONCEPTS.md](docs/CONCEPTS.md) (what it is and how to drive it)
-and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (a one-page diagram, Korean).
+and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (a one-page diagram).
 
 Under `~/.rlp/`, one directory per concern:
 
@@ -171,21 +175,32 @@ The harness renders it into the agent's prompt, the router derives its roster
 from it, and the headless planner reads the same file — a model name is never
 written twice.
 
+**RLP ships this file with policy and no model arms** — `"brain": null` and an
+empty `models` array. That is deliberate: a `provider/model` ref only means
+something on a host that has that provider, so RLP will not guess one. A
+plausible-looking default would make every fresh install plan dispatches onto a
+model the host cannot serve, and that failure surfaces at the worker, three
+steps from its cause. `/setup` reads your endpoint's own model list and writes
+the arms; until then `rlp doctor` says so in one line and every request is
+handled inline.
+
+Filled in, it looks like this (the provider ids are whatever *you* connected):
+
 ```jsonc
 {
-  "brain": "agnes/agnes-3.0-flash",
+  "brain": "openai/gpt-5.1",
   "workers": [
     { "id": "pi", "harness": "pi",
       "models": [
-        { "model": "agnes/agnes-3.0-flash",
+        { "model": "openai/gpt-5.1",
           "roles": ["code", "research", "docs", "review"],
           "when": "DEFAULT arm — most usage headroom; spend the bulk here" },
-        { "model": "qwen-token-plan/deepseek-v4.1-flash",
+        { "model": "anthropic/claude-opus-5-5",
           "roles": ["code", "debug", "review"],
           "when": "deep arm — multi-file refactors and hard debugging" }
       ] }
   ],
-  "roles": { "review": ["qwen-token-plan/qwen3.8-flash"] },
+  "roles": { "review": ["anthropic/claude-opus-5-5"] },
   "routing": { "escalateBelow": 0.55, "maxDispatchesPerTurn": 4,
                "gate": "hybrid", "signalThreshold": 1, "workerTimeoutMs": 1200000 },
   "review": { "crossVendor": true },
@@ -282,7 +297,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp memory` · `rlp remember "<text>"` | the project's cross-run knowledge log |
 | `rlp doctor [--warm]` | is this host runnable? one fix per failure |
 | `rlp update [--check]` | update the pi fork and re-apply RLP |
-| `rlp --omnigent` | the optional omnigent plane (session history + web UI) |
+| `rpi` | the same harness with no orchestration surface at all |
 
 Add `--json` to any engine subcommand for the raw envelope. Exit codes:
 `0` valid · `1` `ok:false` · `2` usage · `3` doctor found a failure.
@@ -343,6 +358,7 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | Symptom | Try |
 |---|---|
 | `rlp: decision engine not installed` | `sh scripts/install.sh` |
+| nothing ever orchestrates, even for obviously multi-part work | the ladder has no model arms yet — `rlp ladder` says `NOT CONFIGURED`; `/setup` fills it |
 | `the laya decision model` seems stuck | first load is ~150 s on CPU; it is loaded once per session in the background |
 | a request never fans out | the gate defaults to direct; use `rlp plan --mode orchestrate --because "…"` or ask explicitly |
 | a worker dies instantly | `rlp doctor` — usually a missing credential for that arm (`/provider key <id>`, or `/login <provider>`) |
@@ -360,7 +376,7 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | `RPI_CODING_AGENT_DIR` | the same, under the harness's own name — still honoured |
 | `RLP_ORCHESTRATION` | path to the ladder, overriding `<agent dir>/orchestration.json` |
 | `RPI_DEFAULT_MODEL` | the `rpi` session default (`provider/model`) |
-| `RLP_DECOMPOSE_MODEL` · `RLP_CRITIQUE_MODEL` · `RLP_VERIFY_MODEL` | override the planner / critic / verifier model |
+| `RLP_DECOMPOSE_MODEL` · `RLP_CRITIQUE_MODEL` · `RLP_VERIFY_MODEL` · `RLP_ROUTE_MODEL` | override the planner / critic / verifier / router model (`provider/model`); each otherwise comes from the ladder |
 | `RLP_SKIP_CREDENTIAL_PREFLIGHT=1` | skip the per-arm credential check |
 | `RLP_NO_MIGRATE=1` | do not copy credentials out of pi's `~/.pi` on install |
 | `RLP_HOME` | where run ledgers and project memory live (`~/.rlp`) |
@@ -380,11 +396,11 @@ RLP/
     rlp_svc/          #   triage, decompose (RLM + critique), route, verify,
                       #   memory, plan, orchestration ladder, providers,
                       #   doctor, engine, cli
-  agent/rlp/          # the agent spec: dropped-in pi extensions + skills
-    extensions/       #   rlp-orchestrate (local orchestration), rlp-provider
+  agent/rlp/          # what install.sh drops into ~/.rlp/agent
+    extensions/       #   rlp-orchestrate (orchestration), rlp-provider
                       #   (endpoint/credential wizards), rlp-commands, menus
     skills/           #   /skill:rlp-* — workflow, models, engine, doctor, commands
-    orchestration.json#   the default ladder
+    orchestration.json#   the ladder: policy, and no model arms (see above)
   scripts/            # install, rlp/rpi wrappers, selftest, fork patch,
                       #   check-harness + check-provider (live-session checks)
   docs/               # CONCEPTS.md, ARCHITECTURE.md

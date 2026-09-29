@@ -35,7 +35,12 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const binary = process.argv[2] || "rlp";
-const AGENT_DIR = process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+// RLP's own agent dir, resolved the same way `paths.py`, `rpi-bin` and the
+// extensions resolve it. Defaulting to pi's `~/.pi/agent` here meant the
+// "cancelling wrote nothing to the ladder" assertion was hashing a file that
+// does not exist — a check that could not fail is not a check.
+const AGENT_DIR =
+	process.env.RLP_CODING_AGENT_DIR || process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".rlp", "agent");
 const LADDER = join(AGENT_DIR, "orchestration.json");
 const STEP_TIMEOUT_MS = 120_000;
 const SANDBOX = mkdtempSync(join(tmpdir(), "rlp-provider-check-"));
@@ -255,10 +260,31 @@ try {
 		setup.notifies.some((m) => m.includes("runnable") || m.includes("problems found")),
 		"/setup reports this host's health first",
 	);
+	// How many questions the wizard can ask depends on whether this host has a
+	// credentialed provider to choose models from, so the assertion is on the
+	// shape of each branch rather than on a fixed count. What must hold either
+	// way: the endpoints step is always offered, and a skipped step is *said*.
+	const asked = setup.dialogs.join(" | ");
+	const skippedModelSteps = setup.notifies.some((m) => m.includes("skipping the brain"));
 	record(
-		setup.dialogs.length >= 3,
-		`the wizard asked its questions (saw ${setup.dialogs.length}: ${setup.dialogs.join(" | ").slice(0, 200)})`,
+		asked.includes("Step 1 of 4"),
+		`the wizard offers the endpoints step (saw ${setup.dialogs.length}: ${asked.slice(0, 200)})`,
 	);
+	if (skippedModelSteps) {
+		record(
+			!asked.includes("Step 2 of 4") && !asked.includes("Step 3 of 4"),
+			"with no credentialed provider, the model steps are not offered as empty pickers",
+		);
+		record(
+			setup.notifies.some((m) => m.includes("/provider connect")),
+			"and the skip names the command that unblocks it",
+		);
+	} else {
+		record(
+			asked.includes("Step 2 of 4") && asked.includes("Step 3 of 4"),
+			`with a credentialed provider, the brain and arm steps are offered: ${asked.slice(0, 200)}`,
+		);
+	}
 	record(setup.matched.includes("reload"), "the summary says how to pick the changes up");
 	record(
 		digest(LADDER) === before,

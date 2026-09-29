@@ -12,8 +12,8 @@
 # RPI_DEFAULT_MODEL is read by the fork's SettingsManager and beats
 # ~/.rlp/agent/settings.json, so `rpi` starts on an orchestration-ladder model
 # instead of inheriting whatever the user saved. Value uses the `provider/model`
-# spelling of `--model`; omnigent passes its own --model on managed sessions
-# and the CLI flag wins, so worker routing is unaffected.
+# spelling of `--model`. `rlp_dispatch` passes each worker its own --model and
+# the CLI flag wins over this, so worker routing is unaffected.
 #
 # The fork is resolved relative to this checkout, so the project relocates.
 # The wrapper must resolve the fork relative to this checkout, not to a

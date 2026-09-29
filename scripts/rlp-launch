@@ -1,5 +1,0 @@
-#!/bin/sh
-# rlp: the RLP orchestrator. Decompose -> route -> dispatch runs through
-# omnigent; the pi workers and this brain run on the `rpi` fork harness.
-# For the bare harness (single agent, like plain pi), use `rpi`.
-exec omni run "$HOME/.omnigent/agents/rlp" "$@"

@@ -27,7 +27,7 @@ import re
 from typing import Any
 
 from . import orchestration as orch
-from .llm import JSON_LINE_TOKENS, chat, route_spec
+from .llm import JSON_LINE_TOKENS, chat_first, role_candidates
 
 MODES = ("direct", "orchestrate")
 
@@ -169,12 +169,26 @@ Context: {(context or '')[:600]}
 direct = {_CRITERIA['direct']}
 orchestrate = {_CRITERIA['orchestrate']}
 Respond ONLY with JSON: {{"mode": "direct" or "orchestrate", "reason": <one short sentence>}}"""
-    text = chat(*route_spec(), messages=[{"role": "user", "content": prompt}], max_tokens=JSON_LINE_TOKENS)
+    candidates = role_candidates("route")
+    if not candidates:
+        raise RuntimeError(
+            "no model to triage with: the orchestration ladder has no arms — run /setup"
+        )
+    text, used = chat_first(
+        candidates, messages=[{"role": "user", "content": prompt}], max_tokens=JSON_LINE_TOKENS
+    )
     data = json.loads(text.split("```")[1].split("\n")[1]) if "```" in text else json.loads(text)
     mode = data.get("mode")
     if mode not in MODES:
         raise ValueError(f"llm_triage returned invalid mode {mode!r}")
-    return {"mode": mode, "confidence": 1.0, "engine": "llm", "escalate": False, "reason": data.get("reason", "")}
+    return {
+        "mode": mode,
+        "confidence": 1.0,
+        "engine": "llm",
+        "escalate": False,
+        "reason": data.get("reason", ""),
+        "triage_model": f"{used[0]}/{used[1]}",
+    }
 
 
 def _apply_hybrid(decision: dict, request: str, context: str, gate: str, signal_threshold: float) -> dict:

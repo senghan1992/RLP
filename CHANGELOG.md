@@ -8,7 +8,94 @@ offline suite fails if they drift.
 
 ## Unreleased
 
+### Removed
+
+- **The omnigent plane is gone**, and with it `rlp --omnigent`,
+  `scripts/rlp-launch`, the `agent/rlp/config.yaml` agent spec, the
+  `agent/rlp/agents/` sub-agent specs, step 4 of the installer, the
+  `~/.omnigent` skill discovery in the fork patch, and `rlp doctor --no-host`.
+  RLP is built on three things — pi, laya and RLM — and orchestration has been
+  local since dispatch became a `spawn`; the plane was a vestige that still cost
+  a maintenance surface and, worse, produced a report nobody could act on.
+
+  Concretely: on a host without `omni`, `rlp doctor` printed three warnings
+  (`bin:omni`, `agent-spec`, `harness-override`) whose stated fix was
+  `sh scripts/install.sh` — which then printed `omnigent not found — skipping`
+  and changed nothing. An unresolvable warning loop, with no explanation of what
+  omnigent was or that it was not needed. The `bin:omni` hint was also simply
+  false: it claimed `omni` was "needed to dispatch workers" long after dispatch
+  had moved in-process.
+
+  The group is replaced by `worker-harness` and `bin:git`, which ask the
+  question that actually has an answer: *can this host start a worker?* The
+  doctor now holds a rule — every `fail` and `warn` names a fix this host can
+  act on — and a check whose only remedy is a step the installer deliberately
+  skips does not belong in it.
+
 ### Changed
+
+- **The shipped ladder names no model arms.** `agent/rlp/orchestration.json`
+  carried `agnes/agnes-3.0-flash`, `qwen-token-plan/deepseek-v4.1-flash` and
+  `anthropic/claude-opus-4-8` — one host's private gateway, with `when` prose
+  that said "on this host" out loud. Anyone who installed RLP got a ladder whose
+  every arm was an orphan, so nothing orchestrated and the reason was three
+  steps away. It now ships **policy and no arms**: `"brain": null`, an empty
+  `models` array, and real defaults for the gate, the dispatch cap, the worker
+  watchdog, cross-vendor review and the RLM/planning budgets.
+
+  "Installed but not configured" is now a first-class state rather than an
+  invalid file. `orchestration.parse` accepts a null brain and an empty `models`
+  array and reports `configured` and `arm_count`; `rlp ladder` prints
+  `NOT CONFIGURED` with the fix; `rlp doctor` fails one line with `/setup` as
+  the remedy; `rlp plan` answers `mode: "direct"` with
+  `orchestration_unavailable` set — because with nothing to dispatch to,
+  `direct` is the only truthful verdict *and* a perfectly good one. `decompose`
+  and `verify` refuse with the same sentence instead of a transport error.
+  `/setup` fills the arms from the endpoint's own `GET /models`.
+- **The engine's own models come from the ladder, not from constants.** `llm.py`
+  hardcoded `qwen-token-plan/qwen3.8-max` as the decomposer and
+  `qwen-token-plan/deepseek-v4.1-flash` as the router. `route.py`, `triage.py`
+  and `verify.py` called them with **no fallback**, so on any host but one the
+  laya router's LLM fallback and the triage fallback were dead on arrival and
+  the failure read "the model returned no JSON". Each engine role now resolves
+  as: env override (`RLP_DECOMPOSE_MODEL`, `RLP_ROUTE_MODEL`,
+  `RLP_VERIFY_MODEL`, `RLP_CRITIQUE_MODEL`) → the ladder's `roles.<role>`
+  binding → the first arm declaring that role → the brain. `route` joins the
+  bindable roles, because the gate's LLM fallback is the one engine call on
+  every request's critical path and is usually worth pinning to a cheap arm.
+- **The LLM fallbacks walk a candidate list.** `llm.role_candidates(role)` is
+  the shared resolver — preferred spec, then role-matching arms, then every
+  other arm, then the brain — and `route.llm_route` / `triage.llm_triage` go
+  through `chat_first` like the decomposer already did. Both record which arm
+  answered (`router_model`, `triage_model`). `_planner_fallbacks` uses the same
+  resolver: resolving every role from the ladder had collapsed its chain onto
+  the brain, which would have made "never stall" one arm long.
+- `plan.FAMILIES` is gone. It listed three provider prefixes while `family()`
+  already derived the family from the prefix, so it was a table that could only
+  go stale.
+- `/setup` no longer returns without a summary when no provider has a
+  credential: it says which steps it is skipping and why, then closes with the
+  doctor re-check and the next command. A wizard that ends silently at the one
+  moment a first-time user needs guidance is not finished.
+- `/setup` offers to add the chosen brain as the default arm when the ladder
+  still has none. Choosing a brain and skipping the arm step is the likeliest
+  path through a first run, and it used to end with a ladder that could not
+  dispatch for a reason nobody would guess.
+- `rlp doctor`: a crashed check group now carries a hint saying it is a bug in
+  the doctor rather than in the user's setup; `ladder-arms-reachable` no longer
+  reports "every arm is reachable" when there are no arms (vacuously true, and
+  reading as `ok` beside a failing ladder line).
+- `scripts/check-provider.mjs` watched `~/.pi/agent/orchestration.json` — stale
+  since RLP moved to `~/.rlp` — so its "cancelling wrote nothing to the ladder"
+  assertion was hashing a file that does not exist. It now resolves the agent
+  dir the way everything else does, and asserts the shape of each `/setup`
+  branch rather than a fixed dialog count.
+- The test fixtures use generic provider names (`alpha`, `beta`, `gamma`). They
+  document the ladder's *shape*, and one host's gateway names in them read as
+  if RLP required those endpoints. A new `test_unconfigured_ladder` covers the
+  whole first-run path, and `test_ladder_validation` asserts that the **shipped**
+  ladder names no arms — the defect it catches is invisible until someone else
+  installs the tool.
 
 - **RLP keeps its own state under `~/.rlp`, not pi's `~/.pi`.** The fork's
   `piConfig.configDir` is `.rlp` and `paths.py` is the single rule every module
@@ -79,7 +166,7 @@ offline suite fails if they drift.
   by nothing). It also warns when the install marker records a file this version
   does not ship.
 - **The slash index listed RLP's skills twice.** The same five skills exist in
-  RLP's agent dir and in the omnigent agent spec (the REPL loads them from
+  RLP's agent dir and in the agent spec (the REPL loads them from
   there); the index now lists a name once.
 
 - **A plan can no longer be ended by one unhelpful arm.** The decomposer walked
@@ -115,9 +202,8 @@ offline suite fails if they drift.
 ## 0.2.0
 
 The first public release. RLP composes pi (a patched fork), laya (the
-non-autoregressive triage and routing decision model), RLM (recursive,
-model-driven decomposition) and an optional omnigent plane, and adds the piece
-none of them have: a gate that decides whether a request deserves orchestration
+non-autoregressive triage and routing decision model) and RLM (recursive,
+model-driven decomposition), and adds the piece none of them have: a gate that decides whether a request deserves orchestration
 at all, plus a local execution plane where a plan is a `spawn` and collection is
 reading a file.
 

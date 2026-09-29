@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: POSIX sh syntax check
         run: |
-          for f in install.sh scripts/rlp scripts/rpi-bin scripts/rlp-launch scripts/install.sh scripts/selftest.sh; do
+          for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh scripts/selftest.sh scripts/rlp-update; do
             sh -n "$f" && echo "ok $f"
           done
 

@@ -33,8 +33,12 @@ orchestration ladder, its validation, the derived router roster and which
 workers are excluded as unavailable; whether a single-vendor ladder is claiming
 cross-vendor review; the laya checkpoint cache; the CA bundle; RLP's own
 extensions and skills (the rest of the agent dir is labelled optional, never a
-failure); and the omnigent wiring (the `omni` binary, the installed agent spec,
-the harness override).
+failure); and whether a worker can actually be spawned here — the `rpi` harness
+present *and* the fork built, plus `git` for per-node worktrees.
+
+Every `fail` and `warn` names a fix this host can act on. A line whose only
+remedy is a step the installer deliberately skipped is noise, not a diagnostic,
+and does not belong in the report.
 
 Exit code 0 when runnable, 3 when a `fail` is present.
 

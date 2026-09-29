@@ -355,7 +355,11 @@ async function multiSelect(ctx: ExtensionCommandContext, title: string, options:
 
 interface LadderView {
 	path: string;
-	brain: string;
+	/** `null` until a brain has been chosen — the state RLP ships in. */
+	brain: string | null;
+	/** False while the ladder carries policy but no brain and no arms. */
+	configured: boolean;
+	arm_count: number;
 	roles: Record<string, string | string[]>;
 	known_roles: string[];
 	model_pool: string[];
@@ -926,21 +930,31 @@ async function setupWizard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Prom
 	}
 
 	// 2. the orchestrator model
+	//
+	// With no credentialed provider there is nothing to choose from, so steps
+	// 2-4 are skipped — but the wizard still closes. Returning early here left
+	// `/setup` with no summary and no next step, which is the one moment a
+	// first-time user most needs both.
 	const authenticated = modelRows(ctx).filter((r) => r.authenticated);
+	const view = authenticated.length > 0 ? await ladderView(ctx) : undefined;
 	if (authenticated.length === 0) {
 		ctx.ui.notify(
 			[
-				"◈ no provider has a credential, so there is no model to orchestrate with.",
+				"◈ no provider has a credential, so there is no model to orchestrate with —",
+				"  skipping the brain, the worker arms and the role bindings.",
 				"",
-				"  Run /setup again after connecting one, or /provider connect now.",
+				"  /provider connect     attach one now (guided), then /setup again",
 			].join("\n"),
 			"warning",
 		);
-		return;
+	} else if (!view) {
+		ctx.ui.notify("◈ the ladder could not be read, so the model steps are skipped.", "warning");
 	}
-	const view = await ladderView(ctx);
-	if (!view) return;
-	const brainRef = await chooseModel(ctx, `Step 2 of 4 — the orchestrator (brain). Currently: ${view.brain}`, authenticated);
+	const brainRef = view && await chooseModel(
+		ctx,
+		`Step 2 of 4 — the orchestrator (brain). Currently: ${view.brain ?? "not chosen yet"}`,
+		authenticated,
+	);
 	if (brainRef) {
 		await applyOps(ctx, [{ op: "set_brain", model: brainRef }], "brain is now", brainRef);
 		const model = ctx.modelRegistry.find(brainRef.split("/")[0], brainRef.slice(brainRef.indexOf("/") + 1));
@@ -950,19 +964,21 @@ async function setupWizard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Prom
 	}
 
 	// 3. the worker arms
-	const picked = await multiSelect(
-		ctx,
-		[
-			"Step 3 of 4 — worker arms. Which models may RLP dispatch to?",
-			"",
-			"  Arms are priority-ordered: the first is where the bulk of the spend goes.",
-			"  Two or more provider FAMILIES are what make independent review possible:",
-			"  a review node is re-picked onto a different family than the code it reviews.",
-		].join("\n"),
-		authenticated.map((r) => `${r.provider}/${r.id}${r.current ? "   (this session)" : ""}`),
-	);
+	const picked = view
+		? await multiSelect(
+				ctx,
+				[
+					"Step 3 of 4 — worker arms. Which models may RLP dispatch to?",
+					"",
+					"  Arms are priority-ordered: the first is where the bulk of the spend goes.",
+					"  Two or more provider FAMILIES are what make independent review possible:",
+					"  a review node is re-picked onto a different family than the code it reviews.",
+				].join("\n"),
+				authenticated.map((r) => `${r.provider}/${r.id}${r.current ? "   (this session)" : ""}`),
+			)
+		: [];
 	const armRefs = picked.map((p) => p.replace(/\s+\(this session\)$/, "").trim());
-	if (armRefs.length > 0) {
+	if (view && armRefs.length > 0) {
 		const piWorker = view.workers.find((w) => (w.harness ?? "pi") === "pi") ?? view.workers[0];
 		if (!piWorker) {
 			ctx.ui.notify("◈ the ladder has no worker to add arms to.", "warning");
@@ -984,6 +1000,8 @@ async function setupWizard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Prom
 		}
 		const families = new Set(armRefs.map((r) => r.split("/")[0]));
 		if (families.size < 2) {
+			// Stated as a consequence, not a scolding: one family is a perfectly
+			// usable setup, it just cannot satisfy the cross-vendor review rule.
 			ctx.ui.notify(
 				[
 					`◈ every arm is from one family (${[...families].join(", ")}).`,
@@ -994,6 +1012,44 @@ async function setupWizard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Prom
 				].join("\n"),
 				"warning",
 			);
+		}
+	}
+
+	// A wizard that ran to the end and left the ladder undispatchable has not
+	// finished. The overwhelmingly common way into that state is a fresh install
+	// where step 3 was skipped: the brain is chosen, no arm is, and nothing
+	// orchestrates for a reason nobody would guess. Offer the one-arm ladder
+	// rather than reporting the hole in the closing summary.
+	const afterArms = await ladderView(ctx);
+	if (afterArms && !afterArms.configured && afterArms.arm_count === 0 && afterArms.brain) {
+		const brain = afterArms.brain;
+		const accept = await ctx.ui.select(
+			[
+				"◈ the ladder still has no worker arms, so nothing can be dispatched.",
+				"",
+				`  Add ${brain} as the default arm? RLP can then orchestrate on one model;`,
+				"  a second provider family later is what enables independent review.",
+			].join("\n"),
+			[`Add ${brain} as the default arm`, "Leave it — handle everything inline"],
+		);
+		if (accept?.startsWith("Add")) {
+			const worker = afterArms.workers.find((w) => (w.harness ?? "pi") === "pi") ?? afterArms.workers[0];
+			if (worker) {
+				await applyOps(
+					ctx,
+					[
+						{
+							op: "add_arm",
+							worker: worker.id,
+							model: brain,
+							roles: ["code", "review", "docs", "research", "explore", "debug"],
+							when: `the only arm — added by /setup on ${new Date().toISOString().slice(0, 10)}`,
+						},
+					],
+					"default arm added:",
+					brain,
+				);
+			}
 		}
 	}
 

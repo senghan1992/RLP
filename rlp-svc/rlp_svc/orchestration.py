@@ -5,6 +5,22 @@ drift apart.
 Path: `$RLP_ORCHESTRATION` when set, else `<RLP agent dir>/orchestration.json` —
 `~/.rlp/agent` by default. RLP does not read pi's `~/.pi`: see `paths.py` for
 the one rule the harness, the extensions and this module share.
+
+A ladder has two parts, and only one of them can ship:
+
+  * **policy** — the gate, the dispatch cap, the worker watchdog, cross-vendor
+    review, the RLM and planning budgets. Provider-independent, so RLP ships
+    real defaults for all of it.
+  * **arms** — `brain` and each worker's `models`. These name a specific
+    `provider/model` on *this* host, so RLP ships none of them and will not
+    guess. `/setup` writes them from the endpoints the user actually connected.
+
+That makes "installed but not configured" a first-class state rather than a
+broken file: `parse()` accepts a ladder with no brain and no arms and reports
+`configured: False`, so `doctor` can name it in one line and `/setup` can fill
+it in place. Shipping a plausible-looking arm instead would mean every fresh
+install planned dispatches onto a model the host cannot serve — which fails at
+the worker, three steps from the cause.
 """
 from __future__ import annotations
 
@@ -14,6 +30,17 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
+
+
+#: What to say when the ladder cannot dispatch. One sentence, one fix, and the
+#: same words wherever the engine hits it, so the answer a caller gets does not
+#: depend on which entry point it came through.
+NOT_CONFIGURED = (
+    "the orchestration ladder has no model arms yet, so there is nothing to "
+    "orchestrate onto — run /setup in a session to connect a provider and pick "
+    "the brain and the worker arms (or `rlp provider add <id> <baseUrl> <model>` "
+    "then /rlp-config). Until then every request is handled inline."
+)
 
 
 def config_path() -> Path:
@@ -84,8 +111,13 @@ def parse(raw: str, source: str) -> dict:
         note = raw_worker.get("availabilityNote", "")
         _require(isinstance(note, str), f"{source}: {where}.availabilityNote must be a string")
 
+        # An empty `models` array is the unconfigured state, not an error: the
+        # worker exists (it carries the harness and the availability flag) and
+        # `/setup` adds its arms once the user has an endpoint to draw them from.
         models_raw = raw_worker.get("models")
-        _require(isinstance(models_raw, list) and models_raw, f"{source}: worker {wid!r} needs a non-empty 'models' array")
+        if models_raw is None:
+            models_raw = []
+        _require(isinstance(models_raw, list), f"{source}: worker {wid!r} 'models' must be an array")
         models = []
         for j, raw_model in enumerate(models_raw):
             mwhere = f"{source}: worker {wid!r} models[{j}]"
@@ -127,7 +159,7 @@ def parse(raw: str, source: str) -> dict:
         _require(isinstance(signal_threshold, (int, float)) and signal_threshold >= 0,
                  f"{source}: routing.signalThreshold must be a non-negative number")
     # Seconds a worker may run before `rlp_collect` treats it as wedged and
-    # kills it. Mirrors omnigent's 600 s headless watchdog; None means no limit.
+    # kills it. None means no limit, which is a choice and not a default.
     worker_timeout_ms = routing_raw.get("workerTimeoutMs")
     if worker_timeout_ms is not None:
         _require(isinstance(worker_timeout_ms, int) and not isinstance(worker_timeout_ms, bool) and worker_timeout_ms >= 1000,
@@ -216,9 +248,20 @@ def parse(raw: str, source: str) -> dict:
         "verifySamples": verify_samples,
     }
 
+    # `brain` absent or null means "not chosen yet". Present means it must be a
+    # real `provider/model` — a half-written brain is still an error.
+    raw_brain = parsed.get("brain")
+    brain = None if raw_brain is None else _model_ref(raw_brain, f"{source}: 'brain'")
+    arm_count = sum(len(w["models"]) for w in workers)
+
     return {
         "path": source,
-        "brain": _model_ref(parsed.get("brain"), f"{source}: 'brain'"),
+        "brain": brain,
+        # A ladder is configured when it can actually dispatch: a brain to plan
+        # with, and at least one arm to dispatch to. Callers that need one branch
+        # on this rather than re-deriving it and disagreeing.
+        "configured": brain is not None and arm_count > 0,
+        "arm_count": arm_count,
         "workers": workers,
         "roles": roles,
         "routing": {
@@ -252,9 +295,12 @@ def excluded(config: dict) -> list[dict]:
 #: ladder's arms declare is what the role editor offers, so a custom arm role
 #: still shows up even though the built-in domain map does not know it.
 #: (`integration` is a *domain* that maps to the `code` role, not a role itself.)
-#: `plan` / `critique` / `verify` are not worker roles: they name the models the
-#: *planner itself* uses for decomposition, plan review, and best-of-N verdicts.
-PLANNER_ROLES = ("code", "debug", "review", "research", "docs", "explore", "plan", "critique", "verify")
+#: `plan` / `critique` / `verify` / `route` are not worker roles: they name the
+#: models the *engine itself* uses — for decomposition, plan review, best-of-N
+#: verdicts, and the LLM fallback behind the laya gate. Binding `route` to a
+#: cheap fast arm is usually right: it answers a one-line classification, and it
+#: is the only one of the four on the critical path of every request.
+PLANNER_ROLES = ("code", "debug", "review", "research", "docs", "explore", "plan", "critique", "verify", "route")
 
 
 def arm_roles(config: dict) -> list[str]:
@@ -549,9 +595,16 @@ def roster(config: dict, *, include_unavailable: bool = False) -> list[dict]:
     the same guidance the brain's prompt carries. Unavailable workers are
     omitted by default — routing to an arm that cannot run wastes the whole
     plan — and `include_unavailable=True` returns the full set for inspection.
+
+    A worker with no arms is omitted too, and for the same reason: an
+    unconfigured ladder must produce an empty roster rather than a card with
+    nothing behind it, so the caller reports "no arms" instead of routing to
+    one that does not exist.
     """
     cards = []
     for worker in workers(config, only_available=not include_unavailable):
+        if not worker["models"]:
+            continue
         roles: list[str] = []
         for entry in worker["models"]:
             for role in entry["roles"]:

@@ -13,31 +13,34 @@ import sys
 import tempfile
 from pathlib import Path
 
+#: A fully configured two-vendor ladder. The provider names are deliberately
+#: generic: this fixture documents the ladder's *shape*, and naming one host's
+#: private gateway here would read as if RLP required those endpoints.
 LADDER = {
-    "brain": "agnes/agnes-3.0-flash",
+    "brain": "alpha/alpha-large",
     "workers": [
         {
             "id": "pi",
             "harness": "pi",
             "models": [
                 {
-                    "model": "agnes/agnes-3.0-flash",
+                    "model": "alpha/alpha-large",
                     "roles": ["code", "review", "docs"],
                     "when": "default arm, carries the bulk",
                 },
                 {
-                    "model": "qwen-token-plan/deepseek-v4.1-flash",
+                    "model": "beta/beta-deep",
                     "roles": ["code", "review", "debug"],
                     "when": "deep arm and second vendor",
                 },
             ],
         },
         {
-            "id": "claude_code",
+            "id": "solo",
             "harness": "claude-native",
             "models": [
                 {
-                    "model": "anthropic/claude-opus-4-8",
+                    "model": "gamma/gamma-opus",
                     "roles": ["code", "review"],
                     "when": "opt-in, spend-limited",
                 }
@@ -45,6 +48,15 @@ LADDER = {
         },
     ],
     "routing": {"escalateBelow": 0.55, "maxDispatchesPerTurn": 4},
+    "review": {"crossVendor": True},
+}
+
+#: The ladder as RLP ships it: policy, and no arms at all. "Installed but not
+#: configured" is a supported state, so it gets a fixture.
+UNCONFIGURED_LADDER = {
+    "brain": None,
+    "workers": [{"id": "pi", "harness": "pi", "models": []}],
+    "routing": {"escalateBelow": 0.55, "maxDispatchesPerTurn": 4, "gate": "hybrid"},
     "review": {"crossVendor": True},
 }
 
@@ -142,15 +154,15 @@ def test_pick_arm() -> None:
     from .plan import family, intent, pick_arm
 
     pi = LADDER["workers"][0]
-    check(pick_arm(pi, "code")[0]["model"] == "agnes/agnes-3.0-flash", "priority order: first matching arm wins")
-    check(pick_arm(pi, "debug")[0]["model"] == "qwen-token-plan/deepseek-v4.1-flash", "role picks its own arm")
-    arm, why = pick_arm(pi, "review", avoid_families={"agnes"})
-    check(arm["model"] == "qwen-token-plan/deepseek-v4.1-flash", f"cross-vendor re-pick: {arm['model']}")
+    check(pick_arm(pi, "code")[0]["model"] == "alpha/alpha-large", "priority order: first matching arm wins")
+    check(pick_arm(pi, "debug")[0]["model"] == "beta/beta-deep", "role picks its own arm")
+    arm, why = pick_arm(pi, "review", avoid_families={"alpha"})
+    check(arm["model"] == "beta/beta-deep", f"cross-vendor re-pick: {arm['model']}")
     check("different vendor" in why, f"rationale names the rule: {why!r}")
     solo = LADDER["workers"][1]
-    check(pick_arm(solo, "code", avoid_families={"anthropic"})[0]["model"] == "anthropic/claude-opus-4-8",
+    check(pick_arm(solo, "code", avoid_families={"gamma"})[0]["model"] == "gamma/gamma-opus",
           "no alternative family: keep the arm rather than fail the plan")
-    check(family("qwen-token-plan/deepseek-v4.1-flash") == "qwen-token-plan", "family is the provider")
+    check(family("beta/beta-deep") == "beta", "family is the provider")
     check(intent("code") == ("code", "implement"), "code -> implement")
     check(intent("review") == ("review", "review"), "review -> review")
     check(intent("docs") == ("docs", "explore"), "docs -> explore")
@@ -238,7 +250,7 @@ def test_plan_orchestrates() -> None:
     check([t["id"] for t in result["tasks"]] == ["t1", "t2", "t3"], "tasks carried through")
     check(result["waves"] == [["t1", "t2"], ["t3"]], f"waves computed: {result['waves']}")
     check(result["max_dispatches_per_turn"] == 4, "per-turn cap surfaced from the ladder")
-    check(result["routes"]["t1"]["arm"] == "agnes/agnes-3.0-flash", f"t1 on the default arm: {result['routes']['t1']}")
+    check(result["routes"]["t1"]["arm"] == "alpha/alpha-large", f"t1 on the default arm: {result['routes']['t1']}")
     check(result["routes"]["t1"]["purpose"] == "implement", "code node dispatches as implement")
     check(result["routes"]["t3"]["purpose"] == "review", "review node dispatches as review")
     check(result["routes"]["t3"]["arm"] != result["routes"]["t1"]["arm"],
@@ -251,13 +263,13 @@ def test_plan_orchestrates() -> None:
     # A ladder with a single vendor family cannot satisfy the cross-vendor rule.
     # The planner must say so instead of quietly shipping a same-vendor review.
     single_family = {
-        "brain": "agnes/agnes-3.0-flash",
+        "brain": "alpha/alpha-large",
         "workers": [
             {
                 "id": "pi",
                 "harness": "pi",
                 "models": [
-                    {"model": "agnes/agnes-3.0-flash", "roles": ["code", "review"], "when": "only arm"}
+                    {"model": "alpha/alpha-large", "roles": ["code", "review"], "when": "only arm"}
                 ],
             }
         ],
@@ -308,7 +320,8 @@ def test_plan_degrade_paths() -> None:
             missing = Path(tmp) / "nope.json"
             os.environ["RLP_ORCHESTRATION"] = str(missing)
             absent = plan.plan("do the thing")
-            check(absent["ok"] is False and "doctor" in absent["error"], f"absent ladder points at doctor: {absent}")
+            check(absent["ok"] is False and "install.sh" in absent["error"],
+                  f"an absent ladder names the command that installs one: {absent}")
         finally:
             os.environ.pop("RLP_ORCHESTRATION", None)
 
@@ -328,7 +341,7 @@ def test_availability() -> None:
     check([c["id"] for c in orch.roster(parsed)] == ["pi"], "the router never sees an unavailable worker")
     check(len(orch.roster(parsed, include_unavailable=True)) == 2, "inspection can still see the full ladder")
     excluded = orch.excluded(parsed)
-    check(excluded[0]["id"] == "claude_code" and "exhausted" in excluded[0]["reason"],
+    check(excluded[0]["id"] == "solo" and "exhausted" in excluded[0]["reason"],
           f"the reason is carried: {excluded}")
 
     for bad, why in [
@@ -353,14 +366,18 @@ def test_plan_excludes_unavailable() -> None:
     result = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=ladder)["result"]
     check(all(r["agent"] == "pi" for r in result["routes"].values()),
           f"no node lands on the unavailable arm: {[r['agent'] for r in result['routes'].values()]}")
-    check(result["excluded_workers"][0]["id"] == "claude_code", "the plan says what it excluded and why")
+    check(result["excluded_workers"][0]["id"] == "solo", "the plan says what it excluded and why")
 
     dead = json.loads(json.dumps(LADDER))
     for w in dead["workers"]:
         w["available"] = False
-    broken = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=dead)
-    check(broken["ok"] is False and "available" in broken["error"],
-          f"an all-unavailable ladder fails loudly instead of planning nothing: {broken}")
+    # Every worker switched off is the operator's own choice, so the plan is
+    # still answered — with `direct`, and with the reason named. Failing the
+    # call instead would mean the request goes unhandled to punish a setting.
+    broken = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=dead)["result"]
+    check(broken["mode"] == "direct", f"an all-unavailable ladder degrades to direct: {broken}")
+    check("available" in broken["orchestration_unavailable"] and "pi" in broken["orchestration_unavailable"],
+          f"and says which workers were switched off: {broken['orchestration_unavailable']}")
 
 
 def test_ladder_validation() -> None:
@@ -375,7 +392,6 @@ def test_ladder_validation() -> None:
          "brain without provider"),
         ('{"brain":"p/m","workers":[{"id":"a","models":[{"model":"p/m","roles":[],"when":"x"}]}]}', "empty roles"),
         ('{"brain":"p/m","workers":[{"id":"a","models":[{"model":"p/m","roles":["code"],"when":""}]}]}', "empty when"),
-        ('{"brain":"p/m","workers":[{"id":"a","models":[]}]}', "worker without arms"),
         ('{"brain":"p/m","workers":[{"id":"a","models":[{"model":"p/m","roles":["c"],"when":"x"}]}],'
          '"routing":{"escalateBelow":3}}', "gate out of range"),
     ]:
@@ -384,6 +400,87 @@ def test_ladder_validation() -> None:
             check(False, f"ladder accepted an invalid config: {why}")
         except ValueError:
             check(True, why)
+
+    # The shipped state: policy, no brain, no arms. Valid, and reported as
+    # unconfigured rather than accepted as dispatchable — every caller branches
+    # on this one flag instead of re-deriving it and disagreeing.
+    blank = orch.parse(json.dumps(UNCONFIGURED_LADDER), "test")
+    check(blank["configured"] is False, f"an armless ladder parses as unconfigured: {blank['configured']}")
+    check(blank["brain"] is None, "a null brain survives parsing as None")
+    check(blank["arm_count"] == 0, f"arm_count is 0: {blank['arm_count']}")
+    check(orch.roster(blank) == [], f"an armless worker yields no roster card: {orch.roster(blank)}")
+    check(blank["routing"]["escalateBelow"] == 0.55, "policy survives on an unconfigured ladder")
+    check(blank["planning"]["verifySamples"] == 3, "planning defaults survive on an unconfigured ladder")
+    full = orch.parse(json.dumps(LADDER), "test")
+    check(full["configured"] is True and full["arm_count"] == 3, f"a full ladder is configured: {full['arm_count']}")
+
+    # The ladder RLP actually ships must be exactly that state — not almost it.
+    # A host-specific arm sneaking back into the default is the defect this
+    # catches, and it is invisible until someone else installs the tool.
+    shipped_path = Path(__file__).resolve().parents[2] / "agent" / "rlp" / "orchestration.json"
+    if shipped_path.is_file():
+        shipped = orch.parse(shipped_path.read_text(), str(shipped_path))
+        check(shipped["configured"] is False,
+              f"the shipped ladder names no model arms: brain={shipped['brain']} arms={shipped['arm_count']}")
+        check(shipped["routing"]["maxDispatchesPerTurn"] and shipped["routing"]["workerTimeoutMs"],
+              "the shipped ladder still carries its dispatch policy")
+
+
+def test_unconfigured_ladder() -> None:
+    """With no arms, every entry point says the same thing and none of them crash.
+
+    This is the whole first-run experience of a downloaded copy: the harness is
+    built, the engine is installed, and nothing has been connected yet. The
+    honest answer is "direct, and here is how to enable the rest" — not a
+    traceback, and not a plan routed onto a model that does not exist.
+    """
+    import os
+
+    from . import llm
+    from . import orchestration as orch
+    from . import plan as plan_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "orchestration.json"
+        path.write_text(json.dumps(UNCONFIGURED_LADDER))
+        os.environ["RLP_ORCHESTRATION"] = str(path)
+        for var in ("RLP_DECOMPOSE_MODEL", "RLP_ROUTE_MODEL", "RLP_VERIFY_MODEL"):
+            os.environ.pop(var, None)
+        try:
+            check(llm.role_candidates("route") == [], "no arms means no route candidates")
+            check(llm.decomp_spec() is None, "no arms means no decomposer spec")
+            check(llm.verify_spec() is None, "no arms means no verifier spec")
+
+            # plan() must answer, not fail: direct is correct and useful here.
+            answer = plan_mod.plan("add a flag, test it, and document it")
+            check(answer["ok"] is True, f"plan succeeds on an unconfigured ladder: {answer}")
+            check(answer["result"]["mode"] == "direct", f"the only truthful mode is direct: {answer['result']}")
+            check("/setup" in answer["result"]["orchestration_unavailable"],
+                  "and it names the one command that fixes it")
+
+            # An explicit orchestrate override must not be able to talk its way
+            # past a host that has nothing to dispatch to.
+            forced = plan_mod.plan("two things", mode="orchestrate", because="a and b")
+            check(forced["result"]["mode"] == "direct", f"an override cannot invent arms: {forced['result']}")
+
+            from . import decompose as dmod
+
+            env = dmod.decompose("do two things")
+            check(env["ok"] is False and "/setup" in env["error"], f"decompose names the fix: {env}")
+
+            verdict = __import__("rlp_svc.verify", fromlist=["verify"]).verify("t", "it passes")
+            check(verdict["ok"] is False and "/setup" in verdict["error"], f"verify names the fix: {verdict}")
+
+            report = __import__("rlp_svc.doctor", fromlist=["run"]).run()
+            names = {c["name"]: c for c in report["checks"]}
+            check("ladder" in names and names["ladder"]["status"] == "fail",
+                  f"doctor fails the ladder line: {names.get('ladder')}")
+            check("/setup" in names["ladder"]["hint"], f"with /setup as the fix: {names['ladder']['hint']}")
+            check(all(c["status"] == "ok" or c["hint"] for c in report["checks"]),
+                  "every non-ok doctor line carries a fix")
+        finally:
+            os.environ.pop("RLP_ORCHESTRATION", None)
+        check(orch.NOT_CONFIGURED.count("/setup") == 1, "the not-configured sentence names /setup exactly once")
 
 
 def test_engine_protocol() -> None:
@@ -417,7 +514,16 @@ def test_engine_protocol() -> None:
     check(events and events[0].get("event") == "ready", f"engine announces ready first: {events[:1]}")
     replies = {e["id"]: e for e in events if "id" in e}
     check(set(replies) == {1, 2, 3}, f"one reply per request id: {sorted(replies)}")
-    check(replies[1]["ok"] is True and replies[1]["result"]["brain"], "ladder op returns the ladder")
+    # The repo ladder is the shipped one, so `brain` is legitimately null here:
+    # what the op has to prove is that it returned *the ladder*, policy and all.
+    ladder_reply = replies[1]
+    check(ladder_reply["ok"] is True, f"ladder op succeeds: {ladder_reply}")
+    check(
+        ladder_reply["result"]["path"] == str(repo_ladder)
+        and [w["id"] for w in ladder_reply["result"]["workers"]] == ["pi"]
+        and ladder_reply["result"]["routing"]["maxDispatchesPerTurn"] == 4,
+        f"ladder op returns the ladder: {ladder_reply['result']}",
+    )
     check(replies[2]["ok"] is False and "unknown op" in replies[2]["error"], "unknown op is an error reply")
     check(replies[3]["ok"] is True, "a request survives the previous bad op (the server stays up)")
     check("result" in replies[3] and "ok" not in replies[3].get("result", {}),
@@ -604,9 +710,13 @@ def test_planner_fallbacks() -> None:
 
         candidates = mod._planner_fallbacks()
         check(len(candidates) >= 2, f"more than one candidate arm: {candidates}")
+        check(
+            len({c[0] for c in candidates}) >= 2,
+            f"the chain spans more than one provider, or it is not a fallback: {candidates}",
+        )
         check(len(set(candidates)) == len(candidates), f"candidates are deduped: {candidates}")
         check(candidates[0] == mod._planner_spec(), "the configured planner goes first")
-        check(("agnes", "agnes-3.0-flash") in candidates or any(c[0] == "agnes" for c in candidates),
+        check(("alpha", "alpha-large") in candidates,
               f"the ladder's DEFAULT arm is a candidate: {candidates}")
 
         tried: list = []
@@ -791,7 +901,7 @@ def test_paths() -> None:
 def test_doctor() -> None:
     from . import doctor
 
-    report = doctor.run(host=False)
+    report = doctor.run()
     check(isinstance(report["ok"], bool), "doctor returns a verdict")
     names = {c["name"] for c in report["checks"]}
     check({"python", "ladder", "laya-checkpoint"} <= names, f"core checks present: {sorted(names)}")
@@ -809,7 +919,7 @@ def test_doctor() -> None:
 
     os.environ["RLP_ORCHESTRATION"] = "/nonexistent/orchestration.json"
     try:
-        broken = doctor.run(host=False)
+        broken = doctor.run()
         check(broken["ok"] is False, "a missing ladder makes doctor fail loudly")
         check(any(c["name"] == "ladder" and c["hint"] for c in broken["checks"]), "the failure carries a fix")
         rendered = doctor.render(broken)
@@ -870,23 +980,23 @@ def test_ladder_mutation() -> None:
         try:
             applied = orch.mutate(
                 [
-                    {"op": "set_brain", "model": "qwen-token-plan/qwen3.8-max"},
+                    {"op": "set_brain", "model": "beta/beta-max"},
                     {"op": "add_arm", "worker": "pi", "model": "anthropic/claude-x", "roles": ["code"], "when": "test"},
-                    {"op": "set_arm", "worker": "pi", "match": "agnes/agnes-3.0-flash", "when": "edited"},
+                    {"op": "set_arm", "worker": "pi", "match": "alpha/alpha-large", "when": "edited"},
                     {"op": "move_arm", "worker": "pi", "from": 2, "to": 0},
-                    {"op": "set_worker_available", "worker": "claude_code", "available": False, "note": "test"},
+                    {"op": "set_worker_available", "worker": "solo", "available": False, "note": "test"},
                     {"op": "set_routing", "key": "gate", "value": "laya"},
                     {"op": "set_review", "crossVendor": False},
                 ]
             )
             check(applied["backup"] and Path(applied["backup"]).is_file(), "a backup is written before the edit")
             ladder = applied["ladder"]
-            check(ladder["brain"] == "qwen-token-plan/qwen3.8-max", "brain edited")
+            check(ladder["brain"] == "beta/beta-max", "brain edited")
             check(ladder["workers"][0]["models"][0]["model"] == "anthropic/claude-x", "arm reordered to first")
             check(ladder["routing"]["gate"] == "laya", "routing knob edited")
             check(ladder["review"]["crossVendor"] is False, "review knob edited")
             check([c["id"] for c in orch.roster(ladder)] == ["pi"], "the disabled worker leaves the roster")
-            check(any(a["when"] == "edited" and a["model"] == "agnes/agnes-3.0-flash"
+            check(any(a["when"] == "edited" and a["model"] == "alpha/alpha-large"
                       for a in ladder["workers"][0]["models"]),
                   "set_arm by model ref rewrote that arm")
 
@@ -898,9 +1008,9 @@ def test_ladder_mutation() -> None:
             except ValueError:
                 check(True, "an invalid mutation is rejected")
             check(path.read_text() == before, "a rejected mutation leaves the file untouched")
-            dry = orch.mutate([{"op": "set_brain", "model": "qwen-token-plan/x"}], dry_run=True)
+            dry = orch.mutate([{"op": "set_brain", "model": "beta/x"}], dry_run=True)
             check(dry["dry_run"] is True and dry["backup"] is None, "dry_run reports and writes nothing")
-            check(orch.raw_load()["brain"] != "qwen-token-plan/x", "dry_run really did not write")
+            check(orch.raw_load()["brain"] != "beta/x", "dry_run really did not write")
         finally:
             os.environ.pop("RLP_ORCHESTRATION", None)
 
@@ -919,10 +1029,10 @@ def test_config_cli() -> None:
 
             sink = io.StringIO()
             with contextlib.redirect_stdout(sink):
-                code = cli.main(["config", json.dumps([{"op": "set_brain", "model": "qwen-token-plan/qwen3.8-max"}]), "--json"])
+                code = cli.main(["config", json.dumps([{"op": "set_brain", "model": "beta/beta-max"}]), "--json"])
             check(code == 0, f"config exits 0: {code}")
             payload = json.loads(sink.getvalue())
-            check(payload["ok"] and payload["result"]["ladder"]["brain"] == "qwen-token-plan/qwen3.8-max",
+            check(payload["ok"] and payload["result"]["ladder"]["brain"] == "beta/beta-max",
                   "config wrote the new brain")
 
             stale = io.StringIO()
@@ -940,11 +1050,11 @@ def test_credential_preflight() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         auth = Path(tmp) / "auth.json"
-        auth.write_text(json.dumps({"agnes": {"type": "api_key", "key": "x"}, "qwen-token-plan": {"key": "y"}}))
+        auth.write_text(json.dumps({"alpha": {"type": "api_key", "key": "x"}, "beta": {"key": "y"}}))
         os.environ["RLP_PI_AUTH"] = str(auth)
         os.environ.pop("RLP_SKIP_CREDENTIAL_PREFLIGHT", None)
         try:
-            check(plan.credential_state("agnes") == "present", "a provider in auth.json is present")
+            check(plan.credential_state("alpha") == "present", "a provider in auth.json is present")
             check(plan.credential_state("anthropic") == "missing", "a provider absent from auth.json is missing")
             os.environ["RLP_SKIP_CREDENTIAL_PREFLIGHT"] = "1"
             check(plan.credential_state("anthropic") == "unknown", "the preflight can be disabled")
@@ -952,14 +1062,14 @@ def test_credential_preflight() -> None:
 
             # A dead default arm is demoted in favour of a usable one.
             mixed = {
-                "brain": "agnes/agnes-3.0-flash",
+                "brain": "alpha/alpha-large",
                 "workers": [
                     {
                         "id": "pi",
                         "harness": "pi",
                         "models": [
                             {"model": "anthropic/claude-x", "roles": ["code", "review"], "when": "dead here"},
-                            {"model": "agnes/agnes-3.0-flash", "roles": ["code", "review"], "when": "usable"},
+                            {"model": "alpha/alpha-large", "roles": ["code", "review"], "when": "usable"},
                         ],
                     }
                 ],
@@ -972,7 +1082,7 @@ def test_credential_preflight() -> None:
             check(not routed["preflight"], "no preflight warning when a usable arm exists")
 
             dead = {
-                "brain": "agnes/agnes-3.0-flash",
+                "brain": "alpha/alpha-large",
                 "workers": [
                     {
                         "id": "pi",
@@ -997,57 +1107,57 @@ def test_role_bindings() -> None:
     from . import plan
 
     ladder = json.loads(json.dumps(LADDER))
-    ladder["roles"] = {"code": "qwen-token-plan/deepseek-v4.1-flash", "review": "agnes/agnes-3.0-flash"}
+    ladder["roles"] = {"code": "beta/beta-deep", "review": "alpha/alpha-large"}
     parsed = orch.parse(json.dumps(ladder), "test")
-    check(parsed["roles"]["code"] == "qwen-token-plan/deepseek-v4.1-flash", "a roles map parses")
+    check(parsed["roles"]["code"] == "beta/beta-deep", "a roles map parses")
     check(orch.resolve_role(parsed, "code")["binding"] is True, "a bound role resolves as a binding")
     check(orch.resolve_role(parsed, "docs")["binding"] is False, "an unbound role falls back to arm priority")
     check("code" in orch.known_roles(parsed) and "explore" in orch.known_roles(parsed),
           f"the editor sees every planner role: {orch.known_roles(parsed)}")
-    check("agnes/agnes-3.0-flash" in orch.model_pool(parsed), "the pool is every arm")
+    check("alpha/alpha-large" in orch.model_pool(parsed), "the pool is every arm")
 
     # A binding beats arm priority and says so.
     result = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=ladder)["result"]
-    check(result["routes"]["t1"]["arm"] == "qwen-token-plan/deepseek-v4.1-flash",
+    check(result["routes"]["t1"]["arm"] == "beta/beta-deep",
           f"binding wins over priority: {result['routes']['t1']}")
-    check(result["routes"]["t1"].get("role_binding") == "qwen-token-plan/deepseek-v4.1-flash",
+    check(result["routes"]["t1"].get("role_binding") == "beta/beta-deep",
           "the record names the binding")
     check("role binding" in result["routes"]["t1"]["why_this_arm"], "the rationale names the binding")
-    check(result["role_bindings"]["code"] == "qwen-token-plan/deepseek-v4.1-flash", "the plan carries the map")
+    check(result["role_bindings"]["code"] == "beta/beta-deep", "the plan carries the map")
     check(not result["binding_warnings"], f"a live binding warns nothing: {result['binding_warnings']}")
 
     # A chain: several models in priority order; the first dispatchable one wins.
     chained = json.loads(json.dumps(LADDER))
-    chained["workers"][1]["available"] = False  # claude_code carries the first entry but cannot run
-    chained["roles"] = {"review": ["anthropic/claude-opus-4-8", "qwen-token-plan/deepseek-v4.1-flash"]}
+    chained["workers"][1]["available"] = False  # solo carries the first entry but cannot run
+    chained["roles"] = {"review": ["gamma/gamma-opus", "beta/beta-deep"]}
     parsed_chain = orch.parse(json.dumps(chained), "test")
     check(
         orch.role_chain(parsed_chain, "review")
-        == ["anthropic/claude-opus-4-8", "qwen-token-plan/deepseek-v4.1-flash"],
+        == ["gamma/gamma-opus", "beta/beta-deep"],
         "a role bound to a list is an ordered chain",
     )
     resolved = orch.resolve_role(parsed_chain, "review")
     check(
-        resolved["model"] == "qwen-token-plan/deepseek-v4.1-flash" and resolved["index"] == 1,
+        resolved["model"] == "beta/beta-deep" and resolved["index"] == 1,
         f"the first dispatchable chain entry wins: {resolved}",
     )
     chained_result = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=chained)["result"]
     check(
-        chained_result["routes"]["t3"]["arm"] == "qwen-token-plan/deepseek-v4.1-flash",
+        chained_result["routes"]["t3"]["arm"] == "beta/beta-deep",
         f"the planner walks the chain: {chained_result['routes']['t3']['arm']}",
     )
-    check(chained_result["routes"]["t3"].get("role_binding") == "qwen-token-plan/deepseek-v4.1-flash",
+    check(chained_result["routes"]["t3"].get("role_binding") == "beta/beta-deep",
           "the chosen chain entry is recorded")
     check(not chained_result["binding_warnings"], f"a satisfiable chain warns nothing: {chained_result['binding_warnings']}")
 
     # A binding to a model only an unavailable worker carries is reported, not hidden.
     stranded = json.loads(json.dumps(LADDER))
     stranded["workers"][1]["available"] = False
-    stranded["roles"] = {"review": "anthropic/claude-opus-4-8"}
+    stranded["roles"] = {"review": "gamma/gamma-opus"}
     warned = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=stranded)["result"]
     check(warned["binding_warnings"] and warned["binding_warnings"][0]["role"] == "review",
           f"a stranded binding is surfaced: {warned.get('binding_warnings')}")
-    check(all(r["arm"] != "anthropic/claude-opus-4-8" for r in warned["routes"].values()),
+    check(all(r["arm"] != "gamma/gamma-opus" for r in warned["routes"].values()),
           "a stranded binding falls back instead of planning a dead model")
     check(any(r.get("binding_unavailable") for r in warned["routes"].values()),
           "the fallback node records why")
@@ -1067,8 +1177,8 @@ def test_role_bindings() -> None:
         path.write_text(json.dumps(LADDER))
         os.environ["RLP_ORCHESTRATION"] = str(path)
         try:
-            applied = orch.mutate([{"op": "set_role", "role": "review", "model": "qwen-token-plan/deepseek-v4.1-flash"}])
-            check(applied["ladder"]["roles"]["review"] == "qwen-token-plan/deepseek-v4.1-flash", "set_role writes the map")
+            applied = orch.mutate([{"op": "set_role", "role": "review", "model": "beta/beta-deep"}])
+            check(applied["ladder"]["roles"]["review"] == "beta/beta-deep", "set_role writes the map")
             try:
                 orch.mutate([{"op": "set_role", "role": "code", "model": "nowhere/x"}])
                 check(False, "a set_role to a non-arm model was accepted")
@@ -1078,11 +1188,11 @@ def test_role_bindings() -> None:
             check("roles" not in cleared["ladder"] or "review" not in cleared["ladder"]["roles"],
                   "clear_role removes the binding and drops an empty map")
             chain_applied = orch.mutate(
-                [{"op": "set_role", "role": "code", "models": ["agnes/agnes-3.0-flash", "qwen-token-plan/deepseek-v4.1-flash"]}]
+                [{"op": "set_role", "role": "code", "models": ["alpha/alpha-large", "beta/beta-deep"]}]
             )
             check(
                 chain_applied["ladder"]["roles"]["code"]
-                == ["agnes/agnes-3.0-flash", "qwen-token-plan/deepseek-v4.1-flash"],
+                == ["alpha/alpha-large", "beta/beta-deep"],
                 "set_role with a models array stores the chain",
             )
         finally:
@@ -1136,9 +1246,15 @@ def test_decompose_pipeline() -> None:
         check(True, "the critic prompt survives .format()")
     except Exception as e:
         check(False, f"critic prompt has a format-placeholder brace: {e}")
-    original = (mod._policy, mod._rlm_decompose, mod.chat, mod._critique_spec)
+    from . import orchestration
+
+    original = (mod._policy, mod._rlm_decompose, mod.chat, mod._critique_spec, orchestration.load)
     repaired = [dict(TASKS[0], id="t1"), dict(TASKS[1], id="t2", depends_on=["t1"])]
     try:
+        # The planner's candidate arms come from the ladder, so a decomposition
+        # test has to supply one: with no arms `decompose` correctly refuses
+        # before it ever reaches the critic.
+        orchestration.load = lambda: orchestration.parse(json.dumps(LADDER), "test")
         mod._policy = lambda: (
             dict(mod._DEFAULT_RLM),
             {**mod._DEFAULT_PLANNING, "critique": True, "maxRefines": 1},
@@ -1169,7 +1285,7 @@ def test_decompose_pipeline() -> None:
         check(env["ok"] and "critique" not in env["result"], "focus mode skips the whole-request critique")
         check(not calls, "focus mode never calls the critic")
     finally:
-        mod._policy, mod._rlm_decompose, mod.chat, mod._critique_spec = original
+        mod._policy, mod._rlm_decompose, mod.chat, mod._critique_spec, orchestration.load = original
 
 
 def test_replan() -> None:
@@ -1246,8 +1362,12 @@ def test_decompose_normalization() -> None:
     check(tasks[1]["depends_on"] == ["t1"], "deps normalize and unknown deps are dropped")
     check(mod._validated(tasks)[0]["id"] == "t1", "a normalized DAG validates")
 
-    original = (mod._policy, mod._rlm_decompose, mod._plain_llm_decompose, mod.chat, mod._critique_spec)
+    from . import orchestration
+
+    original = (mod._policy, mod._rlm_decompose, mod._plain_llm_decompose, mod.chat,
+                mod._critique_spec, orchestration.load)
     try:
+        orchestration.load = lambda: orchestration.parse(json.dumps(LADDER), "test")
         mod._policy = lambda: (dict(mod._DEFAULT_RLM), {**mod._DEFAULT_PLANNING, "critique": False})
         mod._rlm_decompose = lambda prompt, knobs: json.dumps({"tasks": [{"id": "t1"}]})  # missing fields
         mod._plain_llm_decompose = lambda request, context, timeout=None: [dict(TASKS[0])]
@@ -1260,7 +1380,8 @@ def test_decompose_normalization() -> None:
         env = mod.decompose("do x")
         check(env["ok"] and env["result"]["engine"] == "fallback-plain-llm", "an RLM exception falls back too")
     finally:
-        mod._policy, mod._rlm_decompose, mod._plain_llm_decompose, mod.chat, mod._critique_spec = original
+        (mod._policy, mod._rlm_decompose, mod._plain_llm_decompose, mod.chat,
+         mod._critique_spec, orchestration.load) = original
 
 
 def test_planner_role_resolution() -> None:
@@ -1275,17 +1396,17 @@ def test_planner_role_resolution() -> None:
 
     ladder = json.loads(json.dumps(LADDER))
     ladder["workers"][0]["models"][0]["roles"].append("plan")
-    ladder["roles"] = {"critique": "qwen-token-plan/deepseek-v4.1-flash"}
+    ladder["roles"] = {"critique": "beta/beta-deep"}
     parsed = orch.parse(json.dumps(ladder), "test")
-    check(orch.resolve_model_for_role(parsed, "plan") == "agnes/agnes-3.0-flash",
+    check(orch.resolve_model_for_role(parsed, "plan") == "alpha/alpha-large",
           "an arm declaring `plan` resolves")
-    check(orch.resolve_model_for_role(parsed, "critique") == "qwen-token-plan/deepseek-v4.1-flash",
+    check(orch.resolve_model_for_role(parsed, "critique") == "beta/beta-deep",
           "a `critique` binding resolves")
 
     def run():
-        check(mod._role_spec("critique") == ("qwen-token-plan", "deepseek-v4.1-flash"),
+        check(mod._role_spec("critique") == ("beta", "beta-deep"),
               f"decompose reads the ladder critique role: {mod._role_spec('critique')}")
-        check(mod._planner_spec() == ("agnes", "agnes-3.0-flash"),
+        check(mod._planner_spec() == ("alpha", "alpha-large"),
               f"the planner comes from the ladder plan role: {mod._planner_spec()}")
 
     with_ladder(run, ladder=ladder)
@@ -1302,9 +1423,9 @@ def test_verify() -> None:
     from . import verify as mod
 
     parsed = orch.parse(json.dumps(LADDER), "test")
-    check(mod.pick_verifier(parsed, "") == "agnes/agnes-3.0-flash", "no avoid family -> the first review arm")
-    check(mod.pick_verifier(parsed, "agnes") == "qwen-token-plan/deepseek-v4.1-flash",
-          "an agnes implementer is verified by another vendor")
+    check(mod.pick_verifier(parsed, "") == "alpha/alpha-large", "no avoid family -> the first review arm")
+    check(mod.pick_verifier(parsed, "alpha") == "beta/beta-deep",
+          "an alpha implementer is verified by another vendor")
 
     original = (mod.chat, mod._spec)
     try:
@@ -1319,14 +1440,14 @@ def test_verify() -> None:
             return json.dumps(v)
 
         mod.chat = fake_chat
-        mod._spec = lambda avoid: ("p", "m", "qwen-token-plan")
-        env = mod.verify("t", "tests pass", "report", "evidence", "agnes", 3)
+        mod._spec = lambda avoid: ("p", "m", "beta")
+        env = mod.verify("t", "tests pass", "report", "evidence", "alpha", 3)
         check(env["ok"] and env["result"]["pass"] is True, f"2 of 3 passes -> pass: {env}")
         check(env["result"]["pass_count"] == 2 and env["result"]["samples"] == 3, "best-of-N counts votes")
         check(env["result"]["cross_vendor"] is True, "the verdict is marked cross-vendor")
 
         mod.chat = lambda *_a, **_k: json.dumps({"pass": False, "reason": "no", "evidence": "y"})
-        env = mod.verify("t", "a", "", "", "agnes", 3)
+        env = mod.verify("t", "a", "", "", "alpha", 3)
         check(env["result"]["pass"] is False, "unanimous fail -> fail")
 
         mod.chat = lambda *_a, **_k: "no json here"
@@ -1396,6 +1517,7 @@ def main() -> None:
         test_plan_orchestrates,
         test_plan_degrade_paths,
         test_ladder_validation,
+        test_unconfigured_ladder,
         test_signals_and_hybrid_gate,
         test_intent_refinement,
         test_ladder_mutation,

@@ -59,7 +59,6 @@ check_markers() {
   grep -q 'isManagedSession'         "$f/core/settings-manager.ts" 2>/dev/null || missing="$missing isManagedSession"
   grep -q 'rlp_orchestration'        "$f/core/system-prompt.ts"     2>/dev/null || missing="$missing rlp_orchestration"
   grep -q '"orchestration"'          "$f/core/slash-commands.ts"    2>/dev/null || missing="$missing /orchestration"
-  grep -q 'collectOmnigentAgentSkillDirs' "$f/core/package-manager.ts" 2>/dev/null || missing="$missing omnigent-skill-discovery"
   grep -q 'BUILTIN_SLASH_COMMANDS'   "$f/index.ts"                  2>/dev/null || missing="$missing BUILTIN_SLASH_COMMANDS-export"
   grep -q 'handleOrchestrationCommand' "$f/modes/interactive/interactive-mode.ts" 2>/dev/null || missing="$missing /orchestration-handler"
   grep -q 'collectAutoSkillEntries(userAgentsSkillsDir' "$f/core/package-manager.ts" 2>/dev/null || missing="$missing stock-skill-discovery"

@@ -1,69 +1,76 @@
 ---
 name: rlp-commands
-description: Which slash menu belongs to which screen — the RLP REPL, the rpi harness, or a shell — and what to use where
+description: What to type and where — the rlp session, the bare rpi harness, and the shell engine — plus which command answers which question
 ---
 
 # rlp-commands
 
-RLP has **two different TUIs with two different slash menus**, and confusing
-them is the main reason a command "does not exist" or "does nothing". They are
-separate programs, not one program with one menu.
+RLP is one binary with two identities, and knowing which one you are in is the
+whole map:
 
-## This screen: the `rlp` REPL (omnigent)
+- **`rlp`** — the agent. Same harness, plus the orchestration surface: the laya
+  triage gate, the `rlp_*` tools, the resident decision engine, and the
+  contract that tells the model when *not* to fan out.
+- **`rpi`** — the same harness with none of that. A plain coding agent, for when
+  you already know the work is one thing and do not want a gate in the way.
 
-Built-ins: `/cancel /clear /compact /context /effort /fork /help /history
-/logs /model /new /quit /report /switch /theme`, plus every user-invocable
-skill — which is where the RLP commands below live.
+Both load the same extensions, so every `/` command below exists in both. What
+differs is that only `rlp` can orchestrate.
 
-| Command | What it does |
-|---|---|
-| `/rlp-engine <request>` | triage gate → DAG → routing → dispatch waves, without dispatching |
-| `/rlp-triage <request>` | the gate verdict alone, one forward pass |
-| `/rlp-doctor` | host health, one fix per failure |
-| `/rlp-models` | which models are usable; the ladder; missing credentials |
-| `/rlp-commands` | this map |
-| `/model` | the **orchestrator brain's** model for this session — not the harness default |
-
-There is no `/settings`, no `/login`, no `/scoped-models` here. Those belong to
-the pi harness.
-
-## The `rpi` harness (a coding agent)
-
-Has the full pi menu — `/settings`, `/model`, `/login`, `/scoped-models`,
-`/session`, `/tree`, `/reload` and so on — plus the dropped-in RLP extensions:
+## In a session
 
 | Command | What it does |
 |---|---|
-| `/setup` | guided first run: doctor → endpoints → brain → worker arms → roles |
-| `/rlp`, `/rlp-plan`, `/rlp-triage`, `/rlp-doctor`, `/rlp-ladder`, `/rlp-run` | the engine, in-session |
-| `/commands [filter]` | the whole menu, grouped, including the omnigent shell commands |
-| `/models [filter]`, `/models --pick` | models by provider; switch one, or set the default |
-| `/provider` | endpoints, credential state, a live connection test, the arms that cannot run |
-| `/provider connect\|add\|test\|models\|key\|remove` | guided attach · scriptable attach · round trip · discovery · credentials · removal |
+| `/setup` | the guided first run: doctor → endpoints → brain → worker arms → roles |
+| `/provider` | endpoints, credential state, a live round trip, the arms that cannot run |
+| `/provider connect\|add\|test\|models\|key\|remove` | guided attach · scriptable attach · one real round trip · discovery · credentials · removal |
+| `/rlp-plan <request>` | the gate → DAG → routing → waves, without dispatching anything |
+| `/rlp-triage <request>` | the gate verdict alone, one laya forward pass |
+| `/rlp-state` | the run ledger: every node, its arm, worktree, branch, status |
+| `/rlp-doctor` | host health, one fix per failure line |
+| `/rlp-ladder` | what the orchestrator will actually do: brain, arms, roles, budgets |
+| `/rlp-config` | edit the ladder live (brain, arms, workers, gate, budgets) |
+| `/rlp-roles` | bind a role (code, review, plan, verify, …) to a specific model |
+| `/models [filter]`, `/models --pick` | models by provider; switch one, or set the session default |
+| `/commands [filter]` | the whole menu, grouped, including the shell side |
+| `/orchestration` | the ladder as the model sees it in its own system prompt |
 
-Pi extensions load in the harness only. They do **not** appear in this REPL,
-and REPL commands do not appear in the harness. These `rlp-*` skills load in
-both: in the harness they are `/skill:rlp-models` and friends, and everything
-they describe is the harness's own surface.
+Plus the harness built-ins: `/clear`, `/compact`, `/context`, `/help`,
+`/history`, `/login`, `/model`, `/new`, `/session`, `/settings`, `/theme`,
+`/tree`, and the rest.
 
-## A shell
+## In a shell
 
-`rlp <subcommand>` is the same engine, plus `rpi` and `omni`:
+The decision engine is a library and a CLI, so anything with a request can ask
+for a plan — a CI job, a git hook, a second tool — with no session at all:
 
 ```
-rlp plan | rlp triage | rlp decompose | rlp route | rlp ladder | rlp roster
+rlp plan "<request>"          # gate + DAG + per-node routing + waves
+rlp triage "<request>"        # direct vs orchestrate, one forward pass
+rlp decompose "<request>"     # the DAG on its own
+rlp ladder | rlp roster       # the ladder, and the router cards derived from it
 rlp provider list|probe|discover|add|key|remove
-rlp doctor [--warm] | rlp serve | rlp help-tool
-rpi                    # solo agent, no orchestration
-omni run|attach|session|config|doctor|usage|setup|server
+rlp verify --acceptance ...   # independent cross-vendor best-of-N verdict
+rlp memory | rlp remember     # this project's cross-run knowledge log
+rlp doctor [--warm]           # is this host runnable?
+rlp serve                     # the same engine, as an MCP stdio server
+rlp update [--check]          # update the harness fork, re-apply RLP on top
+rpi                           # the bare harness, no orchestration
 ```
+
+Add `--json` to any engine subcommand for a machine-readable envelope.
 
 ## Choosing
 
-- Deciding whether to orchestrate → `rlp plan` or `/rlp-engine`.
-- Actually orchestrating → `rlp -p "…"` (this REPL, or a shell).
-- Doing one thing, no fan-out → `rpi`.
-- First run on a new machine → `rpi`, then `/setup`.
-- Attaching a model or provider → `rpi`, then `/provider connect` (guided) or
-  `/provider add …` (scriptable).
-- Changing the model new sessions start on → `rpi`, then `/models --pick`.
+- **First run on a new machine** → `rlp`, then `/setup`. Nothing orchestrates
+  until a provider is connected and the ladder has model arms; `/setup` does
+  both and `rlp doctor` says what is still missing.
+- **Deciding whether to orchestrate, without doing it** → `rlp plan` or
+  `/rlp-plan`. Costs one forward pass and executes nothing.
+- **Actually doing the work** → just ask `rlp`. The gate decides per request;
+  you do not choose between "chat mode" and "orchestrate mode".
+- **One thing, no gate at all** → `rpi`.
+- **Attaching a provider** → `/provider connect` (guided) or
+  `rlp provider add <id> <baseUrl> <model>` (scriptable).
+- **Changing which models orchestrate** → `/rlp-config`, or `/rlp-roles` to
+  pin one role. The ladder is configuration, not code.

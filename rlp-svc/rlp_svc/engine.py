@@ -16,8 +16,9 @@ and back:
     {"id":1,"ok":true,"result":{"mode":"direct",...}}
 
 One line in, one line out, no framing to get wrong. It is deliberately *not*
-the MCP server: MCP is for the omnigent plane, and this is a local pipe between
-the agent and its own engine.
+the MCP server: `rlp serve` exists so other tools can call this engine, while
+this is the private pipe between the agent and its own engine — one fewer
+protocol between a keystroke and a decision.
 
 Startup emits `{"event":"warming"}` immediately and `{"event":"ready"}` once
 the model is resident, so a client can show the one-time cost honestly instead

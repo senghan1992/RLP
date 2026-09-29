@@ -1,41 +1,25 @@
 {
-  "brain": "agnes/agnes-3.0-flash",
+  "$comment": [
+    "RLP's orchestration ladder: which models orchestrate, and under what budgets.",
+    "Configuration, not code — edit it here, or with /setup, /rlp-config, /rlp-roles",
+    "and /models --pick in a session. `rlp ladder` prints what RLP actually resolved.",
+    "",
+    "`brain` null and an empty `models` array mean 'no arms chosen yet'. RLP ships no",
+    "arms on purpose: a model ref only means something on a host that has that",
+    "provider, so /setup writes them from the endpoints you connected rather than",
+    "RLP guessing and failing at the worker."
+  ],
+
+  "brain": null,
+
   "workers": [
     {
       "id": "pi",
       "harness": "pi",
-      "models": [
-        {
-          "model": "agnes/agnes-3.0-flash",
-          "roles": ["code", "research", "docs", "review"],
-          "when": "DEFAULT arm — carries the most usage headroom on this host, so spend the bulk of ALL work here (implementations, research, docs, reviews). A different vendor from the qwen arms, which is what makes cross-vendor review possible. Its one cost is latency: prefill grows with context (roughly 36k→5s, 108k→26s, 306k→90s), so keep at most TWO agnes dispatches in flight, hand it self-contained briefs (say what to read and what to produce), and never pile a wide parallel fan-out onto it"
-        },
-        {
-          "model": "qwen-token-plan/qwen3.8-flash",
-          "roles": ["explore", "review"],
-          "when": "the fast, scarce arm — use only when latency is the point (quick explore/search, log or file reads, a short answer someone is waiting on), to escape a stalled agnes arm, as the second-opinion vendor on agnes work, or for small/simple diffs; do not spend it on bulk work agnes can carry"
-        },
-        {
-          "model": "qwen-token-plan/deepseek-v4.1-flash",
-          "roles": ["code", "debug", "review"],
-          "when": "the deep arm — multi-file refactors and hard debugging that need real reasoning depth or >512K context, and the independent reviewer of agnes-authored work when a qwen-vendor second opinion is wanted"
-        }
-      ]
-    },
-    {
-      "id": "claude_code",
-      "harness": "claude-native",
-      "available": false,
-      "availabilityNote": "Claude entitlement is routinely exhausted on this host; this arm is opt-in. Set \"available\": true to route here again — the brain still retires it for the rest of the run on the first failure of any kind.",
-      "models": [
-        {
-          "model": "anthropic/claude-opus-4-8",
-          "roles": ["code", "review"],
-          "when": "heavier multi-file reasoning and a second review vendor. This host's Claude entitlement is spend-limited and routinely exhausted, so dispatch it only when the human asks for Claude Code, a change genuinely wants Claude-quality reasoning, or pi failed the same task twice — and retire it for the rest of the run on the FIRST failure of any kind (usage limit, auth, 5xx, transport, silent hang)"
-        }
-      ]
+      "models": []
     }
   ],
+
   "routing": {
     "escalateBelow": 0.55,
     "maxDispatchesPerTurn": 4,
@@ -43,15 +27,18 @@
     "signalThreshold": 1,
     "workerTimeoutMs": 1200000
   },
+
   "review": {
     "crossVendor": true
   },
+
   "rlm": {
     "maxDepth": 1,
     "maxIterations": 3,
     "maxConcurrentSubcalls": 4,
     "maxTimeout": 300
   },
+
   "planning": {
     "critique": true,
     "maxRefines": 1,

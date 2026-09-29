@@ -1,8 +1,8 @@
 """rlm_decompose — recursive task decomposition into a flat DAG.
 
-Uses rlm (RLM) with an OpenAI-compatible backend pointed at the host
-qwen-token-plan gateway. DAG shape is the contract; engine substitution is
-a documented contingency, never a stall.
+Uses rlm (RLM) over an OpenAI-compatible backend, pointed at whichever endpoint
+the ladder's `plan` role resolves to on this host. DAG shape is the contract;
+engine substitution is a documented contingency, never a stall.
 
 Three modern-planning ideas are layered on top of the raw RLM call:
 
@@ -11,10 +11,10 @@ Three modern-planning ideas are layered on top of the raw RLM call:
    and a `custom_system_prompt` pins the model to emitting one JSON DAG rather
    than chatting through the REPL.
 2. **A candidate ladder, not one arm.** The configured planner goes first, the
-   ladder's DEFAULT arm is the safety net, and the fast route arm is the last
-   resort; the same candidates are reused by the plain-LLM contingency. A single
-   arm that answers with an empty message used to end the whole plan, which is
-   the opposite of "never stall".
+   ladder's DEFAULT arm is the safety net, and every remaining arm follows; the
+   same candidates are reused by the plain-LLM contingency. A single arm that
+   answers with an empty message used to end the whole plan, which is the
+   opposite of "never stall".
 3. **Critique + repair (self-refine).** After the first DAG, a cheap one-shot
    critic checks it against the request — missing dependencies, parallel tasks
    that actually overlap, over/under-splitting, a missing integration step — and
@@ -141,23 +141,25 @@ def _role_spec(role: str) -> tuple[str, str] | None:
     return _split_spec(model)
 
 
-def _planner_spec() -> tuple[str, str]:
-    """The decomposition model: `RLP_DECOMPOSE_MODEL` > ladder role `plan` > default."""
-    from .llm import _split_spec
+def _planner_spec() -> tuple[str, str] | None:
+    """The decomposition model: `RLP_DECOMPOSE_MODEL`, else the ladder's `plan` role.
 
-    raw = os.environ.get("RLP_DECOMPOSE_MODEL")
-    if raw:
-        return _split_spec(raw)
-    return _role_spec("plan") or decomp_spec()
+    None when the ladder has no arms. There is deliberately no literal model id
+    behind this: one would only be correct on the host it was written for.
+    """
+    return decomp_spec()
 
 
-def _critique_spec() -> tuple[str, str]:
-    """Critic model: `RLP_CRITIQUE_MODEL` > ladder role `critique`/`plan` > fast arm."""
+def _critique_spec() -> tuple[str, str] | None:
+    """Critic model: `RLP_CRITIQUE_MODEL` > ladder role `critique`/`plan` > router arm."""
     from .llm import _split_spec, route_spec
 
     raw = os.environ.get("RLP_CRITIQUE_MODEL")
-    if raw:
-        return _split_spec(raw)
+    if raw and raw.strip():
+        explicit = _split_spec(raw.strip())
+        if explicit:
+            return explicit
+        raise ValueError(f"RLP_CRITIQUE_MODEL={raw!r} must be a 'provider/model' string")
     return _role_spec("critique") or _role_spec("plan") or route_spec()
 
 
@@ -188,16 +190,22 @@ def _planner_fallbacks() -> list[tuple[str, str]]:
 
     The module's contract is that the DAG shape matters and the engine does not,
     and that a decomposition never stalls. Both were aspirational while the
-    planner was a single arm: on this host `roles.plan` resolves to a model that
-    occasionally answers with an empty message, and the whole plan failed with
-    "no JSON object in response". The configured planner goes first, the ladder's
-    DEFAULT arm is the safety net, and the fast route arm is the last resort.
+    planner was a single arm: an arm that occasionally answers with an empty
+    message took the whole plan down with "no JSON object in response". The
+    configured planner goes first, the ladder's DEFAULT arm is the safety net,
+    and the router arm is the last resort.
+
+    Empty means the ladder has no arms at all, which the caller reports as "not
+    configured" — never as a failed decomposition.
     """
-    from .llm import route_spec
+    from .llm import role_candidates
 
     out: list[tuple[str, str]] = []
-    for spec in (_planner_spec(), _default_arm_spec(), route_spec()):
+    for spec in (_planner_spec(), _default_arm_spec()):
         if spec and spec not in out:
+            out.append(spec)
+    for spec in role_candidates("plan"):
+        if spec not in out:
             out.append(spec)
     return out
 
@@ -420,7 +428,17 @@ def _rlm_decompose(prompt: str, knobs: dict, spec: tuple[str, str] | None = None
 def _refine(request: str, context: str, tasks: list[dict], max_refines: int) -> tuple[list[dict], dict]:
     """Critique-and-repair the DAG. Never raises; returns (tasks, critique record)."""
     record: dict[str, Any] = {"applied": False, "issues": [], "rounds": 0}
-    provider, model = _critique_spec()
+    # "Never raises" has to include the config errors: a ladder with no arms
+    # resolves no critic, and a malformed RLP_CRITIQUE_MODEL raises on read. The
+    # critique is an improvement pass over a DAG that is already valid, so both
+    # cases skip it with the reason recorded rather than losing the plan.
+    try:
+        spec = _critique_spec()
+    except ValueError as e:
+        return tasks, {**record, "critique_error": str(e)[:200]}
+    if spec is None:
+        return tasks, {**record, "critique_error": "no model resolved for the critic (the ladder has no arms)"}
+    provider, model = spec
     for _ in range(max(0, max_refines)):
         record["rounds"] += 1
         prompt = CRITIC_PROMPT.format(
@@ -466,6 +484,14 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
     knobs, policy = _policy()
     if refine is None:
         refine = bool(policy["critique"])
+
+    # No arms means no planner, and that has a fix worth naming. Checked before
+    # any prompt is built so the answer is the cause rather than "every
+    # candidate model failed" with an empty list behind it.
+    if not _planner_fallbacks():
+        from . import orchestration as orch
+
+        return {"ok": False, "error": orch.NOT_CONFIGURED}
 
     target = request
     if focus.strip():

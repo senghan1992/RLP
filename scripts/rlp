@@ -7,14 +7,11 @@
 #                           ladder, roster, doctor, serve, version
 #   rlp update              update the pi fork the way `pi update` does, and
 #                           re-apply RLP on top
-#   rlp --omnigent [args]   the previous orchestrator (omnigent REPL), opt-in
 #
 # Orchestration is local: the RLP extension dispatches headless rpi workers,
 # one git worktree per node, and collects their results back into this session.
 # The laya gate still decides whether to orchestrate at all, so a small request
-# never pays for a fan-out — and now it needs no server, daemon or runner to
-# do it. `--omnigent` keeps the old plane reachable for the things it still
-# does that this does not (session history, web UI).
+# never pays for a fan-out — and it needs no server, daemon or runner to do it.
 set -eu
 
 # Resolve $0 through any symlinks (~/.local/bin/rlp -> <checkout>/scripts/rlp)
@@ -30,8 +27,8 @@ done
 ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
 SVC_PY="$ROOT/rlp-svc/.venv/bin/python"
 
-# Subcommands owned by the decision engine. Anything else belongs to the
-# orchestrator, including omni's own flags (-p, --jsonl, ...).
+# Subcommands owned by the decision engine. Anything else belongs to the agent,
+# including the harness's own flags (-p, --model, ...).
 case "${1:-}" in
   plan|triage|decompose|route|llm-route|ladder|roster|config|replan|verify|memory|remember|doctor|serve|engine|provider|version)
     if [ ! -x "$SVC_PY" ]; then
@@ -48,23 +45,18 @@ case "${1:-}" in
     shift
     exec "$ROOT/scripts/rlp-update" "$@"
     ;;
-  --omnigent)
-    shift
-    if ! command -v omni >/dev/null 2>&1; then
-      echo "rlp: 'omni' (omnigent) is not installed — that plane is optional." >&2
-      echo "     Local orchestration works with plain 'rlp'. Install omnigent to use --omnigent." >&2
-      exit 1
-    fi
-    exec omni run "$HOME/.omnigent/agents/rlp" "$@"
-    ;;
 esac
 
 if [ "${1:-}" = "help-tool" ] || [ "${1:-}" = "--rlp-help" ]; then
   cat <<'USAGE'
 rlp — Recursive Laya Pi
 
-  rlp                        the agent (pi TUI) with RLP loaded: triage, then
-                             local waves of workers when the gate says so
+FIRST RUN: start `rlp` and type /setup. Until a provider is connected and the
+ladder has model arms, RLP works as a plain coding agent and handles every
+request inline; `rlp doctor` and `rlp ladder` both say so in one line.
+
+  rlp                        the agent: triage, then waves of workers in
+                             isolated worktrees when the gate says so
   rlp -p "<request>"         the same, non-interactive
 
   rlp plan "<request>"       triage gate + DAG + per-node routing + dispatch waves
@@ -76,13 +68,15 @@ rlp — Recursive Laya Pi
   rlp verify --acceptance A  independent cross-vendor best-of-N verdict
   rlp memory | remember T    the project's cross-run knowledge log
   rlp replan FOCUS           recursively re-decompose one task into a sub-DAG
+  rlp provider ...           endpoints and credentials: list|add|remove|key|
+                             discover|probe
   rlp doctor [--warm]        is this host runnable? (fixes per line)
-  rlp serve                  the MCP stdio server
-  rlp update [--check]       update the pi fork and re-apply RLP on top
+  rlp serve                  the decision engine as an MCP stdio server
+  rlp update [--check]       update the harness fork and re-apply RLP on top
+  rpi                        the same harness, no orchestration surface
 
-  rlp --omnigent             the omnigent REPL (session history, web UI)
-
-In-session: /rlp-plan /rlp-state /rlp-doctor /rlp-ladder /rlp-config /rlp-roles /models
+In-session: /setup /provider /rlp-plan /rlp-state /rlp-doctor /rlp-ladder
+            /rlp-config /rlp-roles /models /commands
 Machine-readable: add --json to any engine subcommand.
 USAGE
   exit 0

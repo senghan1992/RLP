@@ -1,24 +1,27 @@
 /**
- * Local orchestration for the RLP harness.
+ * Orchestration for the RLP harness.
  *
- * This is the piece that used to come from omnigent. RLP decides *what* to do
- * with a request using the laya gate, the RLM decomposer and the laya router —
- * all of which already exist as the decision engine — and then, instead of
- * handing the plan to an external orchestration plane, executes it here: one
- * worktree per node, one headless `rpi` worker per node, waves dispatched
- * together, results collected back for synthesis.
+ * RLP decides *what* to do with a request using the laya gate, the RLM
+ * decomposer and the laya router — all of which live in the decision engine —
+ * and then executes the plan right here: one worktree per node, one headless
+ * `rpi` worker per node, waves dispatched together, results collected back for
+ * synthesis.
  *
- * Why in-process at all: `rlp` is meant to be a single command. Every step
- * that needs a second program (a server, a daemon, a runner zygote) is a step
- * that can be down, stale, or on a different code version than the one the user
- * just updated. Dispatch is a `spawn` and collection is reading a file; neither
- * needs a plane.
+ * Why in-process: `rlp` is meant to be a single command. Every step that needs
+ * a second program (a server, a daemon, a runner zygote) is a step that can be
+ * down, stale, or on a different code version than the one the user just
+ * updated. Dispatch is a `spawn` and collection is reading a file; neither
+ * needs a plane, so there is not one.
  *
- * What this costs, stated plainly: omnigent's session database, web UI,
- * worktree lifecycle manager and guardrail policies do not come with it. The
- * guardrail that mattered most — a cap on dispatches per turn — is enforced
- * here directly from the ladder's `maxDispatchesPerTurn`, which is the same
- * number the old plane used.
+ * What is given up by having no plane, stated plainly: there is no cross-session
+ * run database and no web UI. What replaces them is a run directory
+ * (`~/.rlp/runs/<id>/`) holding the ledger, every worker's log and every
+ * worker's report — greppable, and still there after the session ends.
+ *
+ * The guardrails are enforced here rather than by a policy engine: a per-turn
+ * dispatch cap from the ladder's `maxDispatchesPerTurn`, a worker watchdog from
+ * `workerTimeoutMs`, an allow-list of dispatch purposes, and a preflight that
+ * refuses to spend a dispatch on an arm with no credential.
  *
  * Registered tools (the brain calls these):
  *   rlp_plan      gate -> DAG -> routing -> waves, for a request
@@ -479,7 +482,7 @@ function callEngine(
 
 // --- prompt-text helpers -----------------------------------------------------------------
 
-/** The dispatch guardrails omnigent enforced as policies, now local. */
+/** Purposes a dispatch may carry. Anything else is a plan error, not a new mode. */
 const ALLOWED_PURPOSES = new Set(["implement", "review", "explore", "search"]);
 /** Harnesses local orchestration can actually spawn. Anything else is a plan error. */
 const DISPATCHABLE_HARNESSES = new Set(["pi"]);
@@ -972,10 +975,9 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 					continue;
 				}
 
-				// Preflight, the local analogue of omnigent's harness-readiness check:
-				// an arm with no credential, or a harness this plane cannot spawn, is a
-				// plan error. Fail the node loudly rather than burn a dispatch on a
-				// worker that is guaranteed to die.
+				// Preflight: an arm with no credential, or a harness this plane cannot
+				// spawn, is a plan error. Fail the node loudly rather than burn a
+				// dispatch on a worker that is guaranteed to die.
 				if (node.credential === "missing") {
 					node.status = "failed";
 					node.error = `no credential for ${node.arm} — run /login ${node.arm.split("/")[0]}, or /rlp-config to change the arm`;
@@ -1091,8 +1093,8 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 				Object.values(run.nodes).some((n) => wanted(n.id) && n.status === "running");
 
 			// Watchdog: a worker that never exits would otherwise hang collect
-			// forever. Kill it, mark it failed, and let the brain re-dispatch —
-			// the local equivalent of omnigent's headless-subagent timer.
+			// forever. Kill it, mark it failed, and let the brain re-dispatch. The
+			// ceiling is the ladder's routing.workerTimeoutMs.
 			const watchdog = () => {
 				if (!run.workerTimeoutMs) return;
 				for (const node of Object.values(run.nodes)) {
@@ -1489,6 +1491,11 @@ orchestration at all. Ceremony is a bug: never fan out a one-line fix.
 - \`escalate: true\` — the gate was unsure. Default to direct. Escalate only
   when you can already name two or more independent deliverables, and pass them
   as \`because\`. Do not escalate on a hunch.
+- \`orchestration_unavailable: "<reason>"\` — this host cannot dispatch at all
+  (usually a ladder with no model arms yet). Do the work inline and, **once**,
+  tell the user the reason verbatim and that \`/setup\` fixes it. Do not call
+  \`rlp_dispatch\`, and do not retry \`rlp_plan\` with \`mode: "orchestrate"\`:
+  an override cannot conjure an arm, and the answer will not change.
 
 If work turns out bigger mid-flight — a second independent deliverable appears —
 stop, say "upgrading to orchestrate", and run the pipeline. The converse is also

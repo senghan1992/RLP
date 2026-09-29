@@ -18,7 +18,7 @@ import os
 from typing import Any
 
 from . import orchestration as orch
-from .llm import VERDICT_TOKENS, _split_spec, chat, route_spec
+from .llm import VERDICT_TOKENS, _split_spec, chat, verify_spec
 
 VERIFY_PROMPT = """Return raw JSON only — the first character of your reply must be {{. No prose, no code fences.
 You are an independent verifier. Decide whether the work below meets its acceptance contract.
@@ -55,11 +55,19 @@ def pick_verifier(config: dict, avoid_family: str = "") -> str | None:
     return None
 
 
-def _spec(avoid_family: str) -> tuple[str, str, str]:
-    """(provider, model, family). `RLP_VERIFY_MODEL` beats the ladder."""
+def _spec(avoid_family: str) -> tuple[str, str, str] | None:
+    """(provider, model, family) for the verifier, or None when nothing can serve one.
+
+    `RLP_VERIFY_MODEL` beats the ladder; otherwise the cross-vendor preference in
+    `pick_verifier` decides. None means the ladder has no arms — reported with
+    its own fix, because a verdict from nothing is worse than no verdict.
+    """
     raw = os.environ.get("RLP_VERIFY_MODEL")
-    if raw:
-        return (*_split_spec(raw), _family(raw))
+    if raw and raw.strip():
+        explicit = _split_spec(raw.strip())
+        if not explicit:
+            raise ValueError(f"RLP_VERIFY_MODEL={raw!r} must be a 'provider/model' string")
+        return (*explicit, _family(raw.strip()))
     try:
         config = orch.load()
     except Exception:
@@ -67,9 +75,13 @@ def _spec(avoid_family: str) -> tuple[str, str, str]:
     if config:
         model = pick_verifier(config, avoid_family)
         if model:
-            return (*_split_spec(model), _family(model))
-    provider, model = route_spec()
-    return provider, model, provider
+            split = _split_spec(model)
+            if split:
+                return (*split, _family(model))
+    fallback = verify_spec()
+    if fallback is None:
+        return None
+    return fallback[0], fallback[1], fallback[0]
 
 
 def _one(provider: str, model: str, prompt: str) -> dict:
@@ -94,7 +106,15 @@ def verify(
     if not acceptance.strip():
         return {"ok": False, "error": "verify needs the node's acceptance sentence"}
     samples = max(1, min(7, int(samples or 3)))
-    provider, model, family = _spec(avoid_family)
+    # `verify` returns an envelope, so a bad override is an `ok: false` naming
+    # the variable — not a traceback out of a tool call.
+    try:
+        resolved = _spec(avoid_family)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)[:200]}
+    if resolved is None:
+        return {"ok": False, "error": orch.NOT_CONFIGURED}
+    provider, model, family = resolved
     prompt = VERIFY_PROMPT.format(
         title=title[:300],
         acceptance=acceptance[:600],
