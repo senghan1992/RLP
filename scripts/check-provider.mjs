@@ -15,24 +15,34 @@
  * Asserts, in order:
  *   1. `/provider list` renders endpoints from the engine, with credential
  *      state and the ladder arms each endpoint carries;
- *   2. `/provider test <unknown>` classifies the failure and never raises;
- *   3. `/provider <nonsense>` prints the verb menu rather than doing nothing;
- *   4. `/setup` runs the whole wizard with every dialog cancelled and reaches
+ *   2. `/provider add …` really writes: the endpoint lands in models.json, the
+ *      credential lands in auth.json at 0600, and the credential is never echoed
+ *      back into the session;
+ *   3. `/provider test <id>` classifies the failure and never raises;
+ *   4. `/provider remove <id>` takes it back out, credential included;
+ *   5. `/setup` runs the whole wizard with every dialog cancelled and reaches
  *      its summary — and writes nothing, because nothing was chosen.
  *
- * It talks to no model and needs no credential: every path here is either local
- * or a failure that is classified before the network is reached.
+ * It talks to no model and needs no credential: the endpoint it attaches is
+ * `http://127.0.0.1:9` (nothing listens there), and both stores are redirected
+ * to a temporary directory, so a run can never touch the user's real
+ * credentials. The ladder is read but never written.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const binary = process.argv[2] || "rlp";
 const AGENT_DIR = process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const LADDER = join(AGENT_DIR, "orchestration.json");
 const STEP_TIMEOUT_MS = 120_000;
+const SANDBOX = mkdtempSync(join(tmpdir(), "rlp-provider-check-"));
+const MODELS = join(SANDBOX, "models.json");
+const AUTH = join(SANDBOX, "auth.json");
+const PROVIDER = "rlp-check-demo";
+const SECRET = "sk-check-secret-value";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -41,7 +51,10 @@ function digest(path) {
 	return createHash("sha256").update(readFileSync(path)).digest("hex").slice(0, 16);
 }
 
-const child = spawn(binary, ["--mode", "rpc", "--no-session"], { stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn(binary, ["--mode", "rpc", "--no-session"], {
+	stdio: ["pipe", "pipe", "pipe"],
+	env: { ...process.env, RLP_PI_MODELS: MODELS, RLP_PI_AUTH: AUTH },
+});
 let buffer = "";
 let onNotify = null;
 let onDialog = null;
@@ -118,56 +131,100 @@ const record = (ok, message) => {
 try {
 	await sleep(1500); // let the extensions load before the first prompt
 
-	// --- 1. the endpoint report
-	const list = await step(
-		"/provider list",
-		"/provider list",
-		(m) => m.includes("endpoints ·") || m.includes("no endpoints configured"),
+	// --- 1. an empty store explains itself
+	const empty = await step("/provider list (empty store)", "/provider list", (m) => m.includes("endpoints ·"));
+	record(
+		empty.matched.includes("no endpoints configured"),
+		"an empty store says so rather than rendering an empty list",
 	);
-	if (list.matched.includes("endpoints ·")) {
-		record(
-			/(●|◆|○)\s/.test(list.matched),
-			"the endpoint report shows a credential badge (● api key / ◆ oauth / ○ none)",
-		);
-		record(
-			list.matched.includes("ladder") || list.matched.includes("RLP arms"),
-			"the endpoint report says which endpoints the orchestrator actually uses",
-		);
-		record(
-			!/apiKey|"key"|sk-/.test(list.matched),
-			"the endpoint report never prints a credential",
-		);
-	} else {
-		record(
-			list.matched.includes("/provider connect"),
-			"an empty store still tells the user how to attach one",
-		);
-	}
-	console.log("  ok  /provider list renders the engine's view of the endpoints");
+	record(
+		empty.matched.includes("/provider connect") || empty.matched.includes("/setup"),
+		"an empty store says how to attach one",
+	);
+	console.log("  ok  /provider list explains an empty store");
 
-	// --- 2. a classified failure, not a stack
+	// --- 2. a real attach, into the sandbox
+	const add = await step(
+		"/provider add <id> <url> <model>",
+		`/provider add ${PROVIDER} http://127.0.0.1:9/v1 check-model`,
+		(m) => m.includes("connected") || m.includes("could not attach"),
+		(request) => (request.method === "input" ? { value: SECRET } : { cancelled: true }),
+	);
+	record(add.matched.includes("connected"), `the attach reported success: ${add.matched.split("\n")[0]}`);
+	record(!add.matched.includes(SECRET), "the credential was not echoed back into the session");
+	const modelsDoc = existsSync(MODELS) ? JSON.parse(readFileSync(MODELS, "utf8")) : {};
+	record(Boolean(modelsDoc?.providers?.[PROVIDER]), "the endpoint was written to models.json");
+	record(
+		modelsDoc?.providers?.[PROVIDER]?.baseUrl === "http://127.0.0.1:9/v1",
+		"the endpoint kept its URL (trailing slash normalised)",
+	);
+	record(!JSON.stringify(modelsDoc).includes(SECRET), "models.json holds no secret");
+	const authDoc = existsSync(AUTH) ? JSON.parse(readFileSync(AUTH, "utf8")) : {};
+	record(authDoc?.[PROVIDER]?.key === SECRET, "the credential was written to auth.json");
+	record(
+		existsSync(AUTH) && (statSync(AUTH).mode & 0o777) === 0o600,
+		`auth.json is 0600 (got ${existsSync(AUTH) ? (statSync(AUTH).mode & 0o777).toString(8) : "nothing"})`,
+	);
+	console.log("  ok  /provider add writes through the engine, key at 0600, nothing echoed");
+
+	// --- 3. the endpoint report, now that there is one
+	const listed = await step("/provider list (after the attach)", "/provider list", (m) =>
+		m.includes(PROVIDER),
+	);
+	record(/(●|◆|○)\s/.test(listed.matched), "the report shows a credential badge (● api key / ◆ oauth / ○ none)");
+	record(listed.matched.includes("RLP arms"), "the report says which endpoints the orchestrator uses");
+	record(!listed.matched.includes(SECRET) && !listed.matched.includes("sk-"), "the report never prints a credential");
+	console.log("  ok  /provider list shows the new endpoint's state and ladder standing");
+
+	// --- 4. a classified failure, not a stack
 	const missing = await step(
+		"/provider test <unreachable>",
+		`/provider test ${PROVIDER}`,
+		(m) => m.includes("did not answer"),
+	);
+	record(
+		missing.matched.includes("network") || missing.matched.includes("not_found"),
+		`nothing is listening, and that is what it says: ${missing.matched.split("\n").find((l) => l.includes("what")) ?? ""}`,
+	);
+	record(missing.matched.includes("fix"), "the failure carries a fix line");
+
+	const unknown = await step(
 		"/provider test <unknown>",
 		"/provider test definitely-not-a-provider",
 		(m) => m.includes("did not answer"),
 	);
 	record(
-		missing.matched.includes("not_found") || missing.matched.includes("no endpoint"),
-		`an unknown provider is reported as not_found: ${missing.matched.split("\n").find((l) => l.includes("what")) ?? ""}`,
+		unknown.matched.includes("not_found") || unknown.matched.includes("no endpoint"),
+		"an unknown provider is reported as not_found",
 	);
-	record(missing.matched.includes("fix"), "the failure carries a fix line");
-	console.log("  ok  /provider test classifies a failure instead of raising");
+	console.log("  ok  /provider test classifies failures instead of raising");
 
-	// --- 3. an unknown verb teaches the verbs
-	const unknown = await step(
+	// --- 5. an unknown verb teaches the verbs
+	const nonsense = await step(
 		"/provider <nonsense>",
 		"/provider frobnicate",
 		(m) => m.includes("unknown provider verb") || m.includes("endpoints ·"),
 	);
-	record(unknown.matched.includes("unknown provider verb"), "an unknown verb names the real ones");
+	record(nonsense.matched.includes("unknown provider verb"), "an unknown verb names the real ones");
 	console.log("  ok  /provider <nonsense> says what the verbs are");
 
-	// --- 4. the whole wizard, every dialog cancelled
+	// --- 6. detach, credential included
+	const removed = await step(
+		"/provider remove <id>",
+		`/provider remove ${PROVIDER}`,
+		(m) => m.includes("removed") || m.includes("could not remove"),
+		(request) => (request.method === "confirm" ? { confirmed: true } : { cancelled: true }),
+	);
+	record(removed.matched.includes("removed"), `the detach reported success: ${removed.matched.split("\n")[0]}`);
+	const afterRemoval = existsSync(MODELS) ? JSON.parse(readFileSync(MODELS, "utf8")) : {};
+	record(!afterRemoval?.providers?.[PROVIDER], "the endpoint is gone from models.json");
+	record(
+		!existsSync(AUTH) || !JSON.parse(readFileSync(AUTH, "utf8"))[PROVIDER],
+		"the credential is gone from auth.json",
+	);
+	console.log("  ok  /provider remove detaches the endpoint and its credential");
+
+	// --- 7. the whole wizard, every dialog cancelled
 	const before = digest(LADDER);
 	const setup = await step(
 		"/setup (all dialogs cancelled)",
@@ -198,11 +255,12 @@ try {
 }
 
 await sleep(300);
+rmSync(SANDBOX, { recursive: true, force: true });
 
 if (failures.length > 0) {
 	console.error("provider check FAILED:");
 	for (const f of failures) console.error(`  - ${f}`);
 	process.exit(1);
 }
-console.log("  provider/setup check ok: list, classify, guide, and cancel cleanly");
+console.log("  provider/setup check ok: attach, list, classify, detach, guide, cancel cleanly");
 process.exit(0);
