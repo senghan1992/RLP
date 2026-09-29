@@ -67,7 +67,9 @@ fi
 if [ -d "$DIR/.git" ]; then
   echo "==> updating RLP in $DIR ($REF)"
   git -C "$DIR" fetch --depth 1 origin "$REF"
-  git -C "$DIR" checkout -q --detach FETCH_HEAD
+  # `^{commit}` peels an annotated tag, so the checkout lands on the commit and
+  # `git describe` reports the tag rather than a detached tag object.
+  git -C "$DIR" checkout -q --detach "FETCH_HEAD^{commit}"
 else
   echo "==> fetching RLP into $DIR ($REF)"
   mkdir -p "$(dirname -- "$DIR")"

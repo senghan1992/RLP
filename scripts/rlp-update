@@ -102,8 +102,13 @@ self_update() {
   git -C "$ROOT" fetch --quiet origin "$REF" 2>/dev/null ||
     git -C "$ROOT" fetch --quiet --depth 1 origin "$REF" 2>/dev/null ||
     { say "  could not fetch $REF from origin (no network?) — keeping $HERE"; return 0; }
-  WANT=$(git -C "$ROOT" rev-parse FETCH_HEAD)
-  HAVE=$(git -C "$ROOT" rev-parse HEAD)
+  # `^{commit}` peels the annotated tag. Without it `rev-parse FETCH_HEAD`
+  # returns the *tag object*, which never equals HEAD's commit — so an
+  # already-current install was told an update was available and did a pointless
+  # detach, every time. `scripts/release` writes annotated tags, so this was not
+  # an edge case: it was the only case.
+  WANT=$(git -C "$ROOT" rev-parse "FETCH_HEAD^{commit}")
+  HAVE=$(git -C "$ROOT" rev-parse "HEAD^{commit}")
   if [ "$WANT" = "$HAVE" ]; then
     say "  RLP is already at $REF ($HERE)"
     return 0

@@ -61,6 +61,14 @@ offline suite fails if they drift.
   target.
 - `rlp update` ends by printing `rlp version`, so the release that is now
   running comes from the tool rather than from the updater's idea of it.
+- **An up-to-date install was told it had an update.** `git rev-parse
+  FETCH_HEAD` returns the *annotated tag object*, not the commit, so it never
+  equalled `HEAD` and every `rlp update` did a pointless detach and re-sync.
+  `scripts/release` writes annotated tags, so this was not an edge case — it was
+  the only case. Both `rlp update` and the bootstrap now peel with `^{commit}`.
+- `rlp update` on a host where the fork was never cloned printed a bare
+  `cd: can't cd to …/fork/pi`. It now says that RLP itself is fine, that only
+  the fork half needs it, and which command creates it.
 
 ### Changed
 
