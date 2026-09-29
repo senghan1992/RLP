@@ -4,13 +4,18 @@ Uses rlm (RLM) with an OpenAI-compatible backend pointed at the host
 qwen-token-plan gateway. DAG shape is the contract; engine substitution is
 a documented contingency, never a stall.
 
-Two modern-planning ideas are layered on top of the raw RLM call:
+Three modern-planning ideas are layered on top of the raw RLM call:
 
 1. **Configured recursion.** RLM's `max_depth` / `max_iterations` / budget are
    read from the ladder's `rlm` block instead of left at the library defaults,
    and a `custom_system_prompt` pins the model to emitting one JSON DAG rather
    than chatting through the REPL.
-2. **Critique + repair (self-refine).** After the first DAG, a cheap one-shot
+2. **A candidate ladder, not one arm.** The configured planner goes first, the
+   ladder's DEFAULT arm is the safety net, and the fast route arm is the last
+   resort; the same candidates are reused by the plain-LLM contingency. A single
+   arm that answers with an empty message used to end the whole plan, which is
+   the opposite of "never stall".
+3. **Critique + repair (self-refine).** After the first DAG, a cheap one-shot
    critic checks it against the request — missing dependencies, parallel tasks
    that actually overlap, over/under-splitting, a missing integration step — and
    may return a repaired DAG, which is validated before it is accepted. Bounded
@@ -26,7 +31,7 @@ import os
 import re
 from typing import Any
 
-from .llm import chat, decomp_spec
+from .llm import chat, chat_first, decomp_spec
 
 DECOMPOSE_PROMPT = """You are a task decomposer for a multi-agent orchestrator. Given the REQUEST below,
 decompose it (recursively if needed) into a flat DAG of 2-12 subtasks, each of which
@@ -148,6 +153,47 @@ def _critique_spec() -> tuple[str, str]:
     if raw:
         return _split_spec(raw)
     return _role_spec("critique") or _role_spec("plan") or route_spec()
+
+
+def _default_arm_spec() -> tuple[str, str] | None:
+    """The ladder's first dispatchable arm — the operator's DEFAULT arm.
+
+    That is the arm the `when` prose says carries the most headroom, which makes
+    it the honest second choice for a planner that just failed.
+    """
+    try:
+        from . import orchestration as orch
+
+        config = orch.load()
+    except Exception:
+        return None
+    if not config:
+        return None
+    from .llm import _split_spec
+
+    for worker in orch.workers(config):
+        for arm in worker["models"]:
+            return _split_spec(arm["model"])
+    return None
+
+
+def _planner_fallbacks() -> list[tuple[str, str]]:
+    """Candidate decomposition models, best first, deduplicated.
+
+    The module's contract is that the DAG shape matters and the engine does not,
+    and that a decomposition never stalls. Both were aspirational while the
+    planner was a single arm: on this host `roles.plan` resolves to a model that
+    occasionally answers with an empty message, and the whole plan failed with
+    "no JSON object in response". The configured planner goes first, the ladder's
+    DEFAULT arm is the safety net, and the fast route arm is the last resort.
+    """
+    from .llm import route_spec
+
+    out: list[tuple[str, str]] = []
+    for spec in (_planner_spec(), _default_arm_spec(), route_spec()):
+        if spec and spec not in out:
+            out.append(spec)
+    return out
 
 
 def _extract_first_json(text: str) -> Any:
@@ -288,17 +334,22 @@ def _validated(tasks: list[dict]) -> list[dict]:
 def _plain_llm_decompose(request: str, context: str) -> list[dict]:
     """Contingency (c): recursive plain-LLM decomposition. Returns tasks list."""
     prompt = DECOMPOSE_PROMPT.format(request=request, context=context)
-    text = chat(*_planner_spec(), messages=[{"role": "user", "content": prompt}])
+    # `chat_fn=chat` keeps this module's own client as the seam (the offline
+    # suite stubs it here), rather than reaching through to llm.chat.
+    text, _spec = chat_first(_planner_fallbacks(), messages=[{"role": "user", "content": prompt}], chat_fn=chat)
     return _extract_first_json(text)
 
 
-def _rlm_decompose(prompt: str, knobs: dict) -> str:
-    """One configured RLM completion. Returns the final response text."""
+def _rlm_decompose(prompt: str, knobs: dict, spec: tuple[str, str] | None = None) -> str:
+    """One configured RLM completion. Returns the final response text.
+
+    `spec` is the arm to run it on; omitting it means the configured planner.
+    """
     from rlm import RLM
 
     from .llm import _provider_base_url, _provider_key
 
-    provider, model = _planner_spec()
+    provider, model = spec or _planner_spec()
     kwargs: dict[str, Any] = {"max_depth": knobs.get("maxDepth")}
     for key, arg in (("maxIterations", "max_iterations"), ("maxConcurrentSubcalls", "max_concurrent_subcalls"),
                      ("maxBudget", "max_budget"), ("maxTimeout", "max_timeout")):
@@ -377,22 +428,32 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
         )
     prompt = DECOMPOSE_PROMPT.format(request=target, context=context)
 
-    # Contingency ladder (plan): rlm -> plain-LLM. Never stall: the DAG shape
-    # is the contract, not the engine.
+    # Contingency ladder (plan): rlm on each candidate arm, then plain-LLM on
+    # the same candidates. Never stall: the DAG shape is the contract, not the
+    # engine — and not the arm either.
     engine = "rlm"
     rlm_error = None
     raw = None
-    try:
-        raw = _rlm_decompose(prompt, knobs)
-    except Exception as e:
+    candidates = _planner_fallbacks()
+    planner_used: tuple[str, str] | None = None
+    for spec in candidates:
+        try:
+            raw = _rlm_decompose(prompt, knobs, spec)
+            planner_used = spec
+            break
+        except Exception as e:
+            rlm_error = f"{spec[0]}/{spec[1]}: {str(e)[:200]}"
+            raw = None
+
+    if raw is None:
         engine = "fallback-plain-llm"
-        rlm_error = str(e)[:300]
 
     if engine == "fallback-plain-llm":
         try:
             tasks = _validated(_normalize_tasks(_plain_llm_decompose(target, context)))
         except Exception as e:
-            return {"ok": False, "error": f"decomposition failed: {str(e)[:200]}"}
+            detail = f" ({rlm_error})" if rlm_error else ""
+            return {"ok": False, "error": f"decomposition failed: {str(e)[:200]}{detail}"}
     else:
         try:
             tasks = _validated(_normalize_tasks(_extract_first_json(raw)))
@@ -404,9 +465,13 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
             try:
                 tasks = _validated(_normalize_tasks(_plain_llm_decompose(target, context)))
             except Exception as e2:
-                return {"ok": False, "error": f"decomposition failed: {str(e2)[:200]}"}
+                return {"ok": False, "error": f"decomposition failed: {str(e2)[:200]} ({rlm_error})"}
 
     result: dict[str, Any] = {"engine": engine, "tasks": tasks}
+    if planner_used:
+        result["planner"] = f"{planner_used[0]}/{planner_used[1]}"
+        if candidates and planner_used != candidates[0]:
+            result["planner_fallback"] = True
     if rlm_error:
         result["rlm_error"] = rlm_error
     # Recursive re-plan of a single node is already scoped: critique the whole

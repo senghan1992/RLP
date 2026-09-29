@@ -213,6 +213,8 @@ cat <<EOF
 
 [rlp] done.
   use:      cd <any project> && rlp            # the agent (triage -> local workers)
+  set up:   /setup                             # in the session: connect providers,
+                                               #   pick the brain and the worker arms
   one-shot: rlp -p "add a --wc flag, test it, document it"
   decide:   rlp plan "<request>"               # plan only, nothing executed
   health:   rlp doctor --warm

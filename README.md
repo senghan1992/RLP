@@ -39,10 +39,11 @@ Local orchestration needs no server, no daemon, no runner: dispatch is a
 
 ## Contents
 
-- [Install](#install) · [How it works](#how-it-works) · [The model ladder](#the-model-ladder--configuration-not-prose)
+- [Install](#install) · [First run](#first-run) · [How it works](#how-it-works) · [The model ladder](#the-model-ladder--configuration-not-prose)
 - [Planning quality, verification, memory](#planning-quality-verification-and-memory)
 - [Commands](#commands) · [Safety](#safety-and-guardrails) · [Troubleshooting](#troubleshooting)
 - [Environment](#environment-knobs) · [Project layout](#project-layout) · [Development](#development)
+- [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
 
 ---
 
@@ -83,12 +84,35 @@ never type it).
 - `git`, `node` ≥ 18 with `npm`, `python` ≥ 3.10
 - ~1.5 GB of disk (the harness, a CPU-only torch, and the laya checkpoint)
 - Model credentials: RLP reads pi's `~/.pi/agent/auth.json` + `models.json`.
-  Any OpenAI-compatible provider works; configure them with `/provider` /
-  `/login` inside `rlp`, or with the harness's own config.
+  Any OpenAI-compatible provider works. Configure them inside `rlp` with
+  `/setup` (or `/provider connect`), which is the guided path; a hand-edited
+  file works too, and `rlp provider` is the scriptable equivalent.
 - `omni` (omnigent) is **optional** — only `rlp --omnigent` needs it.
 
 The installer uses [`uv`](https://github.com/astral-sh/uv) when it is present and
 falls back to a stdlib `venv` + `pip` otherwise.
+
+### First run
+
+```bash
+rlp            # the agent, in the project you are working on
+/setup         # guided: doctor → providers → brain → worker arms → roles
+```
+
+`/setup` asks the four questions that decide whether RLP can do anything at all,
+in order, with the defaults stated: which endpoints exist and which have no
+credential, which model orchestrates, which models work, and which roles they
+cover. Every step is skippable and reports exactly what it changed. Afterwards
+`/rlp-ladder` shows what will actually happen, and `/rlp-plan "<request>"`
+shows the decision without running anything.
+
+Attaching an endpoint on its own is `/provider connect`: pick from a preset
+(OpenAI, Anthropic, OpenRouter, Groq, DeepSeek, Qwen, Ollama, any local
+OpenAI-compatible server), paste a key, and then choose **from the list the
+endpoint reports** over `GET /models` rather than typing an id from memory.
+`/provider test <id>` does one real round trip and, when it fails, says *which*
+failure it is — a rejected key, a wrong URL, a model id the endpoint does not
+serve, no network, TLS — with a fix for each.
 
 ---
 
@@ -230,6 +254,11 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp replan "<node brief>"` | recursively re-decompose one task into a sub-DAG |
 | `rlp verify --acceptance A --avoid-family F` | independent cross-vendor best-of-N verdict |
 | `rlp ladder` · `rlp roster` | the resolved ladder · the router's roster cards |
+| `rlp provider list` | every endpoint: credential state, models, and the ladder arms it carries |
+| `rlp provider probe <id>` | one real round trip; a failure comes back classified, with a fix |
+| `rlp provider discover <id>` | ask the endpoint which models it serves |
+| `rlp provider add <id> <url> <model…> [--key-stdin]` | attach an endpoint (validated, backed up, `0600` auth) |
+| `rlp provider key <id> [--drop]` · `remove <id> [--drop-key]` | manage a credential · detach an endpoint |
 | `rlp config '<ops-json>'` | edit the ladder (validated, backed up, atomic) |
 | `rlp memory` · `rlp remember "<text>"` | the project's cross-run knowledge log |
 | `rlp doctor [--warm]` | is this host runnable? one fix per failure |
@@ -243,7 +272,8 @@ Add `--json` to any engine subcommand for the raw envelope. Exit codes:
 
 | Command | What it does |
 |---|---|
-| `/rlp` | status card + an action menu |
+| `/setup` | guided first run: doctor → endpoints → brain → worker arms → roles |
+| `/rlp` | status card (ladder, brain, endpoints, unusable arms) + an action menu |
 | `/rlp-plan <request>` | the headless plan, rendered in chat |
 | `/rlp-triage <request>` | the gate verdict alone |
 | `/rlp-doctor` | host health |
@@ -252,10 +282,13 @@ Add `--json` to any engine subcommand for the raw envelope. Exit codes:
 | `/rlp-roles` | the model each role resolves to, and the menu to change it |
 | `/commands [filter]` | the whole slash index, grouped (harness, RLP, skills, optional extensions) |
 | `/models [filter]` · `/models --pick` | models by provider, with ladder and credential marks |
-| `/provider` · `/provider add …` | inspect / attach OpenAI-compatible endpoints |
+| `/provider` | endpoints, credential state, live connection test, and which arms cannot run |
+| `/provider connect` · `add` · `test` · `models` · `key` · `remove` | the guided attach, the scriptable attach, a round trip, discovery, credentials, removal |
 
-All read-only except the ones that explicitly write the ladder, which back up
-first.
+Reading commands change nothing. The ones that write back up first: `/rlp-config`
+and `/rlp-roles` edit the ladder (validated, timestamped backup, atomic replace),
+and `/provider` / `/setup` edit the ladder and the provider store under the same
+rules — a credential is never printed and never placed on a command line.
 
 ---
 
@@ -271,6 +304,11 @@ first.
 - **Never merges.** Branches and (with a GitHub remote) PRs only.
 - **Secrets stay out of the repo.** Credentials live in `~/.pi/agent/`, outside
   the checkout and git-ignored.
+- **Credentials are handled as credentials.** `auth.json` is written `0600`;
+  nothing ever prints a key (only `present`/`absent`); every write to it or to
+  `models.json` is validated first, backed up, and replaced atomically; and a
+  key is never passed on a command line, where `ps` could read it — the TUI
+  hands it over a pipe (`--key-stdin`).
 
 ---
 
@@ -279,6 +317,7 @@ first.
 ```bash
 rlp doctor            # every failure with a one-line fix (~0.2 s)
 rlp doctor --warm     # plus one real laya round trip (~150 s cold on CPU)
+rlp provider list     # endpoints, credentials, and the arms that cannot run
 rpi                   # the bare harness, no orchestration — isolate the harness
 ```
 
@@ -287,7 +326,9 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | `rlp: decision engine not installed` | `sh scripts/install.sh` |
 | `the laya decision model` seems stuck | first load is ~150 s on CPU; it is loaded once per session in the background |
 | a request never fans out | the gate defaults to direct; use `rlp plan --mode orchestrate --because "…"` or ask explicitly |
-| a worker dies instantly | `rlp doctor` — usually a missing credential for that arm (`/login <provider>`) |
+| a worker dies instantly | `rlp doctor` — usually a missing credential for that arm (`/provider key <id>`, or `/login <provider>`) |
+| a model is in the list but nothing runs on it | it is not a *ladder arm*: `/provider` names this under "ladder arms that cannot run", `/rlp-config add-arm` attaches it |
+| a connection fails and you cannot tell why | `/provider test <id>` — a rejected key, a wrong URL, a bad model id, no network and TLS are told apart, each with a fix |
 | `/settings` or `/model` default ignored | managed worker sessions follow `RPI_DEFAULT_MODEL`; interactive sessions keep your saved default |
 
 ---
@@ -316,11 +357,15 @@ RLP/
   fork/pi/            # the pi fork — CLONED + BUILT by install.sh, never committed
   rlp-svc/            # the decision engine: MCP server + CLI + library
     rlp_svc/          #   triage, decompose (RLM + critique), route, verify,
-                      #   memory, plan, orchestration ladder, doctor, engine, cli
+                      #   memory, plan, orchestration ladder, providers,
+                      #   doctor, engine, cli
   agent/rlp/          # the agent spec: dropped-in pi extensions + skills
-    extensions/       #   rlp-orchestrate (local orchestration), rlp-commands, menus
+    extensions/       #   rlp-orchestrate (local orchestration), rlp-provider
+                      #   (endpoint/credential wizards), rlp-commands, menus
+    skills/           #   /skill:rlp-* — workflow, models, engine, doctor, commands
     orchestration.json#   the default ladder
-  scripts/            # install, rlp/rpi wrappers, selftest, fork patch
+  scripts/            # install, rlp/rpi wrappers, selftest, fork patch,
+                      #   check-harness + check-provider (live-session checks)
   docs/               # CONCEPTS.md, ARCHITECTURE.md
 ```
 
@@ -328,12 +373,18 @@ RLP/
 
 ```bash
 sh scripts/selftest.sh --fast   # extension typecheck + offline suite (seconds)
-sh scripts/selftest.sh          # + real models: triage, decompose, route, plan (~4 min)
+sh scripts/selftest.sh          # + real models, and the two live-session checks (~4 min)
+
+node scripts/check-harness.mjs  # commands load, no duplicate registrations
+node scripts/check-provider.mjs # /provider and /setup, driven through a live session
 ```
 
-The offline suite stubs every model layer and runs in milliseconds:
-`rlp-svc/.venv/bin/python -m rlp_svc.tests`. CI runs it (plus a `sh -n` syntax
-check of the install scripts) on every push — see `.github/workflows/ci.yml`.
+The offline suite stubs every model layer (including the provider transport) and
+runs in milliseconds: `rlp-svc/.venv/bin/python -m rlp_svc.tests`. CI runs it,
+plus a `sh -n` pass over the install scripts and a `node --check` over the two
+harness checks — see `.github/workflows/ci.yml`. The live-session checks need a
+built fork and installed extensions, so they run locally and in the full
+selftest rather than in CI.
 
 ## Acknowledgements
 

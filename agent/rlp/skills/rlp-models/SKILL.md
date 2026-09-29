@@ -31,18 +31,38 @@ returns the same ladder as structured JSON with `roster` and
 
 ## Attaching another model or provider
 
-Mutation happens in the `rpi` harness, not here — this REPL cannot write the
-credential store. Tell the user to run `rpi` and then:
+In the harness — this is a terminal tool, and so is that:
 
 ```
-/provider                                  list endpoints and credential state
-/provider add <id> <baseUrl> <modelId>     attach an OpenAI-compatible endpoint
-/login <provider>                          set or replace a credential
+/setup                                     the guided first run: endpoints, brain, worker arms, roles
+/provider                                  endpoints, credential state, and the arms that cannot run
+/provider connect                          guided: preset → endpoint → key → live GET /models → pick models
+/provider add <id> <baseUrl> <model…>      the scriptable attach
+/provider test <id>                        one real round trip, failure classified (auth / url / model / network)
+/provider key <id>                         set or replace a credential (--drop removes it)
+/provider models <id>                      ask the endpoint what it serves, then merge in what is missing
+/login <provider>                          the harness's own OAuth/key flow, for a built-in provider
 /models --pick                             switch model, or set the default
 ```
 
-Every one of those backs up the file it writes, and `/provider` never echoes a
-secret. Do not attempt to edit `models.json` or `auth.json` from here.
+The same thing without a dialog, from any shell:
+
+```
+rlp provider list | probe <id> | discover <id>
+rlp provider add <id> <baseUrl> <model…> [--key-stdin]
+rlp provider key <id> [--drop] | remove <id> [--drop-key]
+```
+
+Every write is validated first, backed up, and replaced atomically; `auth.json`
+is kept at `0600`; no command ever prints a key or takes one on argv (the TUI
+pipes it to `--key-stdin`). Do not hand-edit `models.json` or `auth.json`: the
+engine is the only writer that keeps those rules.
+
+Adding an endpoint does not by itself make RLP use it. A model becomes usable by
+the orchestrator only when it is a **ladder arm** (`/rlp-config add-arm`, or the
+menu offered right after `/provider connect`) — otherwise it is a model the
+harness can run and the router will never pick. `rlp provider list` says which
+arms each endpoint carries, and `rlp doctor` reports the arms that cannot run.
 
 ## Session model vs default
 

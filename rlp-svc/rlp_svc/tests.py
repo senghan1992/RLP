@@ -506,6 +506,133 @@ def test_version_consistency() -> None:
     check(callable(getattr(cli, "_cmd_provider", None)), "the provider command has a handler")
 
 
+def test_chat_contract() -> None:
+    """An empty model reply is named, not silently returned as "".
+
+    This is the bug that made a whole plan fail with "no JSON object in
+    response": `chat()` returned an empty string, and every caller reported the
+    symptom instead of the cause. A reasoning model mid-thought, a truncated
+    reply and a boilerplate empty completion are the three things it can be, and
+    the error now says which.
+    """
+    from . import llm
+
+    class Reply:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    original_post, original_chat = llm._post, llm.chat
+    original_url, original_key = llm._provider_base_url, llm._provider_key
+    try:
+        # `chat` resolves the endpoint and the credential before it posts; the
+        # test is about the reply shape, so both are stubbed.
+        llm._provider_base_url, llm._provider_key = lambda provider: "https://example.test/v1", lambda provider: "k"
+        llm._post = lambda *a, **k: Reply({"choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}]})
+        check(llm.chat("p", "m", [{"role": "user", "content": "x"}]) == "hello", "a normal reply comes back")
+
+        llm._post = lambda *a, **k: Reply({"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+        try:
+            llm.chat("p", "m", [])
+            check(False, "an empty reply was returned as a value")
+        except RuntimeError as e:
+            check("finish_reason='length'" in str(e), f"the truncation is named: {e}")
+
+        llm._post = lambda *a, **k: Reply(
+            {"choices": [{"message": {"content": "", "reasoning_content": "thinking…"}, "finish_reason": "length"}]}
+        )
+        try:
+            llm.chat("p", "m", [])
+            check(False, "a reasoning-only reply was returned as a value")
+        except RuntimeError as e:
+            check("reasoning_content" in str(e), f"a reasoning-only reply is explained: {e}")
+
+        llm._post = lambda *a, **k: Reply({"choices": []})
+        try:
+            llm.chat("p", "m", [])
+            check(False, "a reply with no choices was returned as a value")
+        except RuntimeError as e:
+            check("no choices" in str(e), f"an empty choice list is named: {e}")
+
+        # --- the candidate ladder
+        calls: list = []
+
+        def flaky(provider, model, messages, **kwargs):
+            calls.append(f"{provider}/{model}")
+            if len(calls) == 1:
+                raise RuntimeError("first arm is down")
+            return "second arm answered"
+
+        llm.chat = flaky
+        text, used = llm.chat_first([("a", "one"), ("b", "two")], messages=[])
+        check(text == "second arm answered" and used == ("b", "two"), f"chat_first walks the list: {text!r} {used}")
+        check(calls == ["a/one", "b/two"], f"candidates are tried in order: {calls}")
+
+        llm.chat = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+        try:
+            llm.chat_first([("a", "one"), ("b", "two")], messages=[])
+            check(False, "an all-failed list returned a value")
+        except RuntimeError as e:
+            check("a/one" in str(e) and "b/two" in str(e), f"every candidate is reported: {e}")
+    finally:
+        llm._post, llm.chat = original_post, original_chat
+        llm._provider_base_url, llm._provider_key = original_url, original_key
+
+
+def test_planner_fallbacks() -> None:
+    """The decomposer plans on any of its candidate arms, and says which one."""
+    from . import decompose as mod
+    from . import orchestration
+
+    original = (mod._rlm_decompose, mod.chat, mod._policy, mod._critique_spec, orchestration.load)
+    try:
+        mod._policy = lambda: (dict(mod._DEFAULT_RLM), {**mod._DEFAULT_PLANNING, "critique": False, "maxRefines": 0})
+        mod._critique_spec = lambda: ("p", "m")
+        orchestration.load = lambda: orchestration.parse(json.dumps(LADDER), "test")
+
+        candidates = mod._planner_fallbacks()
+        check(len(candidates) >= 2, f"more than one candidate arm: {candidates}")
+        check(len(set(candidates)) == len(candidates), f"candidates are deduped: {candidates}")
+        check(candidates[0] == mod._planner_spec(), "the configured planner goes first")
+        check(("agnes", "agnes-3.0-flash") in candidates or any(c[0] == "agnes" for c in candidates),
+              f"the ladder's DEFAULT arm is a candidate: {candidates}")
+
+        tried: list = []
+
+        def first_arm_dies(prompt, knobs, spec=None):
+            tried.append(spec)
+            if len(tried) == 1:
+                raise RuntimeError("empty message (finish_reason='length')")
+            return json.dumps({"tasks": TASKS})
+
+        mod._rlm_decompose = first_arm_dies
+        env = mod.decompose("do the thing")
+        check(env["ok"] and len(env["result"]["tasks"]) == 3, f"a dead first arm does not end the plan: {env}")
+        check(env["result"].get("planner_fallback") is True, "the fallback is recorded")
+        check(env["result"]["planner"] == f"{tried[1][0]}/{tried[1][1]}", f"the arm that answered is named: {env['result']['planner']}")
+        check("first" not in str(env["result"].get("rlm_error", "")) or isinstance(env["result"].get("rlm_error"), str),
+              "the first arm's failure is kept for diagnosis")
+
+        # every rlm arm dies: the plain-LLM contingency still plans
+        mod._rlm_decompose = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("gateway 500"))
+        mod.chat = lambda *a, **k: json.dumps({"tasks": TASKS})
+        env = mod.decompose("do the thing")
+        check(env["ok"] and env["result"]["engine"] == "fallback-plain-llm",
+              f"the plain-LLM contingency still plans: {env}")
+
+        # and when that fails too, the error says what both layers saw
+        mod.chat = lambda *a, **k: "no json here"
+        env = mod.decompose("do the thing")
+        check(env["ok"] is False and "gateway 500" in env["error"], f"the failure carries both layers: {env}")
+    finally:
+        (mod._rlm_decompose, mod.chat, mod._policy, mod._critique_spec, orchestration.load) = original
+
+
 def test_doctor() -> None:
     from . import doctor
 
@@ -861,7 +988,7 @@ def test_decompose_pipeline() -> None:
             dict(mod._DEFAULT_RLM),
             {**mod._DEFAULT_PLANNING, "critique": True, "maxRefines": 1},
         )
-        mod._rlm_decompose = lambda prompt, knobs: json.dumps({"tasks": [TASKS[0]]})
+        mod._rlm_decompose = lambda prompt, knobs, spec=None: json.dumps({"tasks": [TASKS[0]]})
         mod._critique_spec = lambda: ("p", "m")
 
         mod.chat = lambda *a, **k: json.dumps({"verdict": "repair", "issues": ["split it"], "tasks": repaired})
@@ -1135,6 +1262,8 @@ def main() -> None:
         test_plan_excludes_unavailable,
         test_cli_surface,
         test_version_consistency,
+        test_chat_contract,
+        test_planner_fallbacks,
         test_doctor,
         tests_providers.test_providers_store,
         tests_providers.test_providers_probe,

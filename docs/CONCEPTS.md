@@ -69,18 +69,30 @@ command is a file drop plus `/reload`, never a rebuild.
 | Command | What it does |
 |---|---|
 | `/commands [filter]` | the whole menu, grouped: harness built-ins, RLP, skills, extensions, omnigent shell commands |
+| `/setup` | the guided first run: doctor → connect/key the endpoints → pick the brain → pick the worker arms (cross-vendor rule stated) → bind the planner roles → re-check. Every step is skippable |
 | `/models [filter]` | models grouped by provider — `●` this session, `★` your default, `⚑` ladder arm, `○` no credentials |
 | `/models --pick` | provider → model → use for this session, set as default, add as an RLP ladder arm, or make it the orchestrator |
-| `/provider` | every endpoint: baseUrl, model count, credential state |
-| `/provider add <id> <baseUrl> <modelId> [name]` | attach an OpenAI-compatible endpoint, key pasted at the prompt |
-| `/provider remove <id>` | detach one |
+| `/provider` | every endpoint with its credential state **and which of them the ladder actually dispatches to**; orphan arms are named, so "the model is in the list but nothing runs" has a reason |
+| `/provider connect` | guided attach: preset → id → endpoint → key → live `GET /models` → multi-select → write. Presets cover OpenAI, Anthropic, OpenRouter, Groq, DeepSeek, Qwen, Ollama and any local OpenAI-compatible server |
+| `/provider test [id]` | one real completion round trip, with the failure **classified**: auth / not_found / rate_limit / server / network / tls / bad_url, each with a fix line |
+| `/provider key <id>` | set or replace a credential (`--drop` removes it) |
+| `/provider models <id>` | ask the endpoint what it serves, then merge in what is missing |
+| `/provider add <id> <baseUrl> <model…>` | the scriptable path, so nothing has to go through a dialog |
+| `/provider remove <id>` | detach one (`--key` also removes its credential) |
 
 The command index reads the harness's own `BUILTIN_SLASH_COMMANDS` at runtime,
 so it cannot drift the way a hardcoded list would.
 
-All the RLP commands are read-only, and all resolve the checkout by walking up
-from the session cwd, so they work in any project directory. `/orchestration`
-remains the ladder-focused view; `/rlp` is the umbrella.
+Reading commands (`/rlp`, `/rlp-plan`, `/rlp-triage`, `/rlp-doctor`,
+`/rlp-ladder`, `/commands`, `/models`) change nothing. The ones that write say so
+and are backed up first: `/rlp-config`, `/rlp-roles`, `/provider`, `/setup` edit
+the ladder (validated, timestamped backup, atomic replace) or the provider store
+(same rules, plus `0600` on `auth.json`), and a credential is never put on a
+command line. `/rlp-run` only composes a command into the editor.
+
+Every command resolves the checkout by walking up from the session cwd, so they
+work in any project directory. `/orchestration` remains the ladder-focused view;
+`/rlp` is the umbrella.
 
 ---
 
@@ -106,10 +118,18 @@ Each stage degrades instead of stalling, and says which engine actually ran:
 |---|---|---|---|
 | triage | laya | one-turn LLM | `engine: llm` + `laya_error` |
 | triage, unsure | fan-out signals (hybrid) | defaults to direct | `engine: laya+signals` + `signals` |
-| decompose | RLM (recursive) | plain-LLM decomposition | `engine: fallback-plain-llm` + `rlm_error` |
+| decompose | RLM on the configured planner arm | the ladder's DEFAULT arm, then the fast route arm; then plain-LLM on the same candidates | `engine: fallback-plain-llm` + `rlm_error` |
 | route | laya | one-turn LLM | `engine: llm` + `laya_error` |
 | arm pick | ladder priority order | keep the worker's default arm | `why_this_arm` says which rule fired |
 | dispatch | credential + harness preflight | fail the node with a fix | `preflight` in the plan, `credential` on the node |
+
+"Degrade instead of stalling" is only true if each stage has somewhere to
+degrade *to*. Decomposition used to name one model, and on a gateway that
+occasionally answers with an empty completion the whole plan failed with "no JSON
+object in response" — a symptom reported as if it were a cause. The decomposer
+now walks its candidates in order and records which one answered (`planner`,
+`planner_fallback`), and `llm.chat` refuses to return an empty reply, naming
+`finish_reason` and whether the text went to `reasoning_content` instead.
 
 ### Plan quality loop, structured handoff, recursive re-plan
 
@@ -331,20 +351,26 @@ decision, not an operation.
 ## Operating it
 
 ```bash
-rlp doctor            # deps, credentials, ladder, checkpoint, host wiring — 0.2 s
+rlp doctor            # deps, credentials, endpoints, ladder, checkpoint, host wiring — 0.2 s
 rlp doctor --warm     # plus one real laya round trip (~170 s cold, honest about it)
+rlp provider list     # endpoints, credential state, and the ladder arms each one carries
+rlp provider probe ID # one real round trip; the failure comes back classified
 /rlp-doctor           # the same report, inside a session
+/setup                # the guided first run, inside a session
 /commands              # the whole slash index, grouped
 /models                # models by provider, with ladder and credential marks
 /provider              # endpoints and which ones have no key
-sh scripts/selftest.sh --fast   # offline suite: planner shape, validation, CLI
-sh scripts/selftest.sh          # + the real models (~4 min)
+sh scripts/selftest.sh --fast   # offline suite: planner shape, validation, providers, CLI
+sh scripts/selftest.sh          # + the real models, and the live-session checks (~4 min)
 ```
 
 `doctor` grades instead of failing flat: `ok` / `warn` / `fail`, with the fix
 on the failure line. A missing ladder, an unparseable credential file, a
 missing checkpoint, an unwired omnigent harness and a single-family ladder
-claiming `crossVendor: true` are all named explicitly.
+claiming `crossVendor: true` are all named explicitly. It also checks the
+provider store: which endpoints have no credential, and which ladder arms
+therefore cannot run — the failure that used to appear only when a dispatch
+died.
 
 ### Optional integrations
 

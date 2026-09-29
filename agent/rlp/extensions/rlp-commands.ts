@@ -227,7 +227,7 @@ const setup: Handler = async (_args, ctx) => {
 };
 
 const MENU: Array<{ label: string; run: Handler; prompt?: string }> = [
-	{ label: "Set up RLP (connect providers, choose models)", run: setup },
+	{ label: "Setup (connect providers, choose models)", run: setup },
 	{ label: "Plan a request (gate → DAG → waves)", run: plan, prompt: "Plan which request?" },
 	{ label: "Triage a request (gate only)", run: triage, prompt: "Triage which request?" },
 	{ label: "Doctor (is this host runnable?)", run: doctor },

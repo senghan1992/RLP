@@ -34,13 +34,17 @@ Has the full pi menu — `/settings`, `/model`, `/login`, `/scoped-models`,
 
 | Command | What it does |
 |---|---|
+| `/setup` | guided first run: doctor → endpoints → brain → worker arms → roles |
 | `/rlp`, `/rlp-plan`, `/rlp-triage`, `/rlp-doctor`, `/rlp-ladder`, `/rlp-run` | the engine, in-session |
 | `/commands [filter]` | the whole menu, grouped, including the omnigent shell commands |
 | `/models [filter]`, `/models --pick` | models by provider; switch one, or set the default |
-| `/provider`, `/provider add\|remove` | attach or detach a provider endpoint |
+| `/provider` | endpoints, credential state, a live connection test, the arms that cannot run |
+| `/provider connect\|add\|test\|models\|key\|remove` | guided attach · scriptable attach · round trip · discovery · credentials · removal |
 
 Pi extensions load in the harness only. They do **not** appear in this REPL,
-and REPL commands do not appear in the harness.
+and REPL commands do not appear in the harness. These `rlp-*` skills load in
+both: in the harness they are `/skill:rlp-models` and friends, and everything
+they describe is the harness's own surface.
 
 ## A shell
 
@@ -48,6 +52,7 @@ and REPL commands do not appear in the harness.
 
 ```
 rlp plan | rlp triage | rlp decompose | rlp route | rlp ladder | rlp roster
+rlp provider list|probe|discover|add|key|remove
 rlp doctor [--warm] | rlp serve | rlp help-tool
 rpi                    # solo agent, no orchestration
 omni run|attach|session|config|doctor|usage|setup|server
@@ -58,5 +63,7 @@ omni run|attach|session|config|doctor|usage|setup|server
 - Deciding whether to orchestrate → `rlp plan` or `/rlp-engine`.
 - Actually orchestrating → `rlp -p "…"` (this REPL, or a shell).
 - Doing one thing, no fan-out → `rpi`.
-- Attaching a model or provider → `rpi`, then `/provider add` or `/login`.
+- First run on a new machine → `rpi`, then `/setup`.
+- Attaching a model or provider → `rpi`, then `/provider connect` (guided) or
+  `/provider add …` (scriptable).
 - Changing the model new sessions start on → `rpi`, then `/models --pick`.

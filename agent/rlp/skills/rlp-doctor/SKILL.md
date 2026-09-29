@@ -27,11 +27,14 @@ Graded, one line per check, with the fix on the failure line:
 - `fail` — that capability will not work
 
 Checks: Python and the `laya` / `rlm` / `mcp` / `httpx` imports; the
-credential files and the decomposer model; the orchestration ladder, its
-validation, the derived router roster and which workers are excluded as
-unavailable; whether a single-vendor ladder is claiming cross-vendor review;
-the laya checkpoint cache; the CA bundle; and the omnigent wiring (the `omni`
-binary, the installed agent spec, the harness override).
+credential files and the decomposer model; **the provider endpoints — which
+ones have no credential, and which ladder arms therefore cannot run**; the
+orchestration ladder, its validation, the derived router roster and which
+workers are excluded as unavailable; whether a single-vendor ladder is claiming
+cross-vendor review; the laya checkpoint cache; the CA bundle; RLP's own
+extensions and skills (the rest of the agent dir is labelled optional, never a
+failure); and the omnigent wiring (the `omni` binary, the installed agent spec,
+the harness override).
 
 Exit code 0 when runnable, 3 when a `fail` is present.
 
@@ -39,5 +42,14 @@ Exit code 0 when runnable, 3 when a `fail` is present.
 
 Lead with the verdict, then only the `fail` and `warn` lines, then the fix
 each one names. Do not paste all 20 `ok` lines at the user. If a check fails,
-say what is broken and what to run — do not attempt to repair the
-configuration yourself unless asked.
+say what is broken and what to run — `/setup` for endpoints, the brain and the
+worker arms; `/rlp-config` for the ladder — and do not repair the configuration
+yourself unless asked.
+
+Two checks are worth calling out when they fire, because neither was visible
+anywhere else before:
+
+- `providers:no-credential` — endpoints that exist and cannot be used. The fix
+  is `/provider key <id>`, or `/provider test <id>` first to see *why*.
+- `ladder-arms-reachable` — arms the router may pick whose provider has no
+  endpoint or no key. These are dispatches that would have died mid-run.
