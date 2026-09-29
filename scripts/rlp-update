@@ -1,27 +1,35 @@
 #!/bin/sh
-# rlp update — bring the pi fork up to date, the way `pi update` brings pi up
-# to date, and re-apply RLP on top.
+# rlp update — update RLP itself, then the pi fork it runs on.
 #
-# Why this is a script and not a documented recipe: the documented flow
+# "Update" means what a user means by it: both halves. RLP's own checkout moves
+# to the newest release, and the harness fork moves to the newest upstream with
+# the RLP patch re-applied on top. Updating only the fork — which is all this
+# did before — left the tool one release behind with nothing saying so.
+#
+# Why the fork half is a script and not a documented recipe: the documented flow
 # (`git fetch origin && git merge origin/main`) has never actually worked on
 # this checkout. It was cloned with `--depth 1`, and a shallow repository
 # cannot merge. This script unshallows first, then merges, then proves the RLP
 # surface survived, then rebuilds.
 #
 # Guarantees, in priority order:
-#   1. Never lose work. A dirty tree is refused, and the pre-update commit is
-#      printed so a rollback is one `git reset --hard <sha>` away.
+#   1. Never lose work. A dirty tree is refused — in either repository — and
+#      the pre-update commit is printed so a rollback is one
+#      `git reset --hard <sha>` away.
 #   2. Never leave half an update. A conflicted merge is aborted, not left
-#      pending for the next command to trip over.
+#      pending for the next command to trip over, and the agent dir is
+#      re-synced so the installed extensions match the engine.
 #   3. Never claim success unverified. The RLP markers, the typecheck and the
 #      build all have to pass, and a failure in any of them is a failure of
 #      this command.
 #
 # Usage:
-#   rlp update              fetch, merge, verify, rebuild
-#   rlp update --check      report what would happen; change nothing
-#   rlp update --to <ref>   merge a different upstream ref (default origin/main)
-#   rlp update --no-build   skip the rebuild (merge + verify only)
+#   rlp update                  update RLP, then the fork: fetch, merge, verify, rebuild
+#   rlp update --check          report what would happen; change nothing
+#   rlp update --no-self        only the fork (RLP's own checkout is left alone)
+#   rlp update --self-ref <r>   which RLP ref to move to (default: newest v* tag)
+#   rlp update --to <ref>       merge a different upstream fork ref (default origin/main)
+#   rlp update --no-build       skip the rebuild (merge + verify only)
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -30,24 +38,111 @@ PY="$ROOT/rlp-svc/.venv/bin/python"
 
 CHECK=0
 DO_BUILD=1
+DO_SELF=1
+SELF_REF=""
 TARGET="origin/main"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --check|--dry-run) CHECK=1 ;;
     --no-build) DO_BUILD=0 ;;
+    --no-self) DO_SELF=0 ;;
+    --self-ref) shift; SELF_REF="${1:-}" ;;
     --to) shift; TARGET="${1:-}" ;;
-    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "rlp update: unknown option $1" >&2; exit 2 ;;
   esac
   shift
 done
 
-cd "$FORK"
-
 say()  { printf '%s\n' "$*"; }
 step() { say ""; say "── $* ────────────────────────────────────────"; }
 die()  { say ""; say "update failed: $*" >&2; exit 1; }
+
+# --- 0. RLP itself --------------------------------------------------------
+#
+# Runs before anything else and then re-execs, because a script that updates
+# its own file cannot keep running from it: the shell reads the rest of the
+# script from disk as it goes, and the rest would be the new version spliced
+# into the old one's execution. `RLP_SELF_UPDATED` is what stops the re-exec
+# from looping.
+#
+# A checkout with local changes is left alone and said so. Somebody working on
+# RLP is the likeliest person to run this, and silently resetting their tree
+# would be the worst thing this command could do.
+self_update() {
+  [ -d "$ROOT/.git" ] || { say "  RLP is not a git checkout here — skipping (installed from an archive?)"; return 0; }
+  if [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
+    say "  RLP's checkout has local changes, so it is left exactly as it is:"
+    git -C "$ROOT" status --short 2>/dev/null | head -5 | sed 's/^/    /'
+    say "  (this is the right answer if you are working on RLP; the fork half continues)"
+    return 0
+  fi
+  git -C "$ROOT" remote get-url origin >/dev/null 2>&1 || {
+    say "  RLP's checkout has no 'origin' remote — skipping"
+    return 0
+  }
+
+  REF="$SELF_REF"
+  if [ -z "$REF" ]; then
+    # Same rule as install.sh: the newest release tag, sorted field by field so
+    # v0.10.0 beats v0.9.0. No tags means stay on the current branch.
+    git -C "$ROOT" fetch --quiet --tags origin 2>/dev/null || true
+    REF=$(git -C "$ROOT" tag --list 'v[0-9]*' |
+      sed -n 's|^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' |
+      sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | sed 's/^/v/')
+    if [ -z "$REF" ]; then
+      REF=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+      [ "$REF" = "HEAD" ] && REF=main
+      say "  no release tag yet — tracking $REF"
+    fi
+  fi
+
+  HERE=$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo "?")
+  git -C "$ROOT" fetch --quiet origin "$REF" 2>/dev/null ||
+    git -C "$ROOT" fetch --quiet --depth 1 origin "$REF" 2>/dev/null ||
+    { say "  could not fetch $REF from origin (no network?) — keeping $HERE"; return 0; }
+  WANT=$(git -C "$ROOT" rev-parse FETCH_HEAD)
+  HAVE=$(git -C "$ROOT" rev-parse HEAD)
+  if [ "$WANT" = "$HAVE" ]; then
+    say "  RLP is already at $REF ($HERE)"
+    return 0
+  fi
+  say "  RLP  $HERE  ->  $REF"
+  if [ "$CHECK" = 1 ]; then
+    say "  --check: would run: git -C $ROOT checkout --detach $WANT"
+    return 0
+  fi
+  say "  rollback    git -C $ROOT checkout --detach $HAVE"
+  git -C "$ROOT" checkout -q --detach "$WANT" || die "could not check out $REF"
+  # Extensions, skills and the ladder belong to the version, so they move with
+  # it. Without this the new engine would run against the old extensions and
+  # nothing would report the mismatch.
+  sh "$ROOT/scripts/sync-agent-dir" "$ROOT" || die "agent dir sync failed after the RLP update"
+  say ""
+  say "  RLP updated — re-running the rest of the update from the new version"
+  RLP_SELF_UPDATED=1
+  export RLP_SELF_UPDATED
+  ARGS="--no-self"
+  [ "$DO_BUILD" = 1 ] || ARGS="$ARGS --no-build"
+  [ "$TARGET" = "origin/main" ] || ARGS="$ARGS --to $TARGET"
+  # shellcheck disable=SC2086
+  exec sh "$ROOT/scripts/rlp-update" $ARGS
+}
+
+if [ "$DO_SELF" = 1 ] && [ -z "${RLP_SELF_UPDATED:-}" ]; then
+  step "0/7  RLP itself"
+  self_update
+fi
+
+# A missing fork used to surface as a bare `cd: can't cd to …/fork/pi`, which
+# names the symptom and not the fix. It happens for real: a half-finished
+# install, or an RLP fetched as an archive where the fork was never cloned.
+[ -d "$FORK/.git" ] || die "the harness fork is not here yet ($FORK).
+  RLP itself is fine — only the fork half of the update needs it.
+  Run: sh $ROOT/scripts/install.sh"
+
+cd "$FORK"
 
 # RLP's own fingerprints in the fork. If upstream refactors past one of these,
 # the update is "successful" in git terms and broken in practice — so each one
@@ -213,6 +308,13 @@ else
   say "  rpi version   $PI_VERSION -> $FINAL_PI"
   say "  fork commit   $PREV_SHA -> $NEW_HEAD"
   say "  rollback      git reset --hard $PREV_SHA   (then: sh scripts/install.sh)"
+fi
+# The version actually running now, from the tool itself rather than from this
+# script's idea of it: `rlp version` is the line to paste into a bug report,
+# and printing it here is how someone learns it exists.
+if [ -x "$PY" ]; then
+  say ""
+  (cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc version 2>/dev/null | sed 's/^/  /') || true
 fi
 say ""
 say "  verify it yourself:  sh scripts/selftest.sh --fast"

@@ -71,9 +71,34 @@ git clone https://github.com/senghan1992/RLP.git
 cd RLP && sh scripts/install.sh
 ```
 
-The installer fetches RLP into `${RLP_DIR:-~/.local/share/rlp}` first; override
-with `RLP_DIR`, `RLP_REF` (branch/tag), or `RLP_REPO` — e.g.
-`RLP_REF=v0.1.0 curl -fsSL … | sh`.
+**That installs a release, not the development branch.** The bootstrap resolves
+the newest `v*` tag on the remote and installs it, so the one-liner gives
+everyone the same reviewed commit. Override with:
+
+```bash
+RLP_REF=v0.3.0 curl -fsSL … | sh   # pin an exact release
+RLP_REF=main   curl -fsSL … | sh   # track the development branch
+RLP_DIR=/opt/rlp RLP_REPO=… sh     # where it lands, and from where
+```
+
+RLP goes into `${RLP_DIR:-~/.local/share/rlp}`, with `rlp` and `rpi` symlinked
+into `~/.local/bin`.
+
+### Updating
+
+```bash
+rlp update            # RLP to the newest release, the harness fork to newest upstream
+rlp update --check    # what it would do; changes nothing
+rlp version           # what you are running, and what it was built from
+```
+
+`rlp update` does both halves, because that is what "update" means: it moves
+RLP's own checkout to the newest release (re-syncing the extensions, skills and
+— without touching your model choices — the ladder), then merges the newest
+upstream pi into the harness fork, re-applies RLP's patch, verifies the RLP
+surface survived the merge, and rebuilds. A dirty checkout is never reset: it
+says so and leaves it alone. Paste `rlp version` into any bug report — it names
+the release, the exact commit, whether the tree is dirty, and the harness build.
 
 `rlp` is a superset of the harness: for solo work with no orchestration at all,
 the same binary is available as `rpi` (RLP execs it internally, so you normally
@@ -296,7 +321,8 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp config '<ops-json>'` | edit the ladder (validated, backed up, atomic) |
 | `rlp memory` · `rlp remember "<text>"` | the project's cross-run knowledge log |
 | `rlp doctor [--warm]` | is this host runnable? one fix per failure |
-| `rlp update [--check]` | update the pi fork and re-apply RLP |
+| `rlp update [--check]` | RLP to the newest release + the fork to newest upstream, verified |
+| `rlp version [--json]` | the release, the commit, the harness build — what a bug report needs |
 | `rpi` | the same harness with no orchestration surface at all |
 
 Add `--json` to any engine subcommand for the raw envelope. Exit codes:
@@ -401,7 +427,8 @@ RLP/
                       #   (endpoint/credential wizards), rlp-commands, menus
     skills/           #   /skill:rlp-* — workflow, models, engine, doctor, commands
     orchestration.json#   the ladder: policy, and no model arms (see above)
-  scripts/            # install, rlp/rpi wrappers, selftest, fork patch,
+  scripts/            # install, sync-agent-dir, rlp/rpi wrappers, rlp-update,
+                      #   release + changelog-section, selftest, fork patch,
                       #   check-harness + check-provider (live-session checks)
   docs/               # CONCEPTS.md, ARCHITECTURE.md
 ```
@@ -418,10 +445,46 @@ node scripts/check-provider.mjs # /provider and /setup, driven through a live se
 
 The offline suite stubs every model layer (including the provider transport) and
 runs in milliseconds: `rlp-svc/.venv/bin/python -m rlp_svc.tests`. CI runs it,
-plus a `sh -n` pass over the install scripts and a `node --check` over the two
-harness checks — see `.github/workflows/ci.yml`. The live-session checks need a
-built fork and installed extensions, so they run locally and in the full
-selftest rather than in CI.
+plus a `sh -n` pass over every shipped script, a `node --check` over the two
+harness checks, and a release-readiness check — see
+`.github/workflows/ci.yml`. The live-session checks need a built fork and
+installed extensions, so they run locally and in the full selftest rather than
+in CI.
+
+### The fork patch
+
+`fork/pi` is a real checkout: upstream, plus **one commit** carrying
+`scripts/rlp-fork.patch` on a branch named `rlp`. Edit the fork's source, then
+regenerate the patch rather than hand-editing it:
+
+```bash
+cd fork/pi
+git add -A && git commit --amend --no-edit
+git diff "$(git merge-base origin/main HEAD)" HEAD > ../../scripts/rlp-fork.patch
+```
+
+`scripts/rlp-update` greps the built fork for RLP's fingerprints
+(`check_markers`), so a marker removed from the patch has to be removed there
+too — otherwise the next upstream merge reports a loss that is not one.
+
+### Cutting a release
+
+```bash
+sh scripts/release --check 0.3.0   # verify only
+sh scripts/release 0.3.0           # bump, close the changelog, commit, tag
+git push origin main && git push origin v0.3.0
+```
+
+`scripts/release` refuses a dirty tree, a version that is not greater than the
+current one, a tag that already exists, an empty `## Unreleased` section, or a
+failing offline suite. It never pushes: `install.sh` installs the newest `v*`
+tag, so pushing the tag is the publish, and that is a decision rather than a
+side effect. The tag push triggers `.github/workflows/release.yml`, which
+re-verifies that the tag matches `rlp_svc.__version__` and that notes exist,
+then creates the GitHub release with the changelog section as its body.
+
+The version has exactly one declaration, `rlp_svc.__version__`; `pyproject.toml`
+reads it dynamically and `cli.VERSION` aliases it.
 
 ## Acknowledgements
 

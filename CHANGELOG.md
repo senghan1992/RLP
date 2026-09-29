@@ -8,6 +8,74 @@ offline suite fails if they drift.
 
 ## Unreleased
 
+### Added
+
+- **Versioned releases.** `install.sh` resolved `RLP_REF` to `main`, so every
+  `curl | sh` installed whatever was pushed most recently — a mid-refactor
+  commit included. It now resolves the newest `vMAJOR.MINOR.PATCH` tag on the
+  remote (via `git ls-remote`, so it works against any `RLP_REPO` and needs no
+  API token) and says which one it chose; `RLP_REF=main` still tracks the edge,
+  and a repository with no tags falls back to `main` with that stated. Tags are
+  sorted numerically field by field, because a text sort puts `v0.10.0` before
+  `v0.9.0` and that is the one comparison a release tool must not get wrong.
+- **`scripts/release`** — the release command: verify, bump the single version,
+  close `## Unreleased` as `## <version> — <date>`, commit, annotated tag. It
+  refuses a dirty tree, a detached HEAD, a version that is not greater than the
+  current one, an existing tag, an empty changelog section, a syntax error in
+  any shipped script, or a failing offline suite. It never pushes — pushing the
+  tag is the publish, so it stays a decision.
+- **`.github/workflows/release.yml`** — on a `v*` tag push, re-verifies that the
+  tag matches `rlp_svc.__version__` and that release notes exist, re-runs the
+  offline suite and the syntax passes, then creates the GitHub release with the
+  changelog section plus install and update instructions as its body.
+- **`scripts/changelog-section`** — one extractor for a changelog section, used
+  by both the annotated tag and the release body, so the tag and the release
+  page cannot describe different things.
+- **`rlp version`** now reports the build identity: the release, the checkout's
+  `git describe` (including `-dirty`), the harness build, which engine
+  dependencies are importable, the agent dir, and the host. It printed
+  `rlp-svc 0.2.0` before — the engine's version, not the tool's — which left a
+  bug report with no way to say *which* RLP. `--json` for the envelope.
+- **A release-readiness job in CI**, on every push rather than only on tags: the
+  version is well-formed and declared once, and there are notes to release.
+  Learning at tag time that the changelog is empty means learning after the tag.
+
+### Fixed
+
+- **`rlp update` had never worked on an installed host.** `install.sh` applied
+  the fork patch with `git apply` and never committed it, so every installed
+  machine had a permanently dirty `fork/pi` — and `rlp update` refuses to start
+  from a dirty tree, by design. The update path was therefore unreachable
+  everywhere except a developer's checkout. The installer now commits the patch
+  as one commit on the `rlp` branch, which is also what makes the upstream merge
+  `rlp update` performs a real merge. Regenerate the patch with
+  `git -C fork/pi diff "$(git -C fork/pi merge-base origin/main HEAD)" HEAD`.
+- **`rlp update` now updates RLP itself**, not only the harness fork. It moved
+  the fork forward and left RLP a release behind with nothing saying so. A new
+  stage 0 fetches the newest release tag, checks it out, re-syncs the agent dir
+  and re-execs the updated script (a script cannot go on running from a file it
+  has just rewritten). A checkout with local changes is reported and left
+  untouched — someone working on RLP is the likeliest person to run this, and
+  resetting their tree would be the worst thing the command could do.
+  `--no-self` keeps the old fork-only behaviour; `--self-ref <ref>` picks the
+  target.
+- `rlp update` ends by printing `rlp version`, so the release that is now
+  running comes from the tool rather than from the updater's idea of it.
+
+### Changed
+
+- **`scripts/sync-agent-dir`** now owns installing the extensions, skills and
+  ladder into `~/.rlp/agent`, and both `install.sh` and `rlp update` call it. An
+  update that moves the engine forward while leaving yesterday's extensions in
+  place is exactly the half-applied state `rlp update` promises never to leave,
+  and it is invisible — the commands still load, they just belong to another
+  version. The sync also *reports* an extension a previous version owned and
+  this one no longer ships, without deleting it.
+- **The version has one declaration.** It was restated in `pyproject.toml`,
+  `rlp_svc/__init__.py` and `cli.py`, guarded by a test that could only report a
+  drift after it happened. `rlp_svc.__version__` is now the source; pyproject
+  reads it through `[tool.setuptools.dynamic]` and `cli.VERSION` aliases it.
+
 ### Removed
 
 - **The omnigent plane is gone**, and with it `rlp --omnigent`,

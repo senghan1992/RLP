@@ -600,7 +600,13 @@ def test_cli_surface() -> None:
 
 
 def test_version_consistency() -> None:
-    """One version, three places. A drift between them is a support ticket."""
+    """One version, one place — and it is reported with what it was built from.
+
+    The version used to be restated in three files with a test that could only
+    report a drift after it happened. Now `rlp_svc.__version__` is the source,
+    pyproject reads it dynamically, and `cli.VERSION` is an alias; the thing
+    worth asserting is that nobody re-introduced a second declaration.
+    """
     import re as _re
 
     import rlp_svc
@@ -609,14 +615,43 @@ def test_version_consistency() -> None:
 
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     text = pyproject.read_text()
-    declared = _re.search(r'^version\s*=\s*"([^"]+)"', text, _re.MULTILINE)
-    check(declared is not None, "pyproject declares a version")
-    if declared:
-        check(
-            declared.group(1) == rlp_svc.__version__ == cli.VERSION,
-            f"pyproject={declared.group(1) if declared else '?'} package={rlp_svc.__version__} cli={cli.VERSION}",
-        )
+    check(
+        _re.search(r'^version\s*=\s*"', text, _re.MULTILINE) is None,
+        "pyproject declares no literal version string (it would be a second source of truth)",
+    )
+    check('dynamic = ["version"]' in text, "pyproject declares the version dynamic")
+    check(
+        _re.search(r'version\s*=\s*\{\s*attr\s*=\s*"rlp_svc\.__version__"\s*\}', text) is not None,
+        "and points it at rlp_svc.__version__",
+    )
+    check(cli.VERSION == rlp_svc.__version__, f"cli.VERSION aliases the package: {cli.VERSION}")
+    check(
+        _re.fullmatch(r"\d+\.\d+\.\d+", rlp_svc.__version__) is not None,
+        f"the version is MAJOR.MINOR.PATCH: {rlp_svc.__version__!r}",
+    )
+
+    # The build identity is what a bug report needs, so its shape is a contract:
+    # a missing key here is a support conversation that goes nowhere.
+    identity = cli._build_identity()
+    for key in ("rlp", "checkout", "harness", "engine_deps", "agent_dir", "python", "platform"):
+        check(key in identity, f"build identity reports {key}")
+    check(identity["rlp"] == rlp_svc.__version__, "build identity reports this version")
+    check(
+        set(identity["engine_deps"]) == {"laya", "rlm", "mcp", "httpx"},
+        f"build identity covers every engine dep: {sorted(identity['engine_deps'])}",
+    )
     check(callable(getattr(cli, "_cmd_provider", None)), "the provider command has a handler")
+
+    # The CHANGELOG has to carry a section for the version that is about to ship,
+    # or a release goes out with no notes and nobody notices until someone asks
+    # what changed. `Unreleased` is the valid answer between releases.
+    changelog = Path(__file__).resolve().parents[2] / "CHANGELOG.md"
+    if changelog.is_file():
+        body = changelog.read_text()
+        check(
+            f"## {rlp_svc.__version__}" in body or "## Unreleased" in body,
+            f"CHANGELOG has a section for {rlp_svc.__version__} or an Unreleased one",
+        )
 
 
 def test_chat_contract() -> None:

@@ -26,7 +26,7 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.2.0"
+from . import __version__ as VERSION
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_UNHEALTHY = 0, 1, 2, 3
 
@@ -544,11 +544,76 @@ def _cmd_engine(args: argparse.Namespace) -> int:
     return engine.main(warm=not args.no_warm)
 
 
-def _cmd_version(_args: argparse.Namespace) -> int:
-    import rlp_svc
+def _build_identity() -> dict:
+    """What version of RLP this is, and what it was built from.
 
-    print(f"rlp-svc {VERSION} (package {getattr(rlp_svc, '__version__', 'n/a')})")
-    return EXIT_OK
+    The single most useful datum in a bug report is the one nobody has: *which*
+    RLP. A release version alone does not answer it — the same version can be a
+    tag, a tag plus local commits, or a dirty working tree — so this reports the
+    checkout's own `git describe` alongside it, plus the harness build and the
+    engine's optional dependencies. `rlp version` printed only `rlp-svc 0.2.0`
+    before, which named the engine and not the tool.
+    """
+    import importlib.util
+    import platform
+    import subprocess
+
+    from . import paths
+
+    repo = Path(__file__).resolve().parents[2]
+
+    def git(*args: str) -> str:
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            return out.stdout.strip() if out.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    # `--always` so a shallow clone with no tags still answers with a sha, and
+    # `--dirty` so a modified checkout says so rather than claiming the tag.
+    describe = git("describe", "--tags", "--always", "--dirty") or None
+    commit = git("rev-parse", "HEAD") or None
+    harness = None
+    bundle = repo / "fork" / "pi" / "packages" / "coding-agent" / "dist" / "bundle" / "cli.js"
+    if bundle.is_file():
+        pkg = repo / "fork" / "pi" / "packages" / "coding-agent" / "package.json"
+        try:
+            harness = json.loads(pkg.read_text()).get("version")
+        except Exception:
+            harness = "built (version unreadable)"
+    return {
+        "rlp": VERSION,
+        "checkout": {"path": str(repo), "describe": describe, "commit": commit},
+        "harness": harness,
+        "engine_deps": {
+            name: importlib.util.find_spec(name) is not None
+            for name in ("laya", "rlm", "mcp", "httpx")
+        },
+        "agent_dir": str(paths.agent_dir()),
+        "python": platform.python_version(),
+        "platform": f"{platform.system().lower()}-{platform.machine()}",
+    }
+
+
+def _cmd_version(args: argparse.Namespace) -> int:
+    identity = _build_identity()
+    if getattr(args, "json", False):
+        return _emit({"ok": True, "result": identity}, True)
+    missing = [n for n, ok in identity["engine_deps"].items() if not ok]
+    lines = [
+        f"rlp {identity['rlp']}"
+        + (f"  ({identity['checkout']['describe']})" if identity["checkout"]["describe"] else ""),
+        f"  checkout  {identity['checkout']['path']}",
+        f"  harness   {identity['harness'] or 'not built — sh scripts/install.sh'}",
+        f"  engine    laya/rlm/mcp/httpx "
+        + ("all importable" if not missing else f"MISSING {', '.join(missing)} — sh scripts/install.sh"),
+        f"  agent dir {identity['agent_dir']}",
+        f"  host      python {identity['python']} on {identity['platform']}",
+    ]
+    return _emit({"ok": True, "result": identity}, False, "\n".join(lines))
 
 
 # --- parser -------------------------------------------------------------------
@@ -694,7 +759,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not pay the model load up front",
     )
-    sub.add_parser("version", help="print the version")
+    sp = sub.add_parser("version", help="RLP's version, and what this checkout was built from")
+    sp.add_argument("--json", action="store_true")
     return p
 
 

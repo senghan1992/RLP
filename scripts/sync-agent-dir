@@ -1,0 +1,102 @@
+#!/bin/sh
+# Put this checkout's extensions, skills and ladder into RLP's agent dir.
+#
+#   sh scripts/sync-agent-dir [<checkout root>]
+#
+# Extracted so `install.sh` and `rlp update` cannot drift. An update that moves
+# the engine forward while leaving yesterday's extensions in `~/.rlp/agent` is
+# exactly the half-applied state `rlp update` promises never to leave, and it is
+# invisible: the commands still load, they just belong to another version.
+#
+# Idempotent, and safe to run on a configured host: the ladder is *kept* if it
+# already exists (RLP_ORCH_FORCE=1 overwrites), because the ladder holds the
+# user's model choices and an update must never reset them.
+#
+# Env:
+#   RLP_CODING_AGENT_DIR / RPI_CODING_AGENT_DIR   agent dir (default ~/.rlp/agent)
+#   RLP_ORCH_FORCE=1                              overwrite an existing ladder
+#   RLP_NO_MIGRATE=1                              skip the ~/.pi credential copy
+#   RLP_QUIET=1                                   only report what changed
+set -eu
+
+ROOT=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+AGENT_DIR="${RLP_CODING_AGENT_DIR:-${RPI_CODING_AGENT_DIR:-$HOME/.rlp/agent}}"
+
+say() { [ -n "${RLP_QUIET:-}" ] || printf '[rlp] %s\n' "$*"; }
+note() { printf '[rlp] %s\n' "$*"; }
+
+[ -d "$ROOT/agent/rlp" ] || {
+  echo "[rlp] $ROOT does not look like an RLP checkout (no agent/rlp)" >&2
+  exit 1
+}
+
+mkdir -p "$AGENT_DIR"
+
+# Upgrade path for an install made before RLP had its own directory: copy the
+# credentials pi and RLP used to share, so an existing user is not asked to
+# reconnect every provider. Copy, never move — the harness keeps working, and
+# the user can delete the copies whenever they like.
+if [ -z "${RLP_NO_MIGRATE:-}" ] && [ ! -f "$AGENT_DIR/auth.json" ] && [ -f "$HOME/.pi/agent/auth.json" ]; then
+  note "migrating credentials from $HOME/.pi/agent (copy, not move)"
+  for f in auth.json models.json; do
+    if [ -f "$HOME/.pi/agent/$f" ]; then
+      cp "$HOME/.pi/agent/$f" "$AGENT_DIR/$f"
+      chmod 600 "$AGENT_DIR/$f" 2>/dev/null || true
+      note "  $f -> $AGENT_DIR/$f"
+    fi
+  done
+  note "  (RLP_NO_MIGRATE=1 skips this; /provider connects one from scratch)"
+fi
+
+# Extensions and skills are dropped-in files, not a fork patch, so they update
+# without a rebuild. RLP records exactly which ones it owns so `/commands` and
+# `rlp doctor` can label everything else optional rather than implying a
+# dependency — and so a file this version no longer ships can be *noticed*.
+mkdir -p "$AGENT_DIR/extensions" "$AGENT_DIR/skills"
+EXT_LIST=""
+for ext in "$ROOT"/agent/rlp/extensions/*.ts; do
+  [ -e "$ext" ] || continue
+  name=$(basename "$ext")
+  cp "$ext" "$AGENT_DIR/extensions/"
+  say "extension $name"
+  EXT_LIST="${EXT_LIST}${EXT_LIST:+, }\"$name\""
+done
+SKILL_LIST=""
+for skill in "$ROOT"/agent/rlp/skills/*/SKILL.md; do
+  [ -e "$skill" ] || continue
+  name=$(basename "$(dirname "$skill")")
+  mkdir -p "$AGENT_DIR/skills/$name"
+  cp "$skill" "$AGENT_DIR/skills/$name/SKILL.md"
+  say "skill $name"
+  SKILL_LIST="${SKILL_LIST}${SKILL_LIST:+, }\"$name\""
+done
+
+# Files a previous version owned and this one no longer ships. Reported, never
+# deleted: the user may have kept one on purpose, and an updater that removes
+# files without being asked is a worse problem than a stale one.
+if [ -f "$AGENT_DIR/rlp-location.json" ]; then
+  PREV=$(sed -n 's/.*"extensions"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' "$AGENT_DIR/rlp-location.json" |
+    tr -d '" ' | tr ',' ' ')
+  for old in $PREV; do
+    [ -n "$old" ] || continue
+    if [ ! -f "$ROOT/agent/rlp/extensions/$old" ] && [ -f "$AGENT_DIR/extensions/$old" ]; then
+      note "stale: $AGENT_DIR/extensions/$old is no longer shipped by RLP — delete it when you are ready"
+    fi
+  done
+fi
+
+printf '{\n  "root": "%s",\n  "agentDir": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
+  "$ROOT" "$AGENT_DIR" "$EXT_LIST" "$SKILL_LIST" > "$AGENT_DIR/rlp-location.json"
+
+# The ladder ships RLP's orchestration *policy* (gate, waves, dispatch cap,
+# cross-vendor review, RLM and planning budgets) and no model arms: which models
+# orchestrate depends on which providers you connected, and RLP will not guess.
+# A ladder with no arms is a documented state — `rlp doctor` names it and
+# `/setup` fills it from your real endpoints.
+if [ -f "$AGENT_DIR/orchestration.json" ] && [ -z "${RLP_ORCH_FORCE:-}" ]; then
+  say "kept your existing ladder at $AGENT_DIR/orchestration.json (RLP_ORCH_FORCE=1 to reset it)"
+else
+  cp "$ROOT/agent/rlp/orchestration.json" "$AGENT_DIR/orchestration.json"
+  note "installed the orchestration ladder to $AGENT_DIR/orchestration.json"
+  note "  policy only, no model arms yet — /setup fills them from your providers"
+fi

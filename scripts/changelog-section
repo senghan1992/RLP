@@ -1,0 +1,46 @@
+#!/bin/sh
+# Print one CHANGELOG section's body.
+#
+#   sh scripts/changelog-section 0.3.0      # the '## 0.3.0 — <date>' section
+#   sh scripts/changelog-section Unreleased
+#
+# One implementation, because two places need it — `scripts/release` writes it
+# into the annotated tag, and the release workflow writes it into the GitHub
+# release body — and two awk programs claiming to extract the same thing is how
+# a tag and a release page end up disagreeing about what shipped.
+#
+# Matches `## <name>` at the start of a line and stops at the next `## `, so a
+# heading of `## 0.3.0 — 2026-09-30` is found by `0.3.0`. Exits 1 with nothing
+# on stdout when there is no such section, so a caller can tell "empty" from
+# "absent".
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+CHANGELOG="${RLP_CHANGELOG:-$ROOT/CHANGELOG.md}"
+NAME="${1:-}"
+
+[ -n "$NAME" ] || { echo "usage: $0 <version|Unreleased>" >&2; exit 2; }
+[ -f "$CHANGELOG" ] || { echo "no $CHANGELOG" >&2; exit 2; }
+
+# Not a pipeline: a pipeline's status is the last command's, so `exit 1` from
+# the extractor would be discarded and "no such section" would look like
+# success with no output — the one distinction a caller needs.
+SECTION=$(
+  awk -v name="$NAME" '
+    # `index` rather than a regex so a version with dots is matched literally:
+    # "0.3.0" as a regex would also match "0x3y0".
+    /^## / {
+      if (found) exit
+      heading = substr($0, 4)
+      if (heading == name || index(heading, name " ") == 1) { found = 1; next }
+    }
+    found { print }
+    END { if (!found) exit 1 }
+  ' "$CHANGELOG"
+) || { echo "no '## $NAME' section in $CHANGELOG" >&2; exit 1; }
+
+# Trim leading and trailing blank lines, keeping the blanks between paragraphs.
+printf '%s\n' "$SECTION" | awk '
+  /^[[:space:]]*$/ { if (started) pending++; next }
+  { while (pending-- > 0) print ""; pending = 0; started = 1; print }
+'

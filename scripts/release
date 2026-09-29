@@ -1,0 +1,159 @@
+#!/bin/sh
+# Cut an RLP release: verify, bump the one version, close the changelog, tag.
+#
+#   sh scripts/release 0.3.0        verify, bump, commit, tag v0.3.0
+#   sh scripts/release --check      say what would happen; change nothing
+#   sh scripts/release --check 0.3.0
+#
+# It does NOT push. A tag is the thing users install by default
+# (`install.sh` resolves the newest `v*` tag), so pushing one is a publish, and
+# a publish is the user's call. The command to run is printed at the end.
+#
+# What it refuses, and why each one has bitten a release somewhere:
+#   * a dirty tree or a detached HEAD — a tag must name a state you can return to
+#   * a version that is not MAJOR.MINOR.PATCH, or not greater than the current
+#   * an empty `## Unreleased` section — a release with no notes is a release
+#     nobody can evaluate
+#   * a tag that already exists — re-tagging a published version silently
+#     changes what `install.sh` hands the next person
+#   * a failing offline suite or a syntax error in any shipped script
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+INIT="$ROOT/rlp-svc/rlp_svc/__init__.py"
+CHANGELOG="$ROOT/CHANGELOG.md"
+PY="$ROOT/rlp-svc/.venv/bin/python"
+
+CHECK=0
+NEW=""
+for arg in "$@"; do
+  case "$arg" in
+    --check|--dry-run) CHECK=1 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "release: unknown option $arg" >&2; exit 2 ;;
+    *) NEW="$arg" ;;
+  esac
+done
+
+say()  { printf '%s\n' "$*"; }
+step() { say ""; say "── $* ────────────────────────────────────────"; }
+die()  { say ""; say "release refused: $*" >&2; exit 1; }
+
+CURRENT=$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' "$INIT")
+[ -n "$CURRENT" ] || die "could not read __version__ from $INIT"
+
+if [ -z "$NEW" ]; then
+  say "current version: $CURRENT"
+  say ""
+  say "usage: sh scripts/release <new-version>      e.g. sh scripts/release 0.3.0"
+  exit 2
+fi
+
+# --- 1. shape -------------------------------------------------------------
+step "1/5  shape"
+case "$NEW" in
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *) die "'$NEW' is not MAJOR.MINOR.PATCH" ;;
+esac
+printf '%s' "$NEW" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "'$NEW' is not MAJOR.MINOR.PATCH"
+
+# Numeric, field by field: 0.10.0 is newer than 0.9.0 and a text compare says
+# the opposite. This is the one comparison a release tool must not get wrong.
+newer=$(printf '%s\n%s\n' "$CURRENT" "$NEW" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+[ "$NEW" = "$newer" ] && [ "$NEW" != "$CURRENT" ] || die "$NEW is not greater than the current $CURRENT"
+say "  $CURRENT -> $NEW"
+
+if git -C "$ROOT" rev-parse -q --verify "refs/tags/v$NEW" >/dev/null 2>&1; then
+  die "tag v$NEW already exists — bump to the next patch instead of re-tagging a published version"
+fi
+say "  tag v$NEW is free"
+
+# --- 2. repository state --------------------------------------------------
+step "2/5  repository"
+BRANCH=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
+[ "$BRANCH" != "HEAD" ] || die "detached HEAD — check out the release branch first"
+say "  branch      $BRANCH"
+if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+  git -C "$ROOT" status --short | head -10 | sed 's/^/    /'
+  die "commit or stash these first — a tag must name a state you can return to"
+fi
+say "  tree        clean"
+
+# --- 3. changelog ---------------------------------------------------------
+step "3/5  changelog"
+[ -f "$CHANGELOG" ] || die "no $CHANGELOG"
+grep -q '^## Unreleased' "$CHANGELOG" || die "$CHANGELOG has no '## Unreleased' section to close"
+# The section body: everything between `## Unreleased` and the next `## `.
+BODY=$(awk '/^## Unreleased/{f=1;next} f&&/^## /{exit} f' "$CHANGELOG" | grep -v '^[[:space:]]*$' || true)
+[ -n "$BODY" ] || die "the '## Unreleased' section is empty — a release with no notes cannot be evaluated"
+say "  $(printf '%s\n' "$BODY" | grep -c '^- \|^  - ' || true) note line(s) to publish"
+
+# --- 4. verify ------------------------------------------------------------
+step "4/5  verify"
+for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh scripts/selftest.sh \
+         scripts/rlp-update scripts/sync-agent-dir scripts/release \
+         scripts/changelog-section; do
+  sh -n "$ROOT/$f" || die "syntax error in $f"
+done
+say "  shell       every shipped script parses"
+for f in scripts/check-harness.mjs scripts/check-provider.mjs; do
+  node --check "$ROOT/$f" >/dev/null || die "syntax error in $f"
+done
+say "  node        the live-session checks parse"
+if [ -x "$PY" ]; then
+  (cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc.tests >/dev/null) || die "the offline suite fails — fix it before tagging"
+  say "  engine      offline suite passes"
+else
+  die "no venv at $PY — run sh scripts/install.sh, so the suite actually runs before a tag"
+fi
+
+# --- 5. bump, close, tag --------------------------------------------------
+step "5/5  bump and tag"
+TODAY=$(date -u +%Y-%m-%d)
+if [ "$CHECK" = 1 ]; then
+  say "  --check: would set __version__ = \"$NEW\" in $INIT"
+  say "  --check: would rename '## Unreleased' to '## $NEW — $TODAY' and open a fresh Unreleased"
+  say "  --check: would commit and tag v$NEW"
+  say ""
+  say "  nothing was changed. Re-run without --check to release."
+  exit 0
+fi
+
+# One sed on one line: the version has exactly one declaration, and pyproject
+# reads it from here, so there is nothing else to keep in step.
+tmp="$INIT.tmp.$$"
+sed "s/^__version__ = \".*\"/__version__ = \"$NEW\"/" "$INIT" > "$tmp"
+grep -q "^__version__ = \"$NEW\"$" "$tmp" || { rm -f "$tmp"; die "the version bump did not take — check $INIT by hand"; }
+mv "$tmp" "$INIT"
+say "  version     $INIT -> $NEW"
+
+ctmp="$CHANGELOG.tmp.$$"
+awk -v v="$NEW" -v d="$TODAY" '
+  /^## Unreleased/ && !done {
+    print "## Unreleased"
+    print ""
+    print "## " v " — " d
+    done = 1
+    next
+  }
+  { print }
+' "$CHANGELOG" > "$ctmp"
+mv "$ctmp" "$CHANGELOG"
+say "  changelog   '## Unreleased' closed as '## $NEW — $TODAY'"
+
+git -C "$ROOT" add "$INIT" "$CHANGELOG"
+git -C "$ROOT" commit -q -m "Release $NEW"
+# The tag message is the release notes, extracted by the same script the release
+# workflow uses for the GitHub release body — so the tag and the release page
+# cannot describe different things.
+git -C "$ROOT" tag -a "v$NEW" -m "RLP $NEW
+
+$(sh "$ROOT/scripts/changelog-section" "$NEW")"
+say "  tagged      v$NEW"
+
+step "next"
+say "  review:   git show v$NEW"
+say "  publish:  git push origin $BRANCH && git push origin v$NEW"
+say ""
+say "  Pushing the tag is the publish: install.sh resolves the newest v* tag, so"
+say "  the next person who runs the one-liner gets v$NEW. Nothing is pushed for you."

@@ -1,6 +1,9 @@
 [project]
 name = "rlp-svc"
-version = "0.2.0"
+# The version lives in exactly one place: `rlp_svc.__version__`. It used to be
+# restated here and in `cli.py`, guarded by a test that could only report the
+# drift after it happened — three declarations of one fact is two too many.
+dynamic = ["version"]
 description = "RLP decision engine: laya triage gate, RLM decomposition, laya routing, headless plan, doctor. MCP server + CLI + library."
 requires-python = ">=3.10"
 dependencies = [
@@ -17,6 +20,9 @@ rlp-svc = "rlp_svc.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "rlp_svc.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["rlp_svc*"]

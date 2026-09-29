@@ -29,9 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Every shipped script, not a hand-maintained subset: the list drifted
+      # once already (it still named scripts/rlp-launch after it was deleted),
+      # so it is derived from what is actually there.
       - name: POSIX sh syntax check
         run: |
-          for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh scripts/selftest.sh scripts/rlp-update; do
+          for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh \
+                   scripts/selftest.sh scripts/rlp-update scripts/sync-agent-dir \
+                   scripts/release scripts/changelog-section; do
+            [ -f "$f" ] || { echo "::error::$f is listed here but missing"; exit 1; }
             sh -n "$f" && echo "ok $f"
           done
 
@@ -50,3 +56,34 @@ jobs:
         run: |
           node --check scripts/check-harness.mjs
           node --check scripts/check-provider.mjs
+
+  release-readiness:
+    name: release readiness
+    runs-on: ubuntu-latest
+    # Checked on every push, not only on a tag: the point of these two rules is
+    # that `scripts/release` can run at any time without a surprise. Finding out
+    # at tag time that the changelog is empty means finding out after the tag.
+    steps:
+      - uses: actions/checkout@v4
+      - name: the version has exactly one declaration, and it is well-formed
+        run: |
+          v=$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' rlp-svc/rlp_svc/__init__.py)
+          echo "rlp_svc.__version__ = $v"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "::error::__version__ is not MAJOR.MINOR.PATCH"; exit 1; }
+          if grep -Eq '^version[[:space:]]*=[[:space:]]*"' rlp-svc/pyproject.toml; then
+            echo "::error::pyproject.toml restates the version; it must stay dynamic."
+            exit 1
+          fi
+      - name: there are notes to release
+        run: |
+          v=$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' rlp-svc/rlp_svc/__init__.py)
+          if sh scripts/changelog-section "$v" >/dev/null 2>&1; then
+            echo "CHANGELOG has a section for the current version $v (already released)"
+          elif sh scripts/changelog-section Unreleased | grep -q '[^[:space:]]'; then
+            echo "CHANGELOG has a non-empty Unreleased section — ready to cut a release"
+          else
+            echo "::error::CHANGELOG.md has neither a '## $v' section nor a non-empty '## Unreleased' one."
+            echo "::error::scripts/release refuses to tag without notes, so this would block a release."
+            exit 1
+          fi

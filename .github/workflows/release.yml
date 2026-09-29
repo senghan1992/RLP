@@ -1,0 +1,114 @@
+name: Release
+
+# `install.sh` installs the newest `v*` tag by default, so pushing a tag *is*
+# the publish: from that moment the one-line installer hands this commit to
+# everyone. This workflow therefore verifies the tag before it announces it,
+# and refuses to publish a tag whose version, changelog or tests do not agree.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: verify the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: the tag must match the version in the code
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' rlp-svc/rlp_svc/__init__.py)
+          echo "tag=$tag  code=$code"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::tag v$tag does not match rlp_svc.__version__ ($code)."
+            echo "::error::Tags are cut by scripts/release, which bumps both together."
+            exit 1
+          fi
+
+      - name: the release must have notes
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if ! sh scripts/changelog-section "$tag" > /tmp/notes.md; then
+            echo "::error::CHANGELOG.md has no '## $tag' section — nothing to publish as notes."
+            exit 1
+          fi
+          if [ ! -s /tmp/notes.md ]; then
+            echo "::error::the '## $tag' section is empty."
+            exit 1
+          fi
+          echo "--- notes ---"; head -40 /tmp/notes.md
+
+      - name: shell and node syntax
+        run: |
+          for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh \
+                   scripts/selftest.sh scripts/rlp-update scripts/sync-agent-dir \
+                   scripts/release scripts/changelog-section; do
+            sh -n "$f" && echo "ok $f"
+          done
+          node --check scripts/check-harness.mjs
+          node --check scripts/check-provider.mjs
+
+      - name: the offline suite
+        working-directory: rlp-svc
+        env:
+          # The repo's own ladder, so the run is hermetic rather than a test of
+          # whatever the runner happens to have installed.
+          RLP_ORCHESTRATION: ${{ github.workspace }}/agent/rlp/orchestration.json
+        run: |
+          pip install httpx
+          python -m rlp_svc.tests
+
+      - name: keep the notes for the publish step
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: /tmp/notes.md
+          retention-days: 1
+
+  publish:
+    name: publish the release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: notes
+      - name: create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          {
+            cat notes/notes.md
+            echo
+            echo "---"
+            echo
+            echo '## Install'
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh"
+            echo '```'
+            echo
+            echo "That installs this release: the bootstrap resolves the newest \`v*\` tag."
+            echo "To pin it explicitly, or to track the development branch:"
+            echo
+            echo '```bash'
+            echo "RLP_REF=${tag} curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh"
+            echo "RLP_REF=main  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.sh | sh"
+            echo '```'
+            echo
+            echo "Already installed? \`rlp update\` moves RLP to this release and the harness fork to the newest upstream."
+          } > body.md
+          gh release create "$tag" --title "RLP ${tag#v}" --notes-file body.md --verify-tag

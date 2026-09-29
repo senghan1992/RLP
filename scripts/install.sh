@@ -71,6 +71,23 @@ if ! grep -q "RPI_DEFAULT_MODEL" "$FORK/packages/coding-agent/src/core/settings-
     echo "      Or resolve the conflicts in $FORK and re-run." >&2
     exit 1
   }
+  # Commit it. `git apply` leaves the patch in the working tree, which left every
+  # installed host with a permanently dirty fork — and `rlp update` refuses to
+  # start from a dirty tree, so the update path was unreachable on every machine
+  # but a developer's. As one commit on the `rlp` branch, the tree is clean, the
+  # upstream merge `rlp update` performs is a real merge, and a rollback is one
+  # `git reset --hard` away. The identity is fixed so the commit says what it is
+  # rather than inheriting whoever happened to run the installer.
+  git -C "$FORK" add -A
+  git -C "$FORK" -c user.name="RLP installer" -c user.email="rlp@localhost" \
+    commit -q -m "RLP fork patch
+
+Applied by scripts/install.sh from scripts/rlp-fork.patch.
+Regenerate the patch with:
+  git -C fork/pi diff \$(git -C fork/pi merge-base origin/main HEAD) HEAD" || {
+    echo "[rlp] could not commit the fork patch — 'rlp update' will refuse to run." >&2
+    exit 1
+  }
   NEEDS_BUILD=1
 fi
 
@@ -135,68 +152,10 @@ snapshot_download('convaiinnovations/laya', allow_patterns=['rl_agent_config.jso
 " 2>/dev/null || echo "[rlp] laya checkpoint download skipped (offline, or already cached)"
 
 # --- 3. Harness extensions + skills + ladder, in RLP's own agent dir --------
-# The /rlp* commands are dropped-in pi extensions, not a fork patch, so they
-# install and update without a rebuild. Everything goes to RLP's own agent dir
-# (`~/.rlp/agent`), never pi's `~/.pi`: RLP is its own tool, and the fork's
-# `piConfig.configDir` points here too, so the two agree by construction.
-# RLP records exactly which files it owns so /commands and `rlp doctor` can
-# label the rest optional instead of implying a dependency.
-RLP_AGENT_DIR="${RLP_CODING_AGENT_DIR:-${RPI_CODING_AGENT_DIR:-$HOME/.rlp/agent}}"
-mkdir -p "$RLP_AGENT_DIR"
-
-# Upgrade path for an install made before RLP had its own directory: copy the
-# credentials pi and RLP used to share, so an existing user is not asked to
-# reconnect every provider. Copy, never move — the harness keeps working, and
-# the user can delete the copies whenever they like. RLP_NO_MIGRATE=1 skips it.
-if [ -z "${RLP_NO_MIGRATE:-}" ] && [ ! -f "$RLP_AGENT_DIR/auth.json" ] && [ -f "$HOME/.pi/agent/auth.json" ]; then
-  echo "[rlp] migrating credentials from $HOME/.pi/agent (copy, not move)"
-  for f in auth.json models.json; do
-    if [ -f "$HOME/.pi/agent/$f" ]; then
-      cp "$HOME/.pi/agent/$f" "$RLP_AGENT_DIR/$f"
-      chmod 600 "$RLP_AGENT_DIR/$f" 2>/dev/null || true
-      echo "[rlp]   $f -> $RLP_AGENT_DIR/$f"
-    fi
-  done
-  echo "[rlp]   (RLP_NO_MIGRATE=1 skips this; /provider connects one from scratch)"
-fi
-
-mkdir -p "$RLP_AGENT_DIR/extensions"
-RLP_EXT_LIST=""
-for ext in "$ROOT"/agent/rlp/extensions/*.ts; do
-  [ -e "$ext" ] || continue
-  name=$(basename "$ext")
-  cp "$ext" "$RLP_AGENT_DIR/extensions/"
-  echo "[rlp] installed extension $name"
-  RLP_EXT_LIST="${RLP_EXT_LIST}${RLP_EXT_LIST:+, }\"$name\""
-done
-# Skills are the harness's `/skill:<name>` commands. They are part of the tool's
-# surface — the local plane never had them installed, so /commands advertised
-# whatever happened to be in the shared skills dir and RLP's own were missing.
-RLP_SKILL_LIST=""
-mkdir -p "$RLP_AGENT_DIR/skills"
-for skill in "$ROOT"/agent/rlp/skills/*/SKILL.md; do
-  [ -e "$skill" ] || continue
-  name=$(basename "$(dirname "$skill")")
-  mkdir -p "$RLP_AGENT_DIR/skills/$name"
-  cp "$skill" "$RLP_AGENT_DIR/skills/$name/SKILL.md"
-  echo "[rlp] installed skill $name"
-  RLP_SKILL_LIST="${RLP_SKILL_LIST}${RLP_SKILL_LIST:+, }\"$name\""
-done
-printf '{\n  "root": "%s",\n  "agentDir": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
-  "$ROOT" "$RLP_AGENT_DIR" "$RLP_EXT_LIST" "$RLP_SKILL_LIST" > "$RLP_AGENT_DIR/rlp-location.json"
-
-# The ladder ships with RLP's orchestration *policy* (gate, waves, dispatch cap,
-# cross-vendor review, RLM and planning budgets) and no model arms: which models
-# orchestrate depends on which providers you connect, and RLP will not guess. A
-# ladder with no arms is a documented state — `rlp doctor` names it and `/setup`
-# fills it from your real endpoints.
-if [ -f "$RLP_AGENT_DIR/orchestration.json" ] && [ -z "${RLP_ORCH_FORCE:-}" ]; then
-  echo "[rlp] kept existing $RLP_AGENT_DIR/orchestration.json (RLP_ORCH_FORCE=1 to overwrite)"
-else
-  cp "$ROOT/agent/rlp/orchestration.json" "$RLP_AGENT_DIR/orchestration.json"
-  echo "[rlp] installed the orchestration ladder to $RLP_AGENT_DIR/orchestration.json"
-  echo "[rlp]   policy only, no model arms yet — /setup fills them from your providers"
-fi
+# One implementation, shared with `rlp update`: an update that moves the engine
+# forward while leaving yesterday's extensions in place is a half-applied state
+# that nothing would report, so both paths run the same script.
+sh "$ROOT/scripts/sync-agent-dir" "$ROOT"
 
 # --- 4. Verify, do not assume ------------------------------------------------
 # A fresh install has no provider and no model arms, so the doctor *will* report
