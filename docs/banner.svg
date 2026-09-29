@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="RLP — Recursive Laya Pi. A coding agent that knows when not to orchestrate.">
+  <title>RLP — Recursive Laya Pi</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0e1c"/>
+      <stop offset="0.5" stop-color="#121a33"/>
+      <stop offset="1" stop-color="#1b1338"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="0.5" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.12" cy="0.08" r="0.9">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.95" cy="1.0" r="0.8">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="360" fill="url(#bg)"/>
+  <rect width="1280" height="360" fill="url(#grid)"/>
+  <rect width="1280" height="360" fill="url(#glow)"/>
+  <rect width="1280" height="360" fill="url(#glow2)"/>
+
+  <!-- orchestration DAG motif -->
+  <g stroke="url(#accent)" stroke-width="2.5" stroke-opacity="0.85" fill="none">
+    <path d="M980 96 L1110 150"/>
+    <path d="M980 96 L1050 236"/>
+    <path d="M980 96 L1160 262"/>
+    <path d="M1110 150 L1050 236"/>
+    <path d="M1110 150 L1160 262"/>
+  </g>
+  <g fill="#0b1020" stroke="url(#accent)" stroke-width="2.5">
+    <circle cx="980" cy="96" r="14"/>
+    <circle cx="1110" cy="150" r="12"/>
+    <circle cx="1050" cy="236" r="12"/>
+    <circle cx="1160" cy="262" r="12"/>
+  </g>
+  <g fill="url(#accent)">
+    <circle cx="980" cy="96" r="5"/>
+    <circle cx="1110" cy="150" r="4"/>
+    <circle cx="1050" cy="236" r="4"/>
+    <circle cx="1160" cy="262" r="4"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="84" y="168" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="112" font-weight="700" letter-spacing="2" fill="url(#accent)">RLP</text>
+  <rect x="88" y="196" width="132" height="5" rx="2.5" fill="url(#accent)"/>
+
+  <text x="88" y="248" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+        font-size="30" font-weight="600" fill="#e7ecff">Recursive Laya Pi</text>
+  <text x="90" y="286" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+        font-size="21" fill="#9aa7c7">A coding agent that knows when <tspan font-style="italic">not</tspan> to orchestrate.</text>
+
+  <!-- chips -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">
+    <g>
+      <rect x="88" y="308" width="118" height="34" rx="17" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="147" y="330" text-anchor="middle" fill="#c3cde8">triage</text>
+    </g>
+    <g>
+      <rect x="218" y="308" width="154" height="34" rx="17" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="295" y="330" text-anchor="middle" fill="#c3cde8">decompose</text>
+    </g>
+    <g>
+      <rect x="384" y="308" width="136" height="34" rx="17" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="452" y="330" text-anchor="middle" fill="#c3cde8">dispatch</text>
+    </g>
+    <g>
+      <rect x="532" y="308" width="118" height="34" rx="17" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="591" y="330" text-anchor="middle" fill="#c3cde8">verify</text>
+    </g>
+  </g>
+</svg>

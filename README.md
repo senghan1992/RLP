@@ -1,6 +1,16 @@
-# RLP — Recursive Laya Pi
+<p align="center">
+  <img src="docs/banner.svg" alt="RLP — Recursive Laya Pi: a coding agent that knows when not to orchestrate" width="100%">
+</p>
 
-**A coding agent that knows when *not* to orchestrate.**
+<p align="center">
+  <a href="https://github.com/senghan1992/RLP/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/senghan1992/RLP/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4f46e5.svg"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776ab.svg">
+  <img alt="harness: pi" src="https://img.shields.io/badge/harness-pi-0f172a.svg">
+  <img alt="orchestration: local" src="https://img.shields.io/badge/orchestration-local-22d3ee.svg">
+</p>
+
+<h3 align="center">A coding agent that knows when <em>not</em> to orchestrate.</h3>
 
 Most "multi-agent" tools fan out on every request: a decomposer, a DAG table, a
 worktree per node — even to fix a typo. RLP starts by deciding whether a request
@@ -27,18 +37,42 @@ Local orchestration needs no server, no daemon, no runner: dispatch is a
 
 ---
 
-## Quick start
+## Contents
+
+- [Install](#install) · [How it works](#how-it-works) · [The model ladder](#the-model-ladder--configuration-not-prose)
+- [Planning quality, verification, memory](#planning-quality-verification-and-memory)
+- [Commands](#commands) · [Safety](#safety-and-guardrails) · [Troubleshooting](#troubleshooting)
+- [Environment](#environment-knobs) · [Project layout](#project-layout) · [Development](#development)
+
+---
+
+## Install
+
+One line — fetches the installer, RLP, the harness, and the engine:
 
 ```bash
-git clone <this-repo> RLP
-cd RLP
-sh scripts/install.sh          # builds the harness, the engine, downloads laya
+curl -fsSL https://raw.githubusercontent.com/senghan1992/RLP/main/install.sh | sh
+```
 
+Then, in any project:
+
+```bash
 cd ~/my-project
 rlp                            # interactive agent — decides per request
 rlp -p "add a --wc flag, test it, document it, and review the diff"
 rlp plan "same request"        # plan only: gate -> DAG -> routes -> waves
 ```
+
+Prefer a checkout? The bootstrap delegates to the same installer:
+
+```bash
+git clone https://github.com/senghan1992/RLP.git
+cd RLP && sh scripts/install.sh
+```
+
+The installer fetches RLP into `${RLP_DIR:-~/.local/share/rlp}` first; override
+with `RLP_DIR`, `RLP_REF` (branch/tag), or `RLP_REPO` — e.g.
+`RLP_REF=v0.1.0 curl -fsSL … | sh`.
 
 `rlp` is a superset of the harness: for solo work with no orchestration at all,
 the same binary is available as `rpi` (RLP execs it internally, so you normally
@@ -278,6 +312,7 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 
 ```
 RLP/
+  install.sh          # the curl|sh bootstrap (also runs from a checkout)
   fork/pi/            # the pi fork — CLONED + BUILT by install.sh, never committed
   rlp-svc/            # the decision engine: MCP server + CLI + library
     rlp_svc/          #   triage, decompose (RLM + critique), route, verify,
