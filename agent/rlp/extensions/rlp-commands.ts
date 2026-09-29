@@ -181,7 +181,7 @@ const orchestrate: Handler = async (args, ctx) => {
 	report(
 		ctx,
 		[
-			"Ⓡ rlp run",
+			"◈ rlp run",
 			"",
 			"Orchestration needs a real session plane, so this command is composed rather than",
 			"executed here. It is now in the editor — press enter to run it in this directory.",
@@ -224,7 +224,7 @@ const status: Handler = async (args, ctx) => {
 		run(python, ["ladder", "--json"], ctx.cwd),
 	]);
 
-	const lines = [`Ⓡ RLP · ${health.code === 0 ? "runnable" : "NOT runnable — /rlp-doctor for fixes"}`];
+	const lines = [`◈ RLP · ${health.code === 0 ? "runnable" : "NOT runnable — /rlp-doctor for fixes"}`];
 	try {
 		const config = JSON.parse(ladderJson.stdout)?.result;
 		if (config) {

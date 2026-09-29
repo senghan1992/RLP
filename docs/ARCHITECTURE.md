@@ -43,7 +43,7 @@ flowchart TB
     end
 
     subgraph rpi["rpi = pi 포크 (하네스)"]
-      FORK["pi 0.87.0 + 9패치<br/>Ⓡ RPI 헤더·/orchestration·<br/>RPI_DEFAULT_MODEL·omnigent skill discovery"]
+      FORK["pi 0.87.0 + 9패치<br/>◈ RPI 헤더·/orchestration·<br/>RPI_DEFAULT_MODEL·omnigent skill discovery"]
     end
 
     subgraph ripsvc["rlp-svc — 결정 엔진 (MCP + CLI + 라이브러리)"]

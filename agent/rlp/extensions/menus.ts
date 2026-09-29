@@ -168,7 +168,7 @@ async function applyConfig(ctx: ExtensionCommandContext, ops: unknown[], dryRun 
 	if (!python) {
 		return {
 			ok: false,
-			lines: ["Ⓡ the decision engine is not installed (no rlp-svc/.venv/bin/python)", "  sh <RLP>/scripts/install.sh"],
+			lines: ["◈ the decision engine is not installed (no rlp-svc/.venv/bin/python)", "  sh <RLP>/scripts/install.sh"],
 		};
 	}
 	const args = ["-m", "rlp_svc", "config", JSON.stringify(ops), "--json"];
@@ -181,20 +181,20 @@ async function applyConfig(ctx: ExtensionCommandContext, ops: unknown[], dryRun 
 			(_error, out, serr) => settle({ stdout: String(out ?? ""), stderr: String(serr ?? "") }),
 		);
 	});
-	if (!stdout.trim()) return { ok: false, lines: [`Ⓡ ladder edit failed: ${stderr.trim().slice(-300) || "no output"}`] };
+	if (!stdout.trim()) return { ok: false, lines: [`◈ ladder edit failed: ${stderr.trim().slice(-300) || "no output"}`] };
 	try {
 		const payload = JSON.parse(stdout.slice(stdout.indexOf("{"))) as {
 			ok?: boolean;
 			error?: string;
 			result?: { path: string; backup?: string; dry_run?: boolean; ladder: Json };
 		};
-		if (!payload.ok || !payload.result) return { ok: false, lines: [`Ⓡ ladder edit rejected: ${payload.error ?? "unknown error"}`] };
+		if (!payload.ok || !payload.result) return { ok: false, lines: [`◈ ladder edit rejected: ${payload.error ?? "unknown error"}`] };
 		const r = payload.result;
 		const workers = (r.ladder.workers as Json[]) ?? [];
 		return {
 			ok: true,
 			lines: [
-				`Ⓡ ladder updated${r.dry_run ? " (dry run)" : ""} — ${r.path}`,
+				`◈ ladder updated${r.dry_run ? " (dry run)" : ""} — ${r.path}`,
 				r.backup ? `  backup  ${r.backup}` : "",
 				`  brain   ${r.ladder.brain}`,
 				...workers.map((w) => {
@@ -204,7 +204,7 @@ async function applyConfig(ctx: ExtensionCommandContext, ops: unknown[], dryRun 
 			].filter(Boolean),
 		};
 	} catch {
-		return { ok: false, lines: [`Ⓡ unparseable config output: ${stdout.slice(0, 200)}`] };
+		return { ok: false, lines: [`◈ unparseable config output: ${stdout.slice(0, 200)}`] };
 	}
 }
 
@@ -215,10 +215,10 @@ function ladderRaw(): Json | undefined {
 /** Render the ladder as the editor sees it. */
 function renderLadder(): string {
 	const doc = ladderRaw();
-	if (!doc) return [`Ⓡ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one"].join("\n");
+	if (!doc) return [`◈ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one"].join("\n");
 	const routing = (doc.routing as Json) ?? {};
 	const lines = [
-		`Ⓡ RLP ladder · ${ladderPath()}`,
+		`◈ RLP ladder · ${ladderPath()}`,
 		`  brain  ${doc.brain}`,
 		`  gate   ${routing.gate ?? "hybrid"} · escalateBelow=${routing.escalateBelow ?? "-"} · cap=${routing.maxDispatchesPerTurn ?? "-"} · timeout=${routing.workerTimeoutMs ?? "-"}ms`,
 		`  review crossVendor=${((doc.review as Json) ?? {}).crossVendor ?? false}`,
@@ -373,7 +373,7 @@ async function editLadderInteractively(ctx: ExtensionCommandContext, setModel: S
 	if (action.startsWith("Set the model per role")) {
 		const view = await fetchLadderView(ctx);
 		if (!view) {
-			ctx.ui.notify(`Ⓡ no orchestration ladder at ${ladderPath()}`, "warning");
+			ctx.ui.notify(`◈ no orchestration ladder at ${ladderPath()}`, "warning");
 			return;
 		}
 		return editRolesInteractively(ctx, view);
@@ -389,7 +389,7 @@ async function editLadderInteractively(ctx: ExtensionCommandContext, setModel: S
 		try {
 			const [provider, id] = [ref.slice(0, ref.indexOf("/")), ref.slice(ref.indexOf("/") + 1)];
 			const model = ctx.modelRegistry.find(provider, id);
-			if (model && (await setModel(model as never))) ctx.ui.notify(`Ⓡ this session now runs on ${ref}`, "info");
+			if (model && (await setModel(model as never))) ctx.ui.notify(`◈ this session now runs on ${ref}`, "info");
 		} catch {
 			/* the ladder is edited either way */
 		}
@@ -494,7 +494,7 @@ async function fetchLadderView(ctx: ExtensionCommandContext): Promise<LadderView
 }
 
 function renderRoles(view: LadderView): string {
-	const lines = [`Ⓡ RLP roles · ${view.path}`, ""];
+	const lines = [`◈ RLP roles · ${view.path}`, ""];
 	lines.push("  model chain: [chosen] > fallback > …  (first entry a dispatchable worker can serve wins)");
 	lines.push("");
 	for (const role of view.known_roles) {
@@ -568,7 +568,7 @@ async function multiSelectIndices(ctx: ExtensionCommandContext, title: string, o
 async function pickProviderModels(ctx: ExtensionCommandContext): Promise<string[] | undefined> {
 	const rows = modelRows(ctx).filter((r) => r.authenticated);
 	if (rows.length === 0) {
-		ctx.ui.notify("Ⓡ no authenticated models to choose from — /provider or /login first", "warning");
+		ctx.ui.notify("◈ no authenticated models to choose from — /provider or /login first", "warning");
 		return undefined;
 	}
 	const providers = [...new Set(rows.map((r) => r.provider))].sort();
@@ -643,7 +643,7 @@ async function editRolesInteractively(ctx: ExtensionCommandContext, view: Ladder
 	}
 	const ops = await bindRoleChainOps(ctx, view, role, refs);
 	if (typeof ops === "string") {
-		if (ops !== "cancelled") ctx.ui.notify(`Ⓡ ${ops}`, "warning");
+		if (ops !== "cancelled") ctx.ui.notify(`◈ ${ops}`, "warning");
 		return;
 	}
 	const reply = await applyConfig(ctx, ops);
@@ -716,7 +716,7 @@ function renderModels(ctx: ExtensionCommandContext, filter: string, showAll: boo
 	const hidden = all.length - all.filter((r) => r.authenticated).length;
 	if (rows.length === 0) {
 		return [
-			"Ⓡ models",
+			"◈ models",
 			"",
 			filter ? `  no model matches "${filter}".` : "  no authenticated models are visible.",
 			"  /provider lists configured endpoints · /login adds a credential",
@@ -729,7 +729,7 @@ function renderModels(ctx: ExtensionCommandContext, filter: string, showAll: boo
 	const providers = [...new Set(rows.map((r) => r.provider))];
 	const authed = providers.filter((p) => rows.some((r) => r.provider === p && r.authenticated));
 	const lines = [
-		`Ⓡ models · ${rows.length}${filter ? ` matching "${filter}"` : ""} of ${all.length} · ${authed.length}/${providers.length} providers authenticated`,
+		`◈ models · ${rows.length}${filter ? ` matching "${filter}"` : ""} of ${all.length} · ${authed.length}/${providers.length} providers authenticated`,
 		"  ● this session   ★ your default   ⚑ RLP ladder arm   ○ no credentials",
 		"  * the ladder marks that worker unavailable on this host",
 		"",
@@ -815,14 +815,14 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 	if (action === "Use for this session") {
 		const model = ctx.modelRegistry.find(target.provider, target.id);
 		if (!model) {
-			ctx.ui.notify(`Ⓡ ${target.provider}/${target.id} is not in the runtime catalogue.`, "warning");
+			ctx.ui.notify(`◈ ${target.provider}/${target.id} is not in the runtime catalogue.`, "warning");
 			return;
 		}
 		const ok = await setModel(model);
 		ctx.ui.notify(
 			ok
-				? `Ⓡ session model is now ${target.provider}/${target.id}`
-				: `Ⓡ could not switch: ${target.provider} has no usable credential — /login ${target.provider}`,
+				? `◈ session model is now ${target.provider}/${target.id}`
+				: `◈ could not switch: ${target.provider} has no usable credential — /login ${target.provider}`,
 			ok ? "info" : "warning",
 		);
 		return;
@@ -833,7 +833,7 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 		const workers = ((doc?.workers as Json[]) ?? []).map((w) => String(w.id));
 		if (workers.length === 0) {
 			ctx.ui.notify(
-				[`Ⓡ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one, or /rlp-config to inspect"].join(
+				[`◈ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one, or /rlp-config to inspect"].join(
 					"\n",
 				),
 				"warning",
@@ -861,7 +861,7 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 		ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
 		if (reply.ok) {
 			const model = ctx.modelRegistry.find(target.provider, target.id);
-			if (model && (await setModel(model as never))) ctx.ui.notify(`Ⓡ this session now runs on ${target.provider}/${target.id}`, "info");
+			if (model && (await setModel(model as never))) ctx.ui.notify(`◈ this session now runs on ${target.provider}/${target.id}`, "info");
 		}
 		return;
 	}
@@ -869,7 +869,7 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 	if (action === "Bind as the model for an RLP role") {
 		const view = await fetchLadderView(ctx);
 		if (!view) {
-			ctx.ui.notify(`Ⓡ no orchestration ladder at ${ladderPath()}`, "warning");
+			ctx.ui.notify(`◈ no orchestration ladder at ${ladderPath()}`, "warning");
 			return;
 		}
 		const role = await ctx.ui.select("Bind this model to which RLP role?", view.known_roles);
@@ -890,7 +890,7 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 		}
 		const ops = await bindRoleChainOps(ctx, view, role, refs);
 		if (typeof ops === "string") {
-			if (ops !== "cancelled") ctx.ui.notify(`Ⓡ ${ops}`, "warning");
+			if (ops !== "cancelled") ctx.ui.notify(`◈ ${ops}`, "warning");
 			return;
 		}
 		const reply = await applyConfig(ctx, ops);
@@ -904,7 +904,7 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 	const backup = writeJson(SETTINGS_FILE, settings);
 	ctx.ui.notify(
 		[
-			`Ⓡ default is now ${target.provider}/${target.id}`,
+			`◈ default is now ${target.provider}/${target.id}`,
 			"",
 			"  Applies to new sessions. Managed RLP workers keep using the ladder arms.",
 			backup ? `  Backup: ${backup}` : "",
@@ -921,14 +921,14 @@ function renderProviders(): string {
 	const ids = Object.keys(providers);
 	if (ids.length === 0) {
 		return [
-			"Ⓡ providers",
+			"◈ providers",
 			"",
 			`  no endpoints configured (${MODELS_FILE})`,
 			"",
 			"  /provider add <id> <baseUrl> <modelId> [display name]",
 		].join("\n");
 	}
-	const lines = [`Ⓡ providers · ${ids.length} in ${MODELS_FILE}`, ""];
+	const lines = [`◈ providers · ${ids.length} in ${MODELS_FILE}`, ""];
 	for (const id of ids) {
 		const p = providers[id];
 		const count = Array.isArray(p.models) ? p.models.length : 0;
@@ -967,13 +967,13 @@ async function addProvider(ctx: ExtensionCommandContext, args: string): Promise<
 	}
 	const [id, baseUrl, modelId, ...rest] = parts;
 	if (!/^[a-zA-Z0-9._-]+$/.test(id)) {
-		ctx.ui.notify(`Ⓡ "${id}" is not a usable provider id (letters, digits, . _ -).`, "warning");
+		ctx.ui.notify(`◈ "${id}" is not a usable provider id (letters, digits, . _ -).`, "warning");
 		return;
 	}
 	if (!/^https?:\/\//.test(baseUrl)) {
 		ctx.ui.notify(
 			[
-				`Ⓡ "${baseUrl}" is not an http(s) endpoint.`,
+				`◈ "${baseUrl}" is not an http(s) endpoint.`,
 				"If the provider id contains a space, quote it:",
 				`  /provider add "${id}" ${baseUrl} ${modelId}`,
 			].join("\n"),
@@ -1024,7 +1024,7 @@ async function addProvider(ctx: ExtensionCommandContext, args: string): Promise<
 	}
 	ctx.ui.notify(
 		[
-			`Ⓡ provider "${id}" ${replacing ? "replaced" : "added"}`,
+			`◈ provider "${id}" ${replacing ? "replaced" : "added"}`,
 			"",
 			`  endpoint  ${baseUrl}`,
 			`  model     ${modelId}`,
@@ -1039,7 +1039,7 @@ async function addProvider(ctx: ExtensionCommandContext, args: string): Promise<
 function removeProvider(ctx: ExtensionCommandContext, id: string): void {
 	const providers = loadProviders();
 	if (!providers[id]) {
-		ctx.ui.notify(`Ⓡ no provider "${id}" in ${MODELS_FILE}`, "warning");
+		ctx.ui.notify(`◈ no provider "${id}" in ${MODELS_FILE}`, "warning");
 		return;
 	}
 	const bag = { ...providers };
@@ -1048,7 +1048,7 @@ function removeProvider(ctx: ExtensionCommandContext, id: string): void {
 	const backup = writeJson(MODELS_FILE, { ...doc, providers: bag });
 	ctx.ui.notify(
 		[
-			`Ⓡ provider "${id}" removed from models.json`,
+			`◈ provider "${id}" removed from models.json`,
 			"",
 			backup ? `  backup  ${backup}` : "  backup  none",
 			"  its credential in auth.json was left alone — remove it there if unwanted.",
@@ -1190,7 +1190,7 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 	groups.push(["Omnigent (shell)", omni]);
 
 	const total = groups.reduce((n, [, items]) => n + items.length, 0);
-	const lines = [`Ⓡ commands · ${total}${filter ? ` matching "${filter}"` : ""}`, ""];
+	const lines = [`◈ commands · ${total}${filter ? ` matching "${filter}"` : ""}`, ""];
 	for (const [title, items] of groups) {
 		lines.push(`  ${title}`);
 		for (const [name, description] of items) {
@@ -1254,7 +1254,7 @@ export default function harnessMenus(pi: ExtensionAPI): void {
 			const clean = raw.replace(/(^|\s)--dry-run(\s|$)/, " ").trim();
 			if (!clean) return void ctx.ui.notify(renderLadder());
 			const ops = opsFromArgs(clean);
-			if (typeof ops === "string") return void ctx.ui.notify(`Ⓡ ${ops}\n\n${renderLadder()}`, "warning");
+			if (typeof ops === "string") return void ctx.ui.notify(`◈ ${ops}\n\n${renderLadder()}`, "warning");
 			const reply = await applyConfig(ctx, ops, dryRun);
 			ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
 		},
@@ -1266,7 +1266,7 @@ export default function harnessMenus(pi: ExtensionAPI): void {
 			const raw = args.trim();
 			const view = await fetchLadderView(ctx);
 			if (!view) {
-				ctx.ui.notify(`Ⓡ no orchestration ladder at ${ladderPath()}`, "warning");
+				ctx.ui.notify(`◈ no orchestration ladder at ${ladderPath()}`, "warning");
 				return;
 			}
 			if (!raw || raw === "show" || raw === "list") {
@@ -1279,7 +1279,7 @@ export default function harnessMenus(pi: ExtensionAPI): void {
 			}
 			const [role, value] = raw.split(/\s+/);
 			if (!role || !value) {
-				ctx.ui.notify(`Ⓡ usage: /rlp-roles <role> <provider/model[,provider/model…]> | <role> off | --pick\n\n${renderRoles(view)}`, "warning");
+				ctx.ui.notify(`◈ usage: /rlp-roles <role> <provider/model[,provider/model…]> | <role> off | --pick\n\n${renderRoles(view)}`, "warning");
 				return;
 			}
 			if (value === "off") {
@@ -1290,7 +1290,7 @@ export default function harnessMenus(pi: ExtensionAPI): void {
 			const refs = value.split(",").map((v) => v.trim()).filter(Boolean);
 			const ops = await bindRoleChainOps(ctx, view, role, refs);
 			if (typeof ops === "string") {
-				if (ops !== "cancelled") ctx.ui.notify(`Ⓡ ${ops}`, "warning");
+				if (ops !== "cancelled") ctx.ui.notify(`◈ ${ops}`, "warning");
 				return;
 			}
 			const reply = await applyConfig(ctx, ops);

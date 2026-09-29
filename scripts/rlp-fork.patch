@@ -559,13 +559,13 @@ index 92e9b2612..c4a50f842 100644
  // Compaction
  export {
 diff --git a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
-index 9d345b4e9..c84a2f16a 100644
+index 9d345b4e9..976c87535 100644
 --- a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
 @@ -1,5 +1,6 @@
  import { Editor, type EditorOptions, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
  import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.ts";
-+import { identity } from "./pi-logo.ts";
++import { brandGlyph, identity } from "./pi-logo.ts";
  import type { StatusIndicator } from "./status-indicator.ts";
  
  export type CustomEditorOptions = EditorOptions & {
@@ -579,7 +579,7 @@ index 9d345b4e9..c84a2f16a 100644
 +	 * terminal is too narrow or the editor is scrolled.
 +	 */
 +	private renderIdleBorder(width: number, hiddenLineCount: number): string {
-+		const mark = `── Ⓡ ${identity()} `;
++		const mark = `── ${brandGlyph()} ${identity()} `;
 +		const markWidth = visibleWidth(mark);
 +		if (hiddenLineCount > 0 || width <= markWidth + 1) {
 +			return super.renderTopBorder(width, hiddenLineCount);
@@ -601,16 +601,24 @@ index 9d345b4e9..c84a2f16a 100644
  		const overflowLabel = hiddenLineCount > 0 ? ` ↑ ${hiddenLineCount} more ` : undefined;
  		const overflowLabelWidth = overflowLabel ? visibleWidth(overflowLabel) : 0;
 diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
-index 51356a0a5..334abffcc 100644
+index 51356a0a5..f04ea8735 100644
 --- a/packages/coding-agent/src/modes/interactive/components/footer.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
-@@ -234,7 +234,13 @@ export class FooterComponent implements Component {
+@@ -5,6 +5,7 @@ import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
+ import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+ import { addUsageToTotals, createUsageTotals } from "../../../core/usage-totals.ts";
+ import { theme } from "../theme/theme.ts";
++import { brandGlyph } from "./pi-logo.ts";
+ 
+ /**
+  * Sanitize text for display in a single-line status.
+@@ -234,7 +235,13 @@ export class FooterComponent implements Component {
  		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
  		const dimRemainder = theme.fg("dim", remainder);
  
 -		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 +		const pwdLine = truncateToWidth(
-+			theme.bold(theme.fg("borderAccent", "Ⓡ")) +
++			theme.bold(theme.fg("borderAccent", brandGlyph())) +
 +				theme.fg("dim", " ") +
 +				theme.fg("dim", pwd),
 +			width,
@@ -620,14 +628,19 @@ index 51356a0a5..334abffcc 100644
  
  		// Add extension statuses on a single line, sorted by key alphabetically
 diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
-index 57381d9aa..f04c4b5f3 100644
+index 57381d9aa..1b0b3a732 100644
 --- a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
-@@ -4,23 +4,66 @@ import { theme } from "../theme/theme.ts";
+@@ -4,23 +4,75 @@ import { theme } from "../theme/theme.ts";
  const CORAL = rgbColor(228, 138, 122);
  const BLUE = rgbColor(79, 142, 179);
  const YELLOW = rgbColor(234, 182, 93);
 +const GREEN = rgbColor(122, 179, 138);
++// RLP's own ramp — violet -> sky -> cyan, the same one as the README banner, so
++// the agent does not wear pi's palette.
++const VIOLET = rgbColor(139, 92, 246);
++const SKY = rgbColor(56, 189, 248);
++const CYAN = rgbColor(34, 211, 238);
  const RESET = "\x1b[0m";
  
  /**
@@ -638,6 +651,8 @@ index 57381d9aa..f04c4b5f3 100644
 - *   blue  .     coral .
 - *   blue  blue  .     yellow
 - *   blue  .     .     yellow
+- *
+- * The brand colors stay fixed across themes; they follow the terminal's color mode.
 + * One binary, two names: `rpi` is the bare harness and `rlp` is the agent that
 + * orchestrates on it. The launcher sets `RLP_IDENTITY`, so the branding follows
 + * how the user actually invoked it instead of claiming one name for both.
@@ -654,32 +669,35 @@ index 57381d9aa..f04c4b5f3 100644
 +	return identity() === "rlp" ? "RLP" : "RPI";
 +}
 +
++/** The full product name, the words behind the RLP initials. */
++export function brandFullName(): string {
++	return "Recursive Laya Pi";
++}
++
++/** The one-line promise of the tool, for the header and status lines. */
++export function brandTagline(): string {
++	return "knows when not to orchestrate";
++}
++
 +/**
-+ * The RLP mark: 6 cells wide and 2 lines tall, in the same half-block style as
-+ * the pi logo, spelling the three layers the tool is made of —
-  *
-- * The brand colors stay fixed across themes; they follow the terminal's color mode.
-+ *   L L L .        laya    left column, coral: the System-1 decision model
-+ *   L . R M        rlm     middle, blue: the recursive decomposer
-+ *   L L R R        pi      right, yellow: the harness everything runs on
-+ *   . . . P P      pi      and the green cap that ties them together
-+ *
-+ * The reading is deliberate: decision on the left, decomposition through the
-+ * middle, execution on the right — the order a request actually travels.
++ * The compact RLP mark: one cell, safe in a border or a footer. A diamond within
++ * a diamond — the node of the orchestration graph.
++ */
++export function brandGlyph(): string {
++	return "◈";
++}
++
++/**
++ * The RLP mark: a node that fans out to two, 4 cells wide and 2 lines tall in
++ * the same half-block style pi uses. Drawn on RLP's own violet -> sky -> cyan
++ * ramp, and shaped like the fan-out the tool decides to do — or not — on every
++ * request.
   */
 +export function rlpLogoLines(): [string, string] {
 +	const mode = theme.getColorMode();
-+	const fg = (color: typeof CORAL) => foregroundAnsi(color, mode);
-+	const bg = (color: typeof CORAL) => backgroundAnsi(color, mode);
-+
-+	// Line 1: L block (2 wide), gap, R block (2 wide)
-+	const top = `${fg(CORAL)}██${RESET}` + `${fg(BLUE)}▀▀${RESET}` + `${fg(YELLOW)}██${RESET}` + `${fg(GREEN)}▀${RESET}`;
-+	// Line 2: same columns, filled to read as one mark
-+	const bottom =
-+		`${fg(CORAL)}${bg(BLUE)}▀${RESET}` +
-+		`${fg(BLUE)}▀▀${RESET}` +
-+		`${fg(YELLOW)}${bg(GREEN)}▀${RESET}${fg(GREEN)}█${RESET}`;
-+
++	const fg = (color: typeof VIOLET) => foregroundAnsi(color, mode);
++	const top = `${fg(VIOLET)}▛${RESET}${fg(SKY)}▀▀${RESET}${fg(CYAN)}▜${RESET}`;
++	const bottom = `${fg(VIOLET)}▙${RESET}  ${fg(CYAN)}▟${RESET}`;
 +	return [top, bottom];
 +}
 +
@@ -699,7 +717,7 @@ index 57381d9aa..f04c4b5f3 100644
 +	return identity() === "rlp" ? rlpLogoLines() : piLogoLines();
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index e5ff3a6f8..28ec3f0e2 100644
+index e5ff3a6f8..de98ea7f0 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -101,6 +101,14 @@ import {
@@ -722,37 +740,37 @@ index e5ff3a6f8..28ec3f0e2 100644
  	OAuthSelectorComponent,
  } from "./components/oauth-selector.ts";
 -import { piLogoLines } from "./components/pi-logo.ts";
-+import { identity, identityName, logoLines } from "./components/pi-logo.ts";
++import { brandFullName, brandGlyph, brandTagline, identity, identityName, logoLines } from "./components/pi-logo.ts";
  import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
  import { SessionSelectorComponent } from "./components/session-selector.ts";
  import { SettingsSelectorComponent } from "./components/settings-selector.ts";
-@@ -966,12 +974,33 @@ export class InteractiveMode {
+@@ -966,12 +974,32 @@ export class InteractiveMode {
  
  		// Add header with keybindings from config (unless silenced)
  		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 -			// Built on demand so the header follows theme changes. The logo's first line carries the version,
 -			// its second line the first line of key hints.
-+			// RLP: upstream builds the header lazily so it follows theme changes, and that
-+			// is worth keeping. The RLP mark replaces the pi logo art on the first line; the
-+			// second line still carries the key hints, so the two-line shape is unchanged.
-+			// The mark and the name follow how the binary was invoked: `rlp` is the
-+			// agent that orchestrates, `rpi` the bare harness, and one binary serves
-+			// both. Built lazily so the header still follows theme changes.
- 			const withLogo = (hints: string) => {
+-			const withLogo = (hints: string) => {
 -				const [top, bottom] = piLogoLines();
 -				return `${top} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
++			// The RLP identity header: the mark, the wordmark, the product name and
++			// the promise. `rpi` (the bare harness) keeps a plainer line, since it is
++			// plumbing rather than the product.
++			const identityHeader = () => {
 +				const [top, bottom] = logoLines();
 +				const isAgent = identity() === "rlp";
 +				const name = theme.bold(theme.fg(isAgent ? "mdHeading" : "accent", identityName()));
-+				const role = theme.fg("dim", isAgent ? "· laya · rlm · pi" : "· the harness RLP orchestrates on");
-+				return `${top} ${name} ${role} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
++				const full = theme.fg("dim", isAgent ? `· ${brandFullName()}` : "· the harness RLP runs on");
++				const version = theme.fg("dim", `v${this.version}`);
++				const promise = theme.fg("muted", isAgent ? brandTagline() : "pi · a coding agent");
++				return `${top} ${name} ${full} ${version}\n${bottom} ${promise}`;
  			};
 +			// The six pipeline stages, colour-coded so the header reads as a diagram.
 +			// Only the agent shows it: the bare harness does not orchestrate.
 +			const pipelineLine = () =>
 +				identity() !== "rlp"
 +					? ""
-+					: theme.fg("muted", "  ") +
++					: theme.fg("accent", `  ${brandGlyph()} `) +
 +						["triage", "decompose", "route", "dispatch", "collect", "synthesize"]
 +							.map((stage, i) =>
 +								theme.fg(
@@ -764,7 +782,7 @@ index e5ff3a6f8..28ec3f0e2 100644
  
  			// Build startup instructions using keybinding hint helpers
  			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-@@ -1011,11 +1040,22 @@ export class InteractiveMode {
+@@ -1011,11 +1039,22 @@ export class InteractiveMode {
  				].join(theme.fg("muted", " · "));
  			const compactOnboarding = () =>
  				theme.fg("dim", `Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`);
@@ -785,12 +803,12 @@ index e5ff3a6f8..28ec3f0e2 100644
  			this.builtInHeader = new ExpandableText(
 -				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
 -				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
-+				() => `${withLogo(compactInstructions())}\n${pipelineLine()}\n${compactOnboarding()}\n\n${onboarding()}`,
-+				() => `${withLogo(expandedInstructions())}\n${pipelineLine()}\n\n${onboarding()}`,
++				() => `${identityHeader()}\n${pipelineLine()}\n${compactInstructions()}\n${compactOnboarding()}\n\n${onboarding()}`,
++				() => `${identityHeader()}\n${pipelineLine()}\n${expandedInstructions()}\n\n${onboarding()}`,
  				this.getStartupExpansionState(),
  				1,
  				0,
-@@ -3158,6 +3198,11 @@ export class InteractiveMode {
+@@ -3158,6 +3197,11 @@ export class InteractiveMode {
  				this.editor.setText("");
  				return;
  			}
@@ -802,7 +820,7 @@ index e5ff3a6f8..28ec3f0e2 100644
  			if (text === "/hotkeys") {
  				this.handleHotkeysCommand();
  				this.editor.setText("");
-@@ -6539,6 +6584,110 @@ export class InteractiveMode {
+@@ -6539,6 +6583,110 @@ export class InteractiveMode {
  		this.ui.requestRender();
  	}
  
