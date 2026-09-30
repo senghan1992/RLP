@@ -24,13 +24,14 @@ differs is that only `rlp` can orchestrate.
 
 | Command | What it does |
 |---|---|
-| `/setup` | the guided first run: mode → endpoints → model → worker arms → per-role models (it starts by itself on a host that cannot work yet) |
+| `/setup` | the guided first run: mode → (coding tools already on this host) → endpoints → model → worker arms → per-role models (it starts by itself on a host that cannot work yet) |
 | `/direct on\|off\|status` | direct-only mode: every request inline, never orchestrate |
 | `/provider` | endpoints, credential state, a live round trip, the arms that cannot run |
 | `/provider connect\|add\|test\|models\|key\|remove` | guided attach · scriptable attach · one real round trip · discovery · credentials · removal |
 | `/rlp-plan <request>` | the gate → DAG → routing → waves, without dispatching anything |
 | `/rlp-triage <request>` | the gate verdict alone, one laya forward pass |
 | `/rlp-state` | the run ledger: every node, its arm, worktree, branch, status |
+| `/rlp-watch` | the run's live worker windows and the attach command for each (tmux lens, read-only — RLP never attaches for you) |
 | `/rlp-doctor` | host health, one fix per failure line |
 | `/rlp-ladder` | what the orchestrator will actually do: brain, arms, roles, budgets |
 | `/rlp-config` | edit the ladder live (brain, arms, workers, gate, budgets) |
@@ -53,6 +54,7 @@ rlp plan "<request>"          # gate + DAG + per-node routing + waves
 rlp triage "<request>"        # direct vs orchestrate, one forward pass
 rlp decompose "<request>"     # the DAG on its own
 rlp ladder | rlp roster       # the ladder, and the router cards derived from it
+rlp harness list | scan       # which tools can run workers here; what is installed (`--no-versions`: PATH only, spawns nothing)
 rlp provider list|probe|discover|add|key|remove
 rlp verify --acceptance ...   # independent cross-vendor best-of-N verdict
 rlp memory | rlp remember     # this project's cross-run knowledge log
@@ -79,3 +81,9 @@ Add `--json` to any engine subcommand for a machine-readable envelope.
   `rlp provider add <id> <baseUrl> <model>` (scriptable).
 - **Changing which models orchestrate** → `/rlp-config`, or `/rlp-roles` to
   pin one role. The ladder is configuration, not code.
+- **Running workers on the coding CLIs you already use** → `/setup` looks for
+  them on first run and mounts the ones you accept; `rlp harness list` shows
+  the catalog and what this host has. A worker's `harness` field names the
+  program, its arms name the model.
+- **Watching a worker while it runs** → `/rlp-watch` for the attach commands
+  (RLP's own tmux socket; `routing.tmux: off` skips the lens entirely).

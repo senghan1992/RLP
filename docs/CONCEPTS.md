@@ -280,13 +280,13 @@ Filled in by `/setup`, with whatever providers you connected:
       ]
     },
     {
-      "id": "solo", "harness": "claude-native",
+      "id": "jcode", "harness": "jcode",
       // Availability is configuration, not prose. An arm the host cannot
       // serve is excluded from the roster, so a plan is never dispatched
       // onto it. Omit the field to re-enable.
       "available": false,
       "availabilityNote": "spend-limited on this host; opt-in.",
-      "models": [ { "model": "gamma/gamma-opus", "roles": ["code","review"], "when": "…" } ]
+      "models": [ { "model": "jcode/default", "roles": ["code","review"], "when": "let the tool pick its model" } ]
     }
   ],
   "routing": { "escalateBelow": 0.55, "maxDispatchesPerTurn": 4 },
@@ -294,9 +294,16 @@ Filled in by `/setup`, with whatever providers you connected:
 }
 ```
 
-Only `harness: "pi"` workers are dispatchable: orchestration spawns the `rpi`
-harness, and a worker naming anything else fails its preflight with that said
-rather than dying mid-dispatch.
+A worker is dispatchable when RLP has a *driver* for its harness — and a driver
+is presence, not a name in a list. That is the bundled `pi`, or any catalogued
+external CLI (`omp`, `claude`, `jcode`, `muse`) whose binary is on this host's
+PATH. A harness the catalog does not carry is tolerated but never silently
+falls back to pi: it parses with a warning (`harnessKnown: false`), the plan
+keeps it, and the *dispatcher* fails the node with "no RLP driver" — a plan
+that quietly ran on the wrong tool is worse than one that says it cannot, and
+the failure belongs where the spawn would have happened, naming the harness and
+the fix. See
+[Running workers on other tools](#running-workers-on-other-tools) below.
 
 `rlp ladder` shows the resolved file; `rlp roster` shows the cards the decision
 model actually sees; `rlp doctor` validates both. A malformed ladder fails at
@@ -344,7 +351,49 @@ A review node inherits the ban list of every implementation it depends on. If
 its default arm would land on the same vendor family, the planner re-picks the
 next arm on another family and records `why_this_arm`. If the ladder offers no
 other family, the plan still proceeds — but it reports
-`cross_vendor_violations` rather than pretending the rule was satisfied.
+`cross_vendor_violations` rather than pretending the rule was satisfied. The ban
+list now holds two axes: the *model* families and the *tool* vendors of the code
+being reviewed, so a review that lands on the same coding CLI that wrote the
+implementation is reported too — naming the harness that collided. pi's own
+vendor never enters a ban list, so a pi-only ladder's plans are byte-stable.
+
+### Running workers on other tools
+
+The ladder has always described *which model* a worker runs; the harness field
+now means *which program* runs it. A worker is dispatchable when the catalog has
+a driver for its harness, and `rlp_dispatch` runs that driver headless — the
+worker's `argv` rides the route record as data (design decision D1), assembled
+from the catalog template in `rlp-svc/rlp_svc/harnesses.py`. Adding a harness is
+one entry there, not a change in two languages.
+
+An external arm follows one grammar (`<harness>/<native-id>`): `claude/sonnet`
+passes `--model sonnet`, and `claude/default` drops the model flag entirely —
+"let the tool pick" is not "tell the tool a model name it may not have". The
+`{prompt}`/`{prompt_file}` placeholders are substituted only at dispatch,
+because only dispatch knows where the prompt landed.
+
+Two host reads make this safe rather than a guessing game:
+
+- **An absent tool cannot trap a run.** Before routing, a worker whose external
+  harness is not on this PATH is excluded in memory — the plan names it with a
+  "not on PATH" note — and a ladder whose every tool is missing degrades to an
+  honest `direct` instead of a doomed dispatch. `RLP_HARNESS_SCAN=0` claims
+  nothing: presence is a PATH lookup that never spawns anything, and with the
+  flag off not even that runs, so an offline host routes exactly as it did
+  before external tools existed.
+- **Login is existence, not contents.** Whether a tool can authenticate here is
+  decided by whether its marker file exists or its credential env var is set —
+  RLP never reads what is inside those files, and a driver record carries
+  env-var *names*, never values.
+
+`routing.tmux` (`auto` | `on` | `off`) changes only how a worker is *watched*,
+never how it runs. Behind the lens a headless worker sits in a window on RLP's
+own tmux socket (`tmux -L rlp`, session `rlp-<run>-<node>`), which
+`/rlp-watch` lists with its attach command — attaching is the human's move; RLP
+never attaches to, sends keys into, or kills anything on the user's own server.
+Without tmux the same workers spawn plainly. The permission story for each
+external tool — and why Claude runs with `--dangerously-skip-permissions` — is
+in [SECURITY.md](../SECURITY.md).
 
 ---
 

@@ -9,15 +9,17 @@ RLP는 **하나의 바이너리, 하나의 결정 엔진, 하나의 설정 파�
 |---|---|
 | 진입 | `rlp` (에이전트), `rlp <subcommand>` (결정 엔진), `rpi` (오케스트레이션 없는 하네스) |
 | 브레인 | pi 포크 TUI + `agent/rlp/extensions/rlp-orchestrate.ts` |
-| 디스패치 | 확장이 직접 `rpi` 워커를 `spawn` — 노드당 git worktree + 브랜치 |
+| 디스패치 | 확장이 워커를 `spawn` — 기본은 `rpi`, 래더가 외부 도구를 마운트하면 그 도구를 카탈로그(`rlp_svc/harnesses.py`)의 headless 호출로 — 노드당 git worktree + 브랜치 |
 | 수집 | `rlp_collect`가 결과 파일이 나타날 때까지 블록 대기 |
 | 가드레일 | `orchestration.json`의 턴당 cap · 자격증명/하네스 preflight · 워커 워치독 · purpose 화이트리스트 |
 | 흔적 | `~/.rlp/runs/<id>/` — ledger, 워커별 로그, 워커별 report.json |
 
 `rlp`와 `rpi`는 같은 바이너리다. 갈라지는 지점은 `RLP_IDENTITY` 하나:
 `rlp`는 브레인이라 오케스트레이션 계약과 `rlp_*` 도구와 상주 laya 엔진을
-받고, `rpi`(그리고 `rlp_dispatch`가 띄우는 모든 워커)는 맨 하네스다. 워커가
-자기 노드를 또 triage하거나 쓰지도 않을 laya를 150초 로딩하는 일이 없다.
+받고, `rpi`는 맨 하네스다. 워커도 맨 상태로 돈다 — pi 워커는 `rpi`를
+spawn하고, 외부 도구(claude·omp·jcode·muse) 워커는 카탈로그가 아는 그 도구
+자신의 headless 호출로 뜬다. 어느 쪽이든 워커가 자기 노드를 또 triage하거나
+쓰지도 않을 laya를 150초 로딩하는 일이 없다.
 
 ---
 
@@ -55,8 +57,8 @@ flowchart TB
     LADDER["orchestration.json — 단일 소스<br/>~/.rlp/agent/<br/><b>정책은 동봉, 모델 암은 비어 있음</b><br/>brain=null · models=[] → /setup이 채움<br/>escalateBelow · cap · workerTimeoutMs · crossVendor<br/>available:false → roster에서 제외"]
 
     WK1["워커 #1 — rpi + 암A<br/>worktree/브랜치 자기 것<br/>구현"]
-    WK2["워커 #2 — rpi + 암B<br/>worktree/브랜치 자기 것<br/>문서"]
-    WK3["워커 #3 — rpi + 암C<br/>읽기 전용 리뷰<br/>(암A와 다른 벤더)"]
+    WK2["워커 #2 — claude 워커 (외부 CLI, headless)<br/>worktree/브랜치 자기 것<br/>문서"]
+    WK3["워커 #3 — rpi + 암C<br/>읽기 전용 리뷰<br/>(암A와 다른 벤더, 다른 도구)"]
     RUNS[("~/.rlp/runs/&lt;id&gt;/<br/>ledger.json · &lt;node&gt;.log<br/>&lt;node&gt;.report.json")]
   end
 
@@ -80,7 +82,7 @@ sequenceDiagram
   participant U as 사용자
   participant B as 브레인 (rlp)
   participant E as engine (상주)
-  participant W as 워커 (rpi × 모델암)
+  participant W as 워커 (rpi | 외부 CLI × 모델암)
 
   U->>B: "subtract 추가 + 테스트 + 리뷰"
   B->>E: rlp_plan(request)
@@ -89,7 +91,7 @@ sequenceDiagram
   Note over B: 게이트 표를 먼저 출력하고<br/>같은 턴에 디스패치 (표는 보고, 질문이 아니다)
   B->>W: rlp_dispatch(wave1) — t1 구현 + t2 문서 (worktree별 병렬)
   W-->>B: rlp_collect — report.json + ACCEPTANCE 줄
-  B->>W: rlp_dispatch(wave2) — t3 리뷰 (t1과 다른 벤더, diff+계약만)
+  B->>W: rlp_dispatch(wave2) — t3 리뷰 (t1과 다른 벤더/다른 도구, diff+계약만)
   W-->>B: VERDICT: approved
   B->>E: rlp_verify(t1) — 타벤더 best-of-N
   E-->>B: 3/3 pass
@@ -109,7 +111,7 @@ sequenceDiagram
 |---|---|---|---|
 | **판단** | laya | triage 게이트 + 노드→worker 라우팅 (33–460ms, 생성 없음 = 할루시네이션 없음) | 분할·선발은 추론이 아니라 분류 — 느린 LLM에 돈 쓸 일이 아니다 |
 | **계획** | RLM | 요청 → 2–12 노드 DAG (재귀 분해 + 검증/Kahn + 비평 수정) | 래더는 "어디로"만 안다 — "무엇을"이 여기서 나온다 |
-| **기반** | rpi (pi 포크) | 브레인과 전 워커가 도는 하네스 | 같은 바이너리에 다른 벤더 암을 주입 = 독립 크로스 리뷰가 가능 |
+| **기반** | rpi (pi 포크) + 카탈로그의 외부 도구 | 브레인이 도는 하네스; pi 워커도 여기서 돌고, 외부 도구 워커는 각 도구의 headless 호출로 돈다 | 같은 바이너리에 다른 벤더 암을 주입 = 독립 크로스 리뷰가 가능 — 모델 벤더와 도구 벤더 두 축 모두 |
 
 **실행·분배**는 프로젝트가 아니라 RLP 자신이다
 (`agent/rlp/extensions/rlp-orchestrate.ts`). 별도 평면을 두지 않은 이유는
@@ -144,7 +146,7 @@ planner·critique·verify·route 모델을 여기서 해석하고, `doctor`가 �
   `NOT CONFIGURED`를, `rlp doctor`가 한 줄로 수정안을 말하며, `/setup`이
   엔드포인트의 `GET /models` 응답에서 암을 채운다. 그 전까지 RLP는 평범한 코딩
   에이전트로 정상 동작한다. 그리고 `/setup`을 치기를 기다리지 *않는다*: 자격증명이 없거나 래더가
-  dispatch 가능하지 않으면, 터미널에서 `rlp`을 처음 켤 때 설정이 스스로 시작한다(모드 → 엔드포인트 → 모델 → 워커 암 → 역할별 모델). TUI에서만,
+  dispatch 가능하지 않으면, 터미널에서 `rlp`을 처음 켤 때 설정이 스스로 시작한다(모드 → [이 호스트에 이미 있는 코딩 CLI 감지 — spawn 없는 PATH 조회이고 `RLP_HARNESS_SCAN=0`이면 생략] → 엔드포인트 → 모델 → 워커 암 → 역할별 모델). TUI에서만,
   `RLP_IDENTITY=rlp`일 때만, `RLP_NO_SETUP=1`로 끌 수 있다. 전부 esc로 막으면
   아무 것도 쓰이지 않기 때문에 다음 시작에 다시 묻는 것은 잔소리가 아니라 사실이다.
 - laya 게이트의 이 질문 유형 보정은 약하다 (실측 conf 0.003–0.50). 게이트 기본은
@@ -164,8 +166,13 @@ planner·critique·verify·route 모델을 여기서 해석하고, `doctor`가 �
   orchestrator", 스크립트용 `rlp config '<ops-json>'`. 쓰기 전에 검증하고
   `.bak.<ts>` 백업 + 원자적 교체를 한다.
 - 디스패치 직전 preflight: 배정된 arm의 provider에 자격증명이 없거나 harness를
-  로컬에서 못 띄우면(로컬은 `harness: "pi"`만 spawn한다) 그 노드를 디스패치하지
-  않고 수정 안내와 함께 실패 처리한다 (`rlp_plan`의 `preflight`에도 노출).
+  이 호스트에서 못 띄우면 그 노드를 디스패치하지 않고 수정 안내와 함께 실패
+  처리한다 (`rlp_plan`의 `preflight`에도 노출). 띄울 수 있는 harness는 이름
+  목록이 아니라 카탈로그 드라이버의 존재다: pi는 번들이라 상시, claude·omp·
+  jcode·muse는 이 호스트 PATH에 있을 때 디스패치 가능하고, 카탈로그에 없는
+  이름은 조용히 버리지 않는다 — 파싱은 경고와 함께 통과하고 디스패치 시점에
+  큰 소리로 실패한다(D5). plan 시점에 없는 외부 도구는 그 worker를 메모리에서
+  unavailable로 접는다 — 래더 파일은 건드리지 않는다.
   `RLP_SKIP_CREDENTIAL_PREFLIGHT=1`로 끌 수 있다.
 - 엔진의 LLM 폴백(라우터·triage·비평·검증)은 단일 암이 아니라 래더에서 파생한
   후보 목록을 순서대로 시도한다. 빈 응답 하나로 계획 전체가 끝나던 경로였다.
@@ -173,6 +180,12 @@ planner·critique·verify·route 모델을 여기서 해석하고, `doctor`가 �
   종료시키고 failed로 돌려준다. 워커는 프롬프트 계약에 따라 마지막 줄에
   `ACCEPTANCE: pass|fail — …`을 남기고 `<node>.report.json`을 쓴다. 산문이 아니라
   이 둘이 계약이다.
+- tmux는 렌즈지 의존성이 아니다: `routing.tmux`(auto|on|off)가 켜 있으면 headless
+  워커가 RLP 전용 소켓(`tmux -L rlp`, 세션 `rlp-<run>-<node>`)의 창에서 돌아
+  `/rlp-watch`가 창별 attach 명령을 내고, tmux가 없으면 같은 워커가 그냥
+  spawn된다 — 완료 판정도 수집도 결국 같은 파일들이라 결과가 다르지 않다.
+  RLP는 사용자의 기본 tmux 서버에는 attach도 send-keys도 kill도 하지 않는다;
+  만지는 창은 자기가 만든 창뿐이다.
 - laya 첫 로딩은 프로세스당 ~170s (CPU 체크포인트). 그래서 엔진은 세션 시작 시
   백그라운드로 뜨고 세션당 한 번만 로딩한다. 프로세스를 재시작하면 다시 로딩한다.
   direct 전용 모드에서는 애초에 띄우지 않는다 — 상답에 대한 질문을 위해 150초를

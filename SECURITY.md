@@ -65,6 +65,65 @@ the point of the tool, and it is the boundary worth understanding:
 - There is **no sandbox**. A worker is a normal process. Do not point RLP at a
   request you would not run by hand in that repository.
 
+### Running a worker in someone else's tool
+
+A worker no longer has to run in RLP's own harness. The route a plan produces
+can name an external coding CLI, and `rlp_dispatch` runs it headless — the same
+worker contract, the same OS permissions, just a different program editing the
+files. The catalog (`rlp-svc/rlp_svc/harnesses.py`) is the single source for how
+each is invoked:
+
+| harness | headless invocation | model flag | permission story |
+|---|---|---|---|
+| **pi** (bundled) | `rpi -p "<prompt>" --model <arm>` | `--model` | RLP's own harness; nothing new to trust |
+| **omp** | `omp -p --no-session <prompt>` | `--model` | pi-family; `--no-session`, no approval prompt to skip |
+| **claude** | `claude -p --dangerously-skip-permissions <prompt>` | `--model` | runs with the tool's own skip flag — see below |
+| **jcode** | `jcode run <prompt>` | `-m` | subscription runner; takes one message and exits |
+| **muse** | `muse exec --prompt-file <path>` | `--model` | reads the prompt from a `0600` file; JSONL events |
+
+**Why `--dangerously-skip-permissions`.** Claude Code gates each file write and
+command behind an interactive approval prompt. A headless worker has nobody at
+its terminal to answer that prompt, so a run would simply stop. The flag hands
+Claude its own "make the edits" decision and lets the worker proceed. The safety
+boundary is *not* that prompt — it is the layer RLP controls, and it applies to
+every harness equally: each node runs in its own git worktree on its own branch,
+RLP never merges, pushes, or force-pushes (the human merges), the fan-out is
+capped per turn, and a wedged worker is killed by the watchdog. A worker that
+edits the wrong files in its own worktree has a blast radius of one branch that
+is never merged without a person reading the diff.
+
+**Overriding it.** The permission flags are one `argv` list per harness in the
+catalog — plain data, not buried logic. To run Claude with a narrower flag (a
+`--permission-mode`, or no skip at all), edit that `argv` in
+`rlp-svc/rlp_svc/harnesses.py`; RLP never rewrites it silently. To keep a node
+off an external tool entirely, leave that tool unmounted (a ladder with no
+worker on it), or mark such a worker `available: false`.
+
+Three rules hold across every harness:
+
+- **The catalog knows env-var *names*, never values.** A driver record carries
+  `envNames` (`["ANTHROPIC_API_KEY", …]`) for preflight and observability — and
+  a secret that reached a driver record would land in a ledger and a log — so
+  the record never holds a key. An external worker is spawned with the session's
+  own environment; RLP injects no credential into it.
+- **Login is checked as existence, never contents.** Whether an external tool is
+  usable is decided by whether its marker file *exists* or a named env var is
+  *set* — `~/.claude.json`, `~/.jcode/auth.json`, and so on. RLP reads only that
+  a file is there, never what is in it, and never opens `~/.claude` or any
+  provider's credential store.
+- **The prompt is a `0600` file.** Each dispatch writes `<node>.prompt.txt` into
+  the run directory `0600` before spawning. Small prompts also ride the command
+  line, but the file is always there — it is what `{prompt_file}` harnesses
+  (Muse) read, and it is the post-mortem for the rest. Run ledgers live under
+  `~/.rlp/runs/`, outside any checkout and never committed.
+
+And the tmux lens keeps its own lane: workers run on **RLP's private socket**
+(`tmux -L rlp`, sessions `rlp-<run>-<node>`), which a stray `tmux ls` on the
+user's default server never shows. RLP **never attaches to, sends keys into, or
+kills a session on the user's own tmux server** — the only sessions it touches
+are the ones it named on that socket, and stopping a worker means
+`kill-session` on its own.
+
 ### Untrusted input
 
 Two things RLP reads are attacker-influenceable in the general case, and are

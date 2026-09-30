@@ -38,8 +38,12 @@ orchestration ladder, its validation, the derived router roster and which
 workers are excluded as unavailable; whether a single-vendor ladder is claiming
 cross-vendor review; the laya checkpoint cache; the CA bundle; RLP's own
 extensions and skills (the rest of the agent dir is labelled optional, never a
-failure); and whether a worker can actually be spawned here — the `rpi` harness
-present *and* the fork built, plus `git` for per-node worktrees.
+failure); whether a worker can actually be spawned here — the `rpi` harness
+present *and* the fork built, plus `git` for per-node worktrees; and the
+external coding CLIs (`harness:<id>` lines) — only present tools are named, a
+present one that cannot log in warns with its own login command, and tmux is
+judged as a way to watch workers, never a requirement. `RLP_HARNESS_SCAN=0`
+collapses that group to a single honest line.
 
 Every `fail` and `warn` names a fix this host can act on. A line whose only
 remedy is a step the installer deliberately skipped is noise, not a diagnostic,

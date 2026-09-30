@@ -6,7 +6,7 @@
   <a href="https://github.com/senghan1992/RLP/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/senghan1992/RLP/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4f46e5.svg"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776ab.svg">
-  <img alt="harness: pi" src="https://img.shields.io/badge/harness-pi-0f172a.svg">
+  <img alt="harness: pi + tools" src="https://img.shields.io/badge/harness-pi%20%2B%20tools-0f172a.svg">
   <img alt="orchestration: local" src="https://img.shields.io/badge/orchestration-local-22d3ee.svg">
 </p>
 
@@ -24,8 +24,10 @@ RLP is built on three things, each used for what it is good at, plus a decision
 layer that exists nowhere else:
 
 - **[pi](https://github.com/earendil-works/pi)** — the terminal harness the agent
-  and every worker run on. RLP builds a lightly-patched fork of it (`rpi`) and is
-  a superset of it: everything pi does, plus the orchestration surface.
+  runs on. RLP builds a lightly-patched fork of it (`rpi`) and is a superset of
+  it: everything pi does, plus the orchestration surface. Workers run on `rpi`
+  too — or on any other coding CLI this host has and the ladder mounts (`claude`,
+  `omp`, `jcode`, `muse`), each invoked headless from the harness catalog.
 - **[laya](https://huggingface.co/convaiinnovations/laya)** — the
   non-autoregressive System-1 decision model behind the triage gate and the router.
 - **RLM (Recursive Language Models)** — recursive, model-driven decomposition of
@@ -129,10 +131,13 @@ rlp            # the agent, in the project you are working on — and it asks
 
 **You do not have to know the word `/setup`.** A host with no credential and no
 model arms cannot do anything yet, so the first time you start `rlp` in a
-terminal the guided setup begins by itself: the mode, then the endpoints and
-their keys, then the model RLP works on, then the worker arms, then the model for
-each role. Every question is skippable, each one says what it changed, and
-answering all of them with escape writes nothing at all — which is why being
+terminal the guided setup begins by itself: the mode, then — if other coding
+CLIs are already installed here — the offer to mount them as workers (a PATH
+lookup that spawns nothing; `RLP_HARNESS_SCAN=0` keeps the question unasked),
+then the endpoints and their keys, then the model RLP works on, then the
+worker arms, then the model for each role. Every question is skippable, each
+one says what it changed, and answering all of them with escape writes nothing
+at all — which is why being
 asked again next launch is honest rather than a nag. `RLP_NO_SETUP=1` is the
 quiet start for a session nobody is sitting at; `/setup` runs it again by hand,
 and `rlp doctor` says the same thing in a shell.
@@ -255,12 +260,20 @@ Filled in, it looks like this (the provider ids are whatever *you* connected):
         { "model": "anthropic/claude-opus-5-5",
           "roles": ["code", "debug", "review"],
           "when": "deep arm — multi-file refactors and hard debugging" }
+      ] },
+    { "id": "claude", "harness": "claude",       // an external tool can run workers too
+      "models": [
+        { "model": "claude/default",             // <harness>/<its own model id>; `default` lets it choose
+          "roles": ["code", "review"],
+          "when": "the host's Claude Code — cross-tool review of pi-written code" }
       ] }
   ],
   "roles": { "review": ["anthropic/claude-opus-5-5"] },
   "routing": { "escalateBelow": 0.55, "maxDispatchesPerTurn": 4,
-               "gate": "hybrid", "signalThreshold": 1, "workerTimeoutMs": 1200000 },
+               "gate": "hybrid", "signalThreshold": 1, "workerTimeoutMs": 1200000,
+               "tmux": "auto" },
                // gate: "laya" | "hybrid" | "direct" — direct never orchestrates
+               // tmux: "auto" | "on" | "off" — a lens for watching, never a dependency
   "review": { "crossVendor": true },
   "rlm": { "maxDepth": 1, "maxIterations": 8, "maxConcurrentSubcalls": 4, "maxTimeout": 300 },
   "planning": { "critique": true, "maxRefines": 1, "recursiveDepth": 1,
@@ -279,11 +292,26 @@ Filled in, it looks like this (the provider ids are whatever *you* connected):
   `docs`, `explore`) or to an **ordered fallback list**, and it wins over
   priority order. Three roles name models the *planner itself* uses, never a
   worker: `plan` (the decomposer), `critique` (the plan critic), `verify`.
+- **`harness` names the program that runs the worker**, not just its model. The
+  default is `pi` (RLP's own fork); `claude`, `omp`, `jcode` and `muse` are
+  catalogued external tools, each with its own headless invocation. An arm on an
+  external worker is `<harness>/<that tool's model id>` — `claude/default` says
+  "let the tool pick" instead of naming a model it may not have. What is
+  dispatchable is driver presence, not a name list: `rlp harness list` shows
+  what can run workers here.
 - **`available: false`** removes a worker from the router roster entirely, so
-  the planner never dispatches onto an arm the host cannot serve.
+  the planner never dispatches onto an arm the host cannot serve. The same
+  exclusion is *computed* for free: a worker whose external tool is not on this
+  PATH drops out in memory before routing — the ladder file is never edited.
 - **Cross-vendor review is checked, not hoped for**: a review node inherits the
-  ban list of the implementation it reviews and is re-picked onto another vendor
-  family when the ladder allows.
+  ban list of the implementation it reviews — both the model families and the
+  *tool vendors* behind the code — and is re-picked onto another vendor when the
+  ladder allows.
+- **`routing.tmux`** (`auto` | `on` | `off`) changes only how workers are
+  watched, never how they run: with tmux present, each headless worker sits in a
+  window on RLP's own socket (`tmux -L rlp`) so `/rlp-watch` can hand you its
+  attach command. RLP never attaches to, sends keys into, or kills anything on
+  your own tmux server; without tmux the same workers spawn plainly.
 
 ### Change the models live
 
@@ -347,6 +375,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp replan "<node brief>"` | recursively re-decompose one task into a sub-DAG |
 | `rlp verify --acceptance A --avoid-family F` | independent cross-vendor best-of-N verdict |
 | `rlp ladder` · `rlp roster` | the resolved ladder · the router's roster cards |
+| `rlp harness list` · `rlp harness scan` | which tools can run workers, and which are on this host (`--no-versions`: a PATH lookup that spawns nothing) |
 | `rlp mode [direct\|full]` | does this host orchestrate? no argument reports the mode and what set it |
 | `rlp provider list` | every endpoint: credential state, models, and the ladder arms it carries |
 | `rlp provider probe <id>` | one real round trip; a failure comes back classified, with a fix |
@@ -368,7 +397,7 @@ Add `--json` to any engine subcommand for the raw envelope. Exit codes:
 
 | Command | What it does |
 |---|---|
-| `/setup` | guided first run: mode → endpoints → model → worker arms → per-role models |
+| `/setup` | guided first run: mode → (tools already on this host) → endpoints → model → worker arms → per-role models |
 | `/direct on\|off\|status` | direct-only mode: work inline and never orchestrate |
 | `/rlp` | status card (ladder, brain, endpoints, unusable arms) + an action menu |
 | `/rlp-plan <request>` | the headless plan, rendered in chat |
@@ -377,6 +406,7 @@ Add `--json` to any engine subcommand for the raw envelope. Exit codes:
 | `/rlp-ladder` | the resolved ladder in full |
 | `/rlp-config` | show or edit the ladder (brain, arms, roles, gate, RLM knobs) |
 | `/rlp-roles` | the model each role resolves to, and the menu to change it |
+| `/rlp-watch` | the run's live worker windows and how to attach to each (read-only; RLP never attaches for you) |
 | `/commands [filter]` | the whole slash index, grouped (harness, RLP, skills, optional extensions) |
 | `/models [filter]` · `/models --pick` | models by provider, with ladder and credential marks |
 | `/provider` | endpoints, credential state, live connection test, and which arms cannot run |
@@ -394,10 +424,18 @@ rules — a credential is never printed and never placed on a command line.
 - **Guardrails are configuration.** `maxDispatchesPerTurn` caps a turn's fan-out;
   `workerTimeoutMs` kills a wedged worker so collection cannot block forever.
 - **Preflight, not hope.** A node whose arm has no credential, or whose harness
-  this plane cannot spawn, is failed with a fix line instead of burning a
-  dispatch (`rlp_plan` surfaces these under `preflight`).
-- **Cross-vendor review** is verified against the ladder's families and reported
-  as a violation when it cannot be satisfied.
+  cannot run here — no driver in the catalog, or the tool not on this PATH — is
+  failed with a fix line instead of burning a dispatch (`rlp_plan` surfaces
+  these under `preflight`). Unknown harness names are never silently dropped:
+  they parse with a warning and fail loudly at dispatch, not silently elsewhere.
+- **Cross-vendor review** is verified against the ladder's families — models and
+  tool vendors — and reported as a violation when it cannot be satisfied.
+- **External tools run as themselves.** A worker on `claude` or `jcode` executes
+  that CLI headless with the session's own environment; RLP injects no
+  credential into it, and the catalog records env-var *names*, never values. Each
+  tool's permission flags are plain `argv` data in `rlp-svc/rlp_svc/harnesses.py`
+  — including why Claude runs with `--dangerously-skip-permissions`, and how to
+  narrow it: see [SECURITY.md](SECURITY.md).
 - **Never merges.** Branches and (with a GitHub remote) PRs only.
 - **Secrets stay out of the repo.** Credentials live in `~/.rlp/agent/`, outside
   the checkout and git-ignored.

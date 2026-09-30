@@ -556,9 +556,11 @@ def _extensions() -> list[dict]:
 def _dispatch() -> list[dict]:
     """Can this host actually start a worker?
 
-    Dispatch is local: `rlp_dispatch` spawns the `rpi` harness in a git worktree.
-    That makes the whole plane two binaries — the harness and git — and both are
-    checkable. This is the group that used to ask about an external orchestration
+    Dispatch is local: `rlp_dispatch` spawns every worker in a git worktree.
+    The bundled lane runs the `rpi` harness, which makes it two binaries —
+    the harness and git — and both are checkable; external-harness workers run
+    their tool's own binary, and `_harnesses` below is the group that judges
+    those. This is the group that used to ask about an external orchestration
     plane and answer in warnings nothing could clear; the question worth asking
     is whether a worker can be spawned, and it has a real answer.
     """
