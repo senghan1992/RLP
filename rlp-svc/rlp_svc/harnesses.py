@@ -200,6 +200,40 @@ def resolve_binary(harness_id: str, which: Which | None = None) -> str | None:
     return None
 
 
+def binary_present(harness_id: str, which: Which | None = None, env: dict[str, str] | None = None) -> bool:
+    """Is a worker on this harness actually runnable here? PATH-only — no spawn.
+
+    `False` is reserved for the one fact that is cheap *and* certain: a
+    catalogued external tool whose binary is not on PATH. pi answers `True`
+    because RLP ships it (its dispatch resolves `rpi-bin` at spawn time, and a
+    Python-side guess must not exclude it), and a harness the catalog does not
+    carry answers `True` because D5's rule still holds — *not knowing* must not
+    silently drop a worker; the dispatcher's loud per-node failure is where an
+    unknown tool belongs. `RLP_HARNESS_SCAN=0` claims nothing: an offline host
+    probes nothing, and routing behaves exactly as it did before this existed.
+    """
+    e = dict(os.environ) if env is None else env
+    if scan_disabled(e):
+        return True
+    spec = HARNESSES.get(harness_id)
+    if spec is None or spec["dispatch"] == "internal":
+        return True
+    return resolve_binary(harness_id, which) is not None
+
+
+def vendor_of(harness_id: str) -> str | None:
+    """The tool vendor behind a harness, or None when there is no tool to name.
+
+    Only external (`template`) harnesses answer: pi's vendor string is RLP's
+    own name for itself, and an unlisted harness has no vendor to claim —
+    neither belongs in a reviewer's avoid set (see `plan.harness_vendor`).
+    """
+    spec = HARNESSES.get(harness_id)
+    if spec is None or spec["dispatch"] == "internal":
+        return None
+    return spec["vendor"]
+
+
 def auth_state(
     harness_id: str,
     env: dict[str, str] | None = None,

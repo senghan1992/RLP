@@ -8,7 +8,7 @@ session, no MCP transport, no worker processes.
 That makes RLP usable as a *library* by anything that has a request and wants
 an orchestration decision -- a CI job, a bot, another orchestrator, a test.
 
-Three properties are load-bearing and are what the prose cannot guarantee:
+Four properties are load-bearing and are what the prose cannot guarantee:
 
 1. **The gate is real.** A request that does not earn fan-out comes back as
    `{"mode": "direct"}` with zero downstream calls. `plan()` on a one-line fix
@@ -19,7 +19,15 @@ Three properties are load-bearing and are what the prose cannot guarantee:
 3. **Cross-vendor review is checked, not hoped for.** A `review` node routed
    onto the same vendor family as the code it reviews is reported as a
    violation; the planner then re-picks its arm on a different family when the
-   ladder allows, and says so.
+   ladder allows, and says so. Since external tools joined the ladder the rule
+   reads two axes: model family *and* the vendor of the tool that ran the code
+   — a claude-written diff reviewed through claude is not independent however
+   the arms are labelled.
+4. **A worker whose tool is not installed is not a worker.** Before routing,
+   an external harness whose binary is not on PATH marks its workers
+   unavailable through the same `excluded()` channel the operator's own
+   `available: false` uses — a plan cannot spend a dispatch on a tool that
+   is not there. (`RLP_HARNESS_SCAN=0` opts the host out of the probe.)
 """
 from __future__ import annotations
 
@@ -60,6 +68,17 @@ def family(model_ref: str) -> str:
     correct family the moment it is added.
     """
     return model_ref.partition("/")[0]
+
+
+def harness_vendor(harness: str | None) -> str | None:
+    """The tool vendor behind a harness name — the cross-vendor rule's other axis.
+
+    A model's `family` says who makes the *model*; this says who makes the
+    *tool running it*. Only external catalog harnesses answer (see
+    `harnesses.vendor_of`): pi's own vendor never enters an avoid set, so a
+    pi-only ladder's rule stays exactly "different model family", byte-stable.
+    """
+    return harnesses.vendor_of(harness or "")
 
 
 def credential_state(provider: str) -> str:
@@ -162,6 +181,38 @@ def _load_ladder(*, require_arms: bool = True) -> dict:
     return config
 
 
+def _without_absent_harnesses(config: dict) -> dict:
+    """Fold "that tool is not installed" into the ladder's availability channel.
+
+    `available` is the operator answering "can this worker run?"; a harness
+    whose binary is not on PATH is the same question with a computed answer,
+    so an absent external tool marks its workers unavailable *here*, in memory,
+    before routing — the roster, the router and `excluded()` all see it once,
+    and nothing edits the ladder file on disk. `harnesses.binary_present`
+    probes PATH only (no spawn), never claims anything for pi or an unknown
+    harness, and goes silent under `RLP_HARNESS_SCAN=0`, so a CI host and a
+    tool-rich host route the same offline.
+    """
+    updated: dict | None = None
+    for worker in config["workers"]:
+        if not worker.get("available", True):
+            continue
+        harness = worker.get("harness") or ""
+        if harnesses.binary_present(harness):
+            continue
+        if updated is None:
+            updated = dict(config, workers=[dict(w) for w in config["workers"]])
+        for w in updated["workers"]:
+            if w["id"] == worker["id"]:
+                w["available"] = False
+                binaries = ", ".join(harnesses.HARNESSES[harness]["binaries"])
+                w["availabilityNote"] = (
+                    f"harness {harness!r} not on PATH (looked for: {binaries}) — "
+                    "install the tool or repoint the worker"
+                )
+    return updated or config
+
+
 def waves(tasks: list[dict]) -> list[list[str]]:
     """Group a validated, topologically ordered DAG into dispatch waves.
 
@@ -191,10 +242,12 @@ def pick_arm(
     """Choose one model arm for a worker, honouring role, then vendor avoidance.
 
     Arms are priority-ordered: the first match is the default, i.e. where the
-    bulk of the spend goes. `avoid_families` only ever demotes an arm that
-    would otherwise match, and only if a same-role arm survives on another
-    family; the rationale string says which rule fired so a reader never has to
-    guess why a node is not on the ladder's first arm. `credential`, when
+    bulk of the spend goes. `avoid_families` is a set of vendor *names* —
+    model families, and since cross-harness ladders, external tool vendors —
+    and it only ever demotes an arm that would otherwise match, and only if a
+    same-role arm survives on another name; the rationale string says which
+    rule fired so a reader never has to guess why a node is not on the
+    ladder's first arm. `credential`, when
     given, is a `provider -> present|missing|unknown` callable: arms whose
     provider is known to have no credential are skipped in favour of a usable
     one, because planning a dispatch onto a dead arm wastes the whole node.
@@ -216,26 +269,39 @@ def pick_arm(
     return arm, rationale
 
 
-def _implemented_families(task: dict, by_id: dict[str, dict], routes: dict[str, dict]) -> set[str]:
-    """Vendor families of the code this node depends on (its reviewers' ban list)."""
-    fams: set[str] = set()
+def _implemented_vendors(task: dict, by_id: dict[str, dict], routes: dict[str, dict]) -> set[str]:
+    """Vendor names of the code this node depends on — its reviewers' ban list.
+
+    Two kinds of name enter. The **model family** of each dependency's arm is
+    the rule as it always was. The **tool vendor** of each dependency's
+    external harness is the same rule on its other axis: a review run *through
+    claude* of code written *through claude* is not independent even when the
+    arm on it claims another family — different coat of paint, same house. pi's
+    internal vendor never enters (see `harness_vendor`), so a pi-only ladder's
+    ban list is byte-identical to the one it had before tools were pluggable.
+    """
+    vendors: set[str] = set()
     for dep in task.get("depends_on") or []:
         dep_task = by_id.get(dep)
         if not dep_task or dep_task.get("domain") == "review":
             continue
         arm = routes.get(dep, {}).get("arm")
         if arm:
-            fams.add(family(arm))
-    return fams
+            vendors.add(family(arm))
+        tool_vendor = harness_vendor(routes.get(dep, {}).get("harness"))
+        if tool_vendor:
+            vendors.add(tool_vendor)
+    return vendors
 
 
 def route_nodes(config: dict, tasks: list[dict]) -> tuple[dict[str, dict], list[dict], list[dict]]:
     """Route every DAG node to a worker and a model arm.
 
     Returns (routes keyed by task id, cross-vendor violations, binding warnings).
-    A violation is a review node that ends up on the same vendor family as the
-    code it reviews *and* has no alternative left on that worker -- reported,
-    never silently accepted. A binding warning is a `roles.<role>` binding whose
+    A violation is a review node whose arm shares a model family with the code
+    it reviews *and* has no alternative left on that worker, or whose worker
+    runs the same vendor's tool the code was written with -- reported, never
+    silently accepted. A binding warning is a `roles.<role>` binding whose
     model has no dispatchable worker: the node falls back to arm priority, but
     the mismatch is named rather than hidden.
 
@@ -263,7 +329,7 @@ def route_nodes(config: dict, tasks: list[dict]) -> tuple[dict[str, dict], list[
             agent = roster[0]["id"] if roster else "pi"
             decision["agent_corrected_from"] = decision.get("agent")
         worker = workers[agent]
-        avoid = _implemented_families(task, by_id, routes) if (cross_vendor and role == "review") else None
+        avoid = _implemented_vendors(task, by_id, routes) if (cross_vendor and role == "review") else None
         # The routed worker's harness judges every arm on it: an external
         # harness's arms are the catalog's question, pi's and unknown ones
         # stay auth.json's (D3). Both `pick_arm` call sites below use this.
@@ -332,9 +398,20 @@ def route_nodes(config: dict, tasks: list[dict]) -> tuple[dict[str, dict], list[
             binding_warnings.append(
                 {"node": task["id"], "role": role, "model": binding_unavailable[0], "models": binding_unavailable}
             )
-        if avoid and record["model_family"] in avoid:
+        # Two ways a review fails independence, and the plan reports either:
+        # the arm it landed on shares a *model family* with the code, or the
+        # worker it landed on shares a *tool vendor*. The first a re-pick can
+        # often fix (pick_arm demotes it); the second is a property of the
+        # worker, so when the routed tool collides the violation is named,
+        # not swallowed — cross-vendor is a promise, and an unkeepable promise
+        # is reported rather than quietly downgraded.
+        reviewer_vendor = harness_vendor(worker_harness)
+        tool_collision = bool(reviewer_vendor and avoid and reviewer_vendor in avoid)
+        if avoid and (record["model_family"] in avoid or tool_collision):
             record["cross_vendor_violation"] = sorted(avoid)
-            violations.append({"node": task["id"], "families": sorted(avoid), "arm": arm["model"]})
+            if tool_collision:
+                record["cross_vendor_harness"] = worker_harness
+            violations.append({"node": task["id"], "families": sorted(avoid), "arm": arm["model"], "harness": worker_harness})
         if decision.get("laya_error"):
             record["laya_error"] = decision["laya_error"]
         routes[task["id"]] = record
@@ -353,6 +430,9 @@ def replan(focus: str, request: str, context: str = "") -> dict:
         config = _load_ladder()
     except ValueError as e:
         return {"ok": False, "error": str(e)[:300]}
+    # The same availability rule as plan(): a re-plan is a plan of a smaller
+    # request, and it must not reach for a tool the first plan could not have.
+    config = _without_absent_harnesses(config)
     depth = (config.get("planning") or {}).get("recursiveDepth", 1)
     if not depth:
         return {"ok": False, "error": "planning.recursiveDepth is 0 — recursive re-planning is disabled"}
@@ -468,13 +548,26 @@ def plan(
     # `direct` is the only truthful verdict, and it is also a perfectly good one
     # — RLP is a working coding agent without orchestration. Returning ok:false
     # instead would hand the brain an error for a question that has an answer.
+    #
+    # Uninstalled tools are folded into the availability channel here, just
+    # before routing: a plan that spends a dispatch on a tool this host does
+    # not have is not a plan, it is a failure with extra steps.
+    config = _without_absent_harnesses(config)
     if not config.get("configured") or not orch.roster(config):
-        why = (
-            orch.NOT_CONFIGURED
-            if not config.get("configured")
-            else "every worker in the ladder is marked unavailable — set \"available\": true on at "
-            f"least one of {[w['id'] for w in orch.excluded(config)]}"
-        )
+        excluded = orch.excluded(config)
+        if not config.get("configured"):
+            why = orch.NOT_CONFIGURED
+        elif excluded and all("not on PATH" in w["reason"] for w in excluded):
+            why = (
+                "every worker in the ladder runs a harness whose binary is not on this PATH — "
+                f"{[w['id'] for w in excluded]} — install the tool or repoint the worker to a "
+                "harness this host has (`rlp harness list` names what can run workers here)"
+            )
+        else:
+            why = (
+                "every worker in the ladder is marked unavailable — set \"available\": true on at "
+                f"least one of {[w['id'] for w in excluded]}"
+            )
         return {
             "ok": True,
             "result": {

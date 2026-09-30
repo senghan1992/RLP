@@ -10,6 +10,22 @@ offline suite fails if they drift.
 
 ### Added
 
+- **The planner now reads the host, not just the ladder.** Two guards, both
+  answering the same question — *is this worker real here?* First: an external
+  harness whose binary is not on PATH marks its workers unavailable in memory,
+  just before routing, through the very `excluded()` channel the operator's own
+  `available: false` uses — the plan names them with a "not on PATH" note and
+  a fix, a ladder whose every tool is missing degrades to an honest `direct`
+  instead of a doomed dispatch, and `RLP_HARNESS_SCAN=0` claims nothing (the
+  probe is a PATH lookup only — never a spawn — so offline hosts and CI are
+  untouched). Second: the cross-vendor review rule gained its other axis. A
+  review node's ban list now holds the *tool vendors* of the code it reviews
+  beside the model families, so `anthropic/opus`-labelled arms on a claude-run
+  worker are demoted when claude wrote the code — and a review that survives
+  its arms but not its tool is reported as a violation naming the harness that
+  collided. pi's own vendor never enters a ban list, so a pi-only ladder's
+  plans are byte-stable; that is what the unmodified existing tests prove.
+
 - **Workers can now actually run on other people's tools.** The route's driver
   stopped being paperwork: `rlp_dispatch` executes it. The argv template
   assembles into a headless `claude`, `omp`, `jcode` or `muse` in the node's

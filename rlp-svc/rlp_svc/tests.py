@@ -8,7 +8,9 @@ belongs to `selftest.sh`, which pays for the real laya load.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -99,8 +101,38 @@ def check(condition: bool, message: str) -> None:
         print(f"FAIL {message}")
 
 
-def with_ladder(fn, *, tasks: list[dict] | None = None, triage: dict | None = None, ladder: dict | None = None) -> object:
-    """Run `fn` with a ladder on disk and the two model layers stubbed."""
+@contextlib.contextmanager
+def _environ(updates: dict[str, "str | None"]):
+    """Temporarily set env vars (None clears one) — for PATH and killswitch cases.
+
+    `binary_present` reads PATH and `RLP_HARNESS_SCAN` through `os.environ` at
+    call time (shutil.which does), so a test can place the host in any install
+    state without stubbing module internals — and without ever spawning the
+    tool it pretends about.
+    """
+    saved = {k: os.environ.get(k) for k in updates}
+    for k, v in updates.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def with_ladder(fn, *, tasks: list[dict] | None = None, triage: dict | None = None, ladder: dict | None = None, router=None) -> object:
+    """Run `fn` with a ladder on disk and the two model layers stubbed.
+
+    `router` replaces the routing stub when a test needs nodes on specific
+    workers (the default puts everything on the first roster card); same
+    signature as `route.route`, and it must answer like laya does.
+    """
     from . import decompose, orchestration, plan, route, triage as triage_mod
 
     original = {
@@ -120,12 +152,12 @@ def with_ladder(fn, *, tasks: list[dict] | None = None, triage: dict | None = No
         "ok": True,
         "result": {"engine": "stub", "tasks": tasks if tasks is not None else TASKS},
     }
-    route.route = lambda title, brief, domain, roster, gate=0.55: {
+    route.route = router or (lambda title, brief, domain, roster, gate=0.55: {
         "agent": roster[0]["id"],
         "confidence": 0.8,
         "engine": "laya",
         "escalate": False,
-    }
+    })
     try:
         return fn()
     finally:
@@ -459,6 +491,153 @@ def test_plan_excludes_unavailable() -> None:
     check(broken["mode"] == "direct", f"an all-unavailable ladder degrades to direct: {broken}")
     check("available" in broken["orchestration_unavailable"] and "pi" in broken["orchestration_unavailable"],
           f"and says which workers were switched off: {broken['orchestration_unavailable']}")
+
+
+def test_plan_excludes_absent_harnesses() -> None:
+    """A worker whose tool is not installed is excluded the way `available: false` is.
+
+    The ladder says "this worker runs on claude"; the host says there is no
+    claude. Those are the same question with two answerers, and the plan must
+    read the host: PATH is the seam (`binary_present` is which-only, never a
+    spawn), so this test swaps in an empty directory and a directory holding a
+    fake executable rather than pretending the code under test is elsewhere.
+    """
+    from . import harnesses as h
+    from . import plan
+
+    absent = lambda _n: None
+    with _environ({"RLP_HARNESS_SCAN": None}):
+        check(h.binary_present("pi", which=absent), "pi is present wherever RLP is — internal dispatch is not a PATH question")
+        check(h.binary_present("claude-native", which=absent), "an unknown harness stays permissive (D5): a silent drop is not its place, the dispatcher's loud failure is")
+        check(not h.binary_present("claude", which=absent), "a catalogued external tool that is not on PATH is absent")
+        check(h.binary_present("claude", which=lambda n: "/somewhere/claude" if n == "claude" else absent(n)), "…and present when it is")
+    with _environ({"RLP_HARNESS_SCAN": "0"}):
+        check(h.binary_present("claude", which=absent), "RLP_HARNESS_SCAN=0 claims nothing — offline hosts probe nothing")
+
+    ladder = {
+        "brain": "alpha/alpha-large",
+        "workers": [
+            {
+                "id": "pi",
+                "harness": "pi",
+                "models": [{"model": "alpha/alpha-large", "roles": ["code", "review", "docs"], "when": "carries the work"}],
+            },
+            {
+                "id": "cc",
+                "harness": "claude",
+                "models": [{"model": "claude/sonnet", "roles": ["code", "review"], "when": "big refactors"}],
+            },
+        ],
+        "routing": {"escalateBelow": 0.55, "maxDispatchesPerTurn": 4},
+        "review": {"crossVendor": True},
+    }
+    to_cc = lambda title, brief, domain, roster, gate=0.55: {
+        "agent": roster[-1]["id"], "confidence": 0.8, "engine": "laya", "escalate": False,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        empty = Path(tmp) / "empty"
+        empty.mkdir()
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "claude"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+
+        with _environ({"PATH": str(empty), "RLP_HARNESS_SCAN": None}):
+            result = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=ladder)["result"]
+            check(all(r["agent"] == "pi" for r in result["routes"].values()),
+                  f"the uninstalled tool is never routed: {[r['agent'] for r in result['routes'].values()]}")
+            excluded = result.get("excluded_workers", [])
+            check([w["id"] for w in excluded] == ["cc"] and "not on PATH" in excluded[0]["reason"],
+                  f"the exclusion rides the availability channel, with a note: {excluded}")
+
+            cc_only = json.loads(json.dumps(ladder))
+            cc_only["workers"] = [w for w in cc_only["workers"] if w["id"] == "cc"]
+            dead = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=cc_only)["result"]
+            check(dead["mode"] == "direct" and "not on this PATH" in dead.get("orchestration_unavailable", ""),
+                  f"a plan whose every tool is uninstalled says so, with the fix: {dead}")
+
+        with _environ({"PATH": str(bin_dir), "RLP_HARNESS_SCAN": None}):
+            present = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=ladder, router=to_cc)["result"]
+            check("excluded_workers" not in present, f"an installed tool is not excluded: {present.get('excluded_workers')}")
+            check(present["routes"]["t1"]["agent"] == "cc" and (present["routes"]["t1"].get("driver") or {}).get("kind") == "external",
+                  f"and it routes, with its driver: {present['routes']['t1']}")
+
+        with _environ({"PATH": str(empty), "RLP_HARNESS_SCAN": "0"}):
+            off = with_ladder(lambda: plan.plan("x", mode="orchestrate"), ladder=ladder, router=to_cc)["result"]
+            check("excluded_workers" not in off, "scan off means the plan probes nothing — the ladder says what it says")
+
+
+def test_cross_harness_vendor_avoidance() -> None:
+    """Cross-vendor review holds on the tool axis: the same CLI is not independence.
+
+    Code written *through claude* reviewed *through claude* is not a second
+    opinion however the arm is labelled — the ban list gains the tool vendor
+    beside the model family. pi's vendor never enters (it is RLP's own harness,
+    not another company's CLI), so pi-only ladders are byte-stable; that is
+    what `test_plan_orchestrates` passing unmodified proves.
+    """
+    from . import orchestration as orch
+    from . import plan
+
+    check(plan.harness_vendor("pi") is None, "RLP's own harness has no vendor to avoid")
+    check(plan.harness_vendor("claude") == "anthropic", "an external harness brings its catalog vendor")
+    check(plan.harness_vendor("claude-native") is None, "an unknown harness cannot be assigned a vendor")
+
+    ladder = {
+        "brain": "alpha/alpha-large",
+        "workers": [
+            {
+                "id": "cc",
+                "harness": "claude",
+                "models": [
+                    {"model": "claude/sonnet", "roles": ["code"], "when": "implements"},
+                    {"model": "anthropic/opus", "roles": ["review"], "when": "another provider's name on the same tool"},
+                    {"model": "openai/gpt-5", "roles": ["review"], "when": "the survivor"},
+                ],
+            },
+            {
+                "id": "jj",
+                "harness": "jcode",
+                "models": [{"model": "jcode/g1", "roles": ["code", "review"], "when": "a different tool"}],
+            },
+        ],
+        "routing": {"escalateBelow": 0.55, "maxDispatchesPerTurn": 4},
+        "review": {"crossVendor": True},
+    }
+    parsed = orch.parse(json.dumps(ladder), "test")
+    tasks = [TASKS[0], TASKS[2]]  # t1 implements, t3 reviews it
+
+    everything_on_cc = lambda title, brief, domain, roster, gate=0.55: {
+        "agent": "cc", "confidence": 0.8, "engine": "laya", "escalate": False,
+    }
+    routes, violations, _ = with_ladder(
+        lambda: plan.route_nodes(parsed, tasks), ladder=ladder, router=everything_on_cc
+    )
+    check(routes["t1"]["arm"] == "claude/sonnet", "the implementer takes its tool's arm")
+    check(routes["t3"]["arm"] == "openai/gpt-5",
+          f"the vendor ban demotes the arm *labelled* like the tool's vendor, which family-only avoidance let through: {routes['t3']['arm']}")
+    check("re-picked" in routes["t3"]["why_this_arm"], f"and says which rule fired: {routes['t3']['why_this_arm']}")
+    check(bool(violations) and violations[0]["node"] == "t3",
+          f"a same-tool review is still a violation even after the arm survives: {violations}")
+    check("anthropic" in violations[0]["families"], f"the ban list shows the tool vendor, so the fix is legible: {violations[0]['families']}")
+    check(routes["t3"].get("cross_vendor_harness") == "claude", "the violation names the tool that collided")
+
+    review_elsewhere = lambda title, brief, domain, roster, gate=0.55: {
+        "agent": "jj" if domain == "review" else "cc", "confidence": 0.8, "engine": "laya", "escalate": False,
+    }
+    routes2, violations2, _ = with_ladder(
+        lambda: plan.route_nodes(parsed, tasks), ladder=ladder, router=review_elsewhere
+    )
+    check(routes2["t3"]["agent"] == "jj" and not violations2,
+          f"the other tool is the clean answer the rule was aiming at: {routes2['t3']}")
+
+    # And the pi-only path, once more explicitly: the ban list holds families
+    # only, so `test_plan_orchestrates` is not a coincidence.
+    pi_parsed = orch.parse(json.dumps(LADDER), "test")
+    pi_routes, pi_violations, _ = with_ladder(lambda: plan.route_nodes(pi_parsed, tasks), ladder=LADDER)
+    check(not pi_violations and "pi" not in (pi_routes["t3"].get("cross_vendor_violation") or []),
+          f"a pi implementer adds no vendor to the ban list: {pi_violations}")
 
 
 def test_ladder_validation() -> None:
@@ -2115,6 +2294,8 @@ def main() -> None:
         test_harness_catalog,
         test_availability,
         test_plan_excludes_unavailable,
+        test_plan_excludes_absent_harnesses,
+        test_cross_harness_vendor_avoidance,
         test_cli_surface,
         test_version_consistency,
         test_chat_contract,
