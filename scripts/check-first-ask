@@ -1,0 +1,149 @@
+#!/bin/sh
+# Assert that a fresh install ASKS — in a terminal, without being told to.
+#
+#   sh scripts/check-first-ask [<rlp binary>]
+#
+# `scripts/check-first-run` judges the *report* a new host gets from `rlp doctor`.
+# This judges the thing a person actually experiences first: start `rlp` on a host
+# with no credential and no model arms, and the guided setup should begin by
+# itself — the mode, then the endpoints, then the models — rather than waiting for
+# somebody to know the word `/setup`. That is a behaviour of the running TUI, so
+# it can only be checked from the running TUI, which is what this does: a real
+# session under a real pty, with the keystrokes a hesitant user would press
+# (escape, over and over), and assertions on what the terminal showed.
+#
+# Three properties are worth pinning, and each has been broken before:
+#
+#   1. it asks. A first run that says nothing is a first run nobody finishes;
+#   2. cancelling writes nothing. Asking is only safe because "esc esc esc" is a
+#      complete answer, so the ladder must come out byte-identical;
+#   3. it is not a trap. RLP_NO_SETUP=1 must produce a silent start, because a
+#      scripted or supervised launch has nobody at the keyboard to answer, and a
+#      tool that ambushes those sessions gets disabled wholesale.
+#
+# Env: none required. Needs `script` (util-linux) for the pty; outside CI it
+# reports a skip rather than failing, since macOS ships a `script` with different
+# flags and this check is about RLP's behaviour, not about the host's toolkit.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+RLP="${1:-$ROOT/scripts/rlp}"
+T=$(mktemp -d "${TMPDIR:-/tmp}/rlp-ask.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+
+[ -x "$RLP" ] || { echo "check-first-ask: no rlp binary at $RLP" >&2; exit 2; }
+
+if ! command -v script >/dev/null 2>&1; then
+  if [ -n "${CI:-}" ]; then
+    echo "check-first-ask: CI must run this check, and \`script\` (util-linux) is missing" >&2
+    exit 1
+  fi
+  echo "check-first-ask: skipped — no \`script\` binary for a pty on this host"
+  exit 0
+fi
+
+# --- a throwaway "fresh install" -----------------------------------------------
+# A real agent dir built from this checkout, with an empty provider store and the
+# ladder exactly as it ships. Nothing here touches ~/.rlp: HOME moves the
+# harness's own state, RLP_CODING_AGENT_DIR moves RLP's, and the two credential
+# files are pointed into the sandbox so a stray write cannot reach a real key.
+mkdir -p "$T/home"
+RLP_CODING_AGENT_DIR="$T/agent" RLP_NO_MIGRATE=1 RLP_QUIET=1 sh "$ROOT/scripts/sync-agent-dir" "$ROOT" >/dev/null 2>&1 || {
+  echo "check-first-ask: sync-agent-dir failed into $T/agent" >&2
+  exit 2
+}
+cp "$ROOT/agent/rlp/orchestration.json" "$T/agent/orchestration.json"
+printf '{}\n' > "$T/agent/models.json"
+printf '{}\n' > "$T/agent/auth.json"
+chmod 600 "$T/agent/models.json" "$T/agent/auth.json"
+BEFORE=$(cksum "$T/agent/orchestration.json")
+
+# One escape per question, spaced out: the wizard asks several, some of them after
+# a python subprocess has answered, and a burst of keystrokes would be swallowed
+# rather than answered. `--no-session` keeps the sandbox's session dir empty.
+cancel_keystrokes() {
+  sleep "${RLP_ASK_START:-14}"
+  i=0
+  while [ $i -lt 10 ]; do
+    printf '\033'
+    i=$((i + 1))
+    sleep 2
+  done
+  sleep 6
+}
+
+run_session() {
+  # $1: log file. Everything else is the same environment a person would have.
+  cancel_keystrokes | env -i \
+    PATH="$PATH" \
+    HOME="$T/home" \
+    TERM="${TERM:-xterm-256color}" \
+    COLUMNS=120 LINES=40 \
+    RLP_CODING_AGENT_DIR="$T/agent" \
+    RLP_ROOT="$ROOT" \
+    RLP_PI_MODELS="$T/agent/models.json" \
+    RLP_PI_AUTH="$T/agent/auth.json" \
+    ${RLP_QUIET_RUN:+RLP_NO_SETUP=1} \
+    timeout "${RLP_ASK_TIMEOUT:-180}" script -qec "$RLP --no-session" "$1" >/dev/null 2>&1 || true
+  [ -s "$1" ] || { echo "check-first-ask: no session output in $1" >&2; exit 1; }
+}
+
+run_session "$T/ask.log"
+RLP_QUIET_RUN=1 run_session "$T/quiet.log"
+
+# --- the assertions -------------------------------------------------------------
+RLP_T="$T" RLP_BEFORE="$BEFORE" python3 - "$T/ask.log" "$T/quiet.log" "$T/agent/orchestration.json" <<'PY'
+import os
+import re
+import sys
+
+ANSI = re.compile(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)?|\x1b\[[0-9;?]*[A-Za-z]|\x1b[@-_][0-?]*[ -/]*[@-~]")
+
+
+def text(path):
+    raw = open(path, "rb").read().decode("utf-8", "replace")
+    return ANSI.sub("", raw)
+
+
+problems = []
+asked, quiet, ladder_path = sys.argv[1], sys.argv[2], sys.argv[3]
+loud = text(asked)
+hushed = text(quiet)
+
+# 1. it asks, and asks the first question that matters.
+for needle, why in [
+    ("first run", "a first run says why it is interrupting you"),
+    ("Step 1 of 5", "the first question is what this host does with a request"),
+    ("Direct only", "and the direct-only mode is offered by name, not buried"),
+    ("Step 2 of 5", "the endpoints question follows"),
+    ("setup done", "cancelling everything still lands on a summary, not a dead end"),
+]:
+    if needle not in loud:
+        problems.append(f"the first run never showed {needle!r} — {why}")
+
+# 2. cancelling wrote nothing. The keystrokes answered every question with
+#    escape, so the ladder must be the file that shipped.
+before = os.environ["RLP_BEFORE"]
+import subprocess
+
+after = subprocess.run(["cksum", ladder_path], capture_output=True, text=True).stdout.strip()
+if after != before:
+    problems.append(f"cancelling the wizard changed the ladder:\n    before {before}\n    after  {after}")
+
+# 3. the opt-out means it. RLP_NO_SETUP is the difference between a guided first
+#    run and a tool that cannot be scripted; if the questions keep coming with it
+#    set, people disable the extension rather than the prompt.
+for needle in ("first run", "Step 1 of 5"):
+    if needle in hushed:
+        problems.append(f"RLP_NO_SETUP=1 still asked ({needle!r}) — the quiet start is not quiet")
+
+if problems:
+    print("first-ask check FAILED:")
+    for p in problems:
+        print(f"  - {p}")
+    head = "\n    ".join(loud.splitlines()[-25:])
+    print(f"  last lines of the session:\n    {head}")
+    sys.exit(1)
+
+print("  first-run check ok: a fresh host is asked, escape is a complete answer, RLP_NO_SETUP is honoured")
+PY

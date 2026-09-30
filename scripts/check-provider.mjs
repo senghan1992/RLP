@@ -20,19 +20,24 @@
  *      back into the session;
  *   3. `/provider test <id>` classifies the failure and never raises;
  *   4. `/provider remove <id>` takes it back out, credential included;
- *   5. `/setup` runs the whole wizard with every dialog cancelled and reaches
- *      its summary — and writes nothing, because nothing was chosen.
+ *   5. `/direct on` and `/direct off` move the ladder's gate, and `/direct`
+ *      reports which mode is in effect and what put it there;
+ *   6. `/setup` runs the whole wizard with every dialog cancelled and reaches its
+ *      summary — and writes nothing, because nothing was chosen.
  *
  * It talks to no model and needs no credential: the endpoint it attaches is
- * `http://127.0.0.1:9` (nothing listens there), and both stores are redirected
- * to a temporary directory, so a run can never touch the user's real
- * credentials. The ladder is read but never written.
+ * `http://127.0.0.1:9` (nothing listens there), and all three pieces of state —
+ * models.json, auth.json and the ladder — are redirected into a temporary
+ * directory, so a run can never touch the user's real credentials or reset their
+ * model choices. The ladder *is* written here, because `/direct` is a write path
+ * and asserting on a copy is the only way to prove it without taking somebody's
+ * configuration away from them.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const binary = process.argv[2] || "rlp";
 // RLP's own agent dir, resolved the same way `paths.py`, `rpi-bin` and the
@@ -41,11 +46,19 @@ const binary = process.argv[2] || "rlp";
 // does not exist — a check that could not fail is not a check.
 const AGENT_DIR =
 	process.env.RLP_CODING_AGENT_DIR || process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".rlp", "agent");
-const LADDER = join(AGENT_DIR, "orchestration.json");
 const STEP_TIMEOUT_MS = 120_000;
 const SANDBOX = mkdtempSync(join(tmpdir(), "rlp-provider-check-"));
 const MODELS = join(SANDBOX, "models.json");
 const AUTH = join(SANDBOX, "auth.json");
+// The ladder is copied, not read in place: `/direct` writes it, and a check that
+// exercised a write path against the user's own file would leave them with
+// someone else's mode afterwards. `RLP_ORCHESTRATION` is the engine's own
+// override, so this is the same file every part of the session reads.
+const LADDER = join(SANDBOX, "orchestration.json");
+const REAL_LADDER = process.env.RLP_ORCHESTRATION
+	? resolve(process.env.RLP_ORCHESTRATION)
+	: join(AGENT_DIR, "orchestration.json");
+copyFileSync(REAL_LADDER, LADDER);
 const PROVIDER = "rlp-check-demo";
 const SECRET = "sk-check-secret-value";
 
@@ -58,7 +71,7 @@ function digest(path) {
 
 const child = spawn(binary, ["--mode", "rpc", "--no-session"], {
 	stdio: ["pipe", "pipe", "pipe"],
-	env: { ...process.env, RLP_PI_MODELS: MODELS, RLP_PI_AUTH: AUTH },
+	env: { ...process.env, RLP_PI_MODELS: MODELS, RLP_PI_AUTH: AUTH, RLP_ORCHESTRATION: LADDER },
 });
 let buffer = "";
 let onNotify = null;
@@ -247,7 +260,57 @@ try {
 	record(skillLines.length >= 5, `RLP's own skills are installed and indexed: ${skillLines.length}`);
 	console.log(`  ok  /commands indexes RLP's own extensions and ${skillLines.length} skills, once each`);
 
-	// --- 8. the whole wizard, every dialog cancelled
+	// --- 7. the mode switch, which is a write path into the ladder
+	const ladderBefore = digest(LADDER);
+	const gateOf = () => {
+		try {
+			return JSON.parse(readFileSync(LADDER, "utf8"))?.routing?.gate ?? "(absent)";
+		} catch {
+			return "(unreadable)";
+		}
+	};
+	const gateAtStart = gateOf();
+	const onDirect = await step(
+		"/direct on",
+		"/direct on",
+		(m) => m.includes("mode is now"),
+	);
+	record(onDirect.matched.includes("direct-only"), `on says what it turned off: ${onDirect.matched.split("\n")[0]}`);
+	record(gateOf() === "direct", `the ladder on disk really says direct (was ${gateAtStart})`);
+	console.log("  ok  /direct on writes routing.gate=direct through the engine");
+
+	const status = await step("/direct (status)", "/direct", (m) => m.includes("mode ·"));
+	record(status.matched.includes("direct-only"), "the status line names the mode in effect");
+	record(status.matched.includes("$RLP_DIRECT") || status.matched.includes("routing.gate"), "and what put it there");
+	record(
+		status.matched.includes("/direct off") || status.matched.includes("rlp mode"),
+		"and the way back, without being asked for",
+	);
+	console.log("  ok  /direct reports the effective mode, its source, and the way out");
+
+	const confused = await step("/direct <nonsense>", "/direct sideways", (m) => m.includes("usage: /direct"));
+	record(
+		confused.matched.includes("on") && confused.matched.includes("off"),
+		"a wrong argument names the right ones",
+	);
+
+	const off = await step(
+		"/direct off",
+		"/direct off",
+		(m) => m.includes("mode is now"),
+	);
+	record(off.matched.includes("full"), "off hands the decision back to the gate");
+	record(gateOf() === "hybrid", `and the ladder says hybrid again (got ${gateOf()})`);
+	// Whatever this host's ladder said before, the round trip ends where it
+	// started — a switch that only ever turns one way is not a switch.
+	if (gateAtStart === "hybrid" || gateAtStart === "direct") {
+		record(gateOf() === "hybrid", "the round trip leaves the default gate");
+	}
+	console.log("  ok  /direct on|off round-trips through the validated config path");
+
+	// --- 8. the whole wizard, every dialog cancelled. The digest is taken here,
+	// after the mode round trip above, because that round trip is allowed to
+	// write and this one is not.
 	const before = digest(LADDER);
 	const setup = await step(
 		"/setup (all dialogs cancelled)",
@@ -264,15 +327,23 @@ try {
 	// credentialed provider to choose models from, so the assertion is on the
 	// shape of each branch rather than on a fixed count. What must hold either
 	// way: the endpoints step is always offered, and a skipped step is *said*.
-	const asked = setup.dialogs.join(" | ");
-	const skippedModelSteps = setup.notifies.some((m) => m.includes("skipping the brain"));
+	// The questions are numbered out of five now, and the first one is the mode:
+	// what this host does with a request. Everything after it depends on the
+	// answer, so a wizard that cancelled with no credentialed provider must not
+	// offer the model steps as empty pickers.
+	// The arms step prints its numbered list as a message and asks one input, so
+	// "what the wizard showed" is dialogs *and* notifies — judging the dialogs
+	// alone made a step that ran look like a step that was skipped.
+	const asked = [...setup.dialogs, ...setup.notifies].join(" | ");
+	const skippedModelSteps = setup.notifies.some((m) => m.includes("no provider has a credential"));
 	record(
-		asked.includes("Step 1 of 4"),
-		`the wizard offers the endpoints step (saw ${setup.dialogs.length}: ${asked.slice(0, 200)})`,
+		asked.includes("Step 1 of 5"),
+		`the wizard asks what RLP should do (saw ${setup.dialogs.length}: ${asked.slice(0, 220)})`,
 	);
+	record(asked.includes("Step 2 of 5"), "and then offers the endpoints step");
 	if (skippedModelSteps) {
 		record(
-			!asked.includes("Step 2 of 4") && !asked.includes("Step 3 of 4"),
+			!setup.dialogs.join(" | ").includes("Step 3 of 5") && !asked.includes("Step 4 of 5"),
 			"with no credentialed provider, the model steps are not offered as empty pickers",
 		);
 		record(
@@ -281,8 +352,8 @@ try {
 		);
 	} else {
 		record(
-			asked.includes("Step 2 of 4") && asked.includes("Step 3 of 4"),
-			`with a credentialed provider, the brain and arm steps are offered: ${asked.slice(0, 200)}`,
+			asked.includes("Step 3 of 5") && asked.includes("Step 4 of 5"),
+			`with a credentialed provider, the model and arm steps are offered: ${asked.slice(0, 220)}`,
 		);
 	}
 	record(setup.matched.includes("reload"), "the summary says how to pick the changes up");

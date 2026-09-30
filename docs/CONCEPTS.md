@@ -66,13 +66,14 @@ command is a file drop plus `/reload`, never a rebuild.
 | `/rlp-config` | show the ladder, or edit it in place: brain, worker arms, per-role models, gate |
 | `/rlp-roles` | the model each role resolves to, and the menu to change it: pick a role, then multi-select a provider's models (a priority chain) |
 | `/rlp-run <request>` | composes `rlp -p "…"` into the editor — dispatch needs a real session |
+| `/direct on\|off\|status` | direct-only mode: every request inline, no gate and no decision model — or the gate back, or what is in effect and what put it there |
 
 **Finding things, and attaching models**
 
 | Command | What it does |
 |---|---|
 | `/commands [filter]` | the whole menu, grouped: harness built-ins, RLP, extensions, skills, and the shell side |
-| `/setup` | the guided first run: doctor → connect/key the endpoints → pick the brain → pick the worker arms (cross-vendor rule stated) → bind the planner roles → re-check. Every step is skippable |
+| `/setup` | the guided first run: mode → connect/key the endpoints → the model RLP works on → the worker arms (cross-vendor rule stated) → the model for each role → re-check. Every step is skippable, and it starts by itself on a host that cannot work yet |
 | `/models [filter]` | models grouped by provider — `●` this session, `★` your default, `⚑` ladder arm, `○` no credentials |
 | `/models --pick` | provider → model → use for this session, set as default, add as an RLP ladder arm, or make it the orchestrator |
 | `/provider` | every endpoint with its credential state **and which of them the ladder actually dispatches to**; orphan arms are named, so "the model is in the list but nothing runs" has a reason |
@@ -88,7 +89,7 @@ so it cannot drift the way a hardcoded list would.
 
 Reading commands (`/rlp`, `/rlp-plan`, `/rlp-triage`, `/rlp-doctor`,
 `/rlp-ladder`, `/commands`, `/models`) change nothing. The ones that write say so
-and are backed up first: `/rlp-config`, `/rlp-roles`, `/provider`, `/setup` edit
+and are backed up first: `/rlp-config`, `/rlp-roles`, `/provider`, `/direct`, `/setup` edit
 the ladder (validated, timestamped backup, atomic replace) or the provider store
 (same rules, plus `0600` on `auth.json`), and a credential is never put on a
 command line. `/rlp-run` only composes a command into the editor.
@@ -192,6 +193,12 @@ merges, never force-pushes, never touches a protected branch.
 
 ## The engine is resident, and why that matters
 
+(One mode has no engine at all: with `routing.gate: "direct"` the session does
+not warm the resident process, because nothing will ask it a question. That is
+the cheapest of the three ways to be fast here — the other two being "load it
+once" and "load it lazily".)
+
+
 laya is a 421M-parameter checkpoint. Measured on this host: **~150 s to load,
 ~4–8 s per decision** on CPU. Read that second number against the design — the
 gate is supposed to be the cheap decision made before the expensive one — and
@@ -247,7 +254,10 @@ The ladder has two halves, and only one of them can be shipped:
 file. `rlp ladder` prints `NOT CONFIGURED`, `rlp doctor` fails one line with
 `/setup` as the fix, `rlp plan` answers `direct` with
 `orchestration_unavailable` set, and the agent works as an ordinary coding
-agent in the meantime. The alternative — shipping a plausible default arm —
+agent in the meantime — and a first run does not wait to be asked: starting
+`rlp` in a terminal on such a host begins the guided setup by itself, because
+"run /setup" is an instruction nobody reads until after they have already
+wondered why nothing works. The alternative — shipping a plausible default arm —
 means every fresh install plans dispatches onto a model the host cannot serve,
 and that failure surfaces at the worker, three steps from its cause.
 
@@ -355,7 +365,16 @@ plus an independent review, or three deliverable verbs joined into clauses;
 - a *confident* laya `direct` is never overridden — the cheap,
 always-correct-enough default stands.
 
-Set `routing.gate: "laya"` to restore the old behaviour. The brain's contract
+Set `routing.gate: "laya"` to restore the old behaviour. Set it to `"direct"` to
+stop asking entirely: every request is handled inline, `triage` answers
+`engine: "direct-mode"` without loading laya, `rlp plan` returns before the
+decomposer exists, and the extension does not warm the resident engine at all.
+`/direct on`, `rlp mode direct` and `rlp --direct` (this session only, via
+`$RLP_DIRECT`) are the three ways in. Two ways out, both explicit: `--mode
+orchestrate --because "…"` claims a verdict, and `--force` (the tool parameter
+`force`, and the brain's way of saying *the user asked*) asks the gate without
+claiming anything. A switch with no way out under pressure is a trap.
+The brain's contract
 still applies on top: the gate sets the direction and the safe default, and the
 brain may override only by naming two or more independent deliverables.
 `rlp plan` makes the same override available, and records it as an assertion
@@ -402,6 +421,9 @@ decision, not an operation.
 rlp doctor            # deps, credentials, endpoints, ladder, checkpoint, host wiring — 0.2 s
 rlp doctor --warm     # plus one real laya round trip (~170 s cold, honest about it)
 rlp provider list     # endpoints, credential state, and the ladder arms each one carries
+rlp mode              # direct-only or full: does this host orchestrate, and what says so
+rlp mode direct       # switch it (also /direct on in a session, rlp --direct for one launch)
+rlp progress          # how far this host is from installed to working, and the next step
 rlp provider probe ID # one real round trip; the failure comes back classified
 /rlp-doctor           # the same report, inside a session
 /setup                # the guided first run, inside a session
@@ -445,6 +467,8 @@ change a plan or a dispatch.
 | `RLP_HOME` | run ledgers and project memory (default `~/.rlp`) — not the agent dir |
 | `RLP_NO_MIGRATE=1` | do not copy pi's credentials into `~/.rlp/agent` on install |
 | `RLP_IDENTITY` | `rlp` = brain (contract+tools+engine); unset/`worker` = bare harness |
+| `RLP_DIRECT` | direct-only for this process tree: outranks `routing.gate`, and `rlp` clears it before a worker starts so a mode does not leak downward |
+| `RLP_NO_SETUP=1` | do not run the guided setup on first launch (for sessions with no keyboard at the other end) |
 | `RPI_DEFAULT_MODEL` | the `rpi` session default, beating saved settings |
 | `RLP_DECOMPOSE_MODEL` | decomposer model, `provider/model` |
 | `RLP_SKIP_CREDENTIAL_PREFLIGHT` | skip the planner's per-arm credential check |

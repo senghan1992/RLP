@@ -8,6 +8,7 @@ description: Which models this host can use — the RLP ladder arms, which are d
 Answer "what models can I actually use, and which will RLP pick?".
 
 ```bash
+rlp mode      # direct-only or full: does this host orchestrate at all? (source included)
 rlp ladder    # the resolved ladder, arms in priority order, exclusions marked
 rlp models    # every model grouped by provider, with credential state
 ```

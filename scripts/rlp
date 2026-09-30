@@ -33,7 +33,7 @@ SVC_PY=$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)
 # Subcommands owned by the decision engine. Anything else belongs to the agent,
 # including the harness's own flags (-p, --model, ...).
 case "${1:-}" in
-  plan|triage|decompose|route|llm-route|ladder|roster|config|replan|verify|memory|remember|doctor|serve|engine|provider|version)
+  plan|triage|decompose|route|llm-route|ladder|mode|roster|config|replan|verify|memory|remember|doctor|progress|serve|engine|provider|version)
     if [ -z "$SVC_PY" ]; then
       echo "rlp: decision engine not installed." >&2
       echo "     run: sh $ROOT/scripts/install.sh" >&2
@@ -54,19 +54,26 @@ if [ "${1:-}" = "help-tool" ] || [ "${1:-}" = "--rlp-help" ]; then
   cat <<'USAGE'
 rlp — Recursive Laya Pi
 
-FIRST RUN: start `rlp` and type /setup. Until a provider is connected and the
-ladder has model arms, RLP works as a plain coding agent and handles every
-request inline; `rlp doctor` and `rlp ladder` both say so in one line.
+FIRST RUN: start `rlp` and it asks. A host with no credential and no model arms
+has nothing to work with, so the first session runs the guided setup: the mode,
+the endpoints and their keys, the model RLP works on, the worker arms and the
+per-role models. Every question is skippable; `RLP_NO_SETUP=1` keeps the old
+quiet start. `/setup` reruns it by hand, and `rlp doctor` says the same thing
+without a TUI.
 
-  rlp                        the agent: triage, then waves of workers in
-                             isolated worktrees when the gate says so
+  rlp                        the agent: triage, then local waves of workers when
+                             the gate says so
+  rlp --direct               the same agent, never orchestrating (this session)
   rlp -p "<request>"         the same, non-interactive
+                             (RLP_DIRECT=1 for the same effect in any position)
 
   rlp plan "<request>"       triage gate + DAG + per-node routing + dispatch waves
   rlp triage "<request>"     direct vs orchestrate, one laya forward pass
   rlp decompose "<request>"  the DAG on its own
   rlp route --title T ...    route one subtask to a worker
   rlp ladder | roster        the model ladder and the derived router cards
+  rlp mode                   direct-only or full: does this host orchestrate?
+  rlp mode direct|full       set it (also /direct on|off inside a session)
   rlp config '<ops-json>'    edit the ladder (validated, backed up, atomic)
   rlp verify --acceptance A  independent cross-vendor best-of-N verdict
   rlp memory | remember T    the project's cross-run knowledge log
@@ -74,12 +81,14 @@ request inline; `rlp doctor` and `rlp ladder` both say so in one line.
   rlp provider ...           endpoints and credentials: list|add|remove|key|
                              discover|probe
   rlp doctor [--warm]        is this host runnable? (fixes per line)
+  rlp progress               how far this host is from installed to working, and
+                             the next step — the same rule the first run asks by
   rlp serve                  the decision engine as an MCP stdio server
   rlp update [--check]       update the harness fork and re-apply RLP on top
   rpi                        the same harness, no orchestration surface
 
-In-session: /setup /provider /rlp-plan /rlp-state /rlp-doctor /rlp-ladder
-            /rlp-config /rlp-roles /models /commands
+In-session: /setup /direct /provider /rlp-plan /rlp-state /rlp-doctor
+            /rlp-ladder /rlp-config /rlp-roles /models /commands
 Machine-readable: add --json to any engine subcommand.
 USAGE
   exit 0
@@ -87,6 +96,25 @@ fi
 
 # Everything else is the agent: the fork's own CLI, so rlp is a superset of
 # rpi. Orchestration comes from the RLP extension, not from a launcher.
+
+# --direct is the one flag this launcher owns, because "do not orchestrate this
+# time" is a property of the session rather than of the ladder: it sets
+# $RLP_DIRECT — which the engine and the extensions both read — and the harness
+# never sees the flag. The ladder is untouched, so the next session is back to
+# whatever it says.
+#
+# First argument only, and deliberately so: rebuilding "$@" in POSIX sh either
+# word-splits or evals, and a launcher that breaks `rlp -p "a request with
+# spaces"` is worse than one that asks for the flag up front. `RLP_DIRECT=1 rlp …`
+# and `/direct on` inside a session cover every other position.
+if [ "${1:-}" = "--direct" ]; then
+  RLP_DIRECT=1
+  export RLP_DIRECT
+  shift
+  echo "rlp: direct-only for this session — every request inline, no gate, no workers." >&2
+  echo "     the ladder is untouched: /direct on, or \`rlp mode direct\`, to make it stick." >&2
+fi
+
 RPI="$ROOT/scripts/rpi-bin"
 if [ ! -x "$RPI" ]; then
   echo "rlp: the harness is not built (no $RPI)." >&2

@@ -17,6 +17,10 @@
 # Env:
 #   RLP_FIRST_RUN_EXPECT_MODELS=1   the model stack is installed, so the
 #                                   laya/rlm/checkpoint lines must NOT fail
+#
+# Point it at a host that is really fresh by setting RLP_CODING_AGENT_DIR to an
+# empty agent dir; on a configured host `providers` legitimately passes and this
+# check would (correctly) complain that the failures it expects are missing.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -107,7 +111,7 @@ if expect_models:
 # 4. Every fix that names a slash command has to name one that exists. A hint
 #    pointing at a command nobody registered is a dead end dressed as help.
 KNOWN_COMMANDS = {
-    "/setup", "/provider", "/login", "/models", "/commands", "/reload",
+    "/setup", "/provider", "/login", "/models", "/commands", "/reload", "/direct",
     "/rlp-plan", "/rlp-state", "/rlp-doctor", "/rlp-ladder", "/rlp-config",
     "/rlp-roles", "/rlp-run", "/rlp", "/orchestration",
 }

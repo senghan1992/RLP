@@ -19,6 +19,13 @@ deliverable verbs joined into clauses, the gate escalates itself to
 `orchestrate` and says which signal fired. The signals can only ever *raise*
 an unsure call; a confident laya `direct` stands, which keeps the safe default
 intact. Set `routing.gate: "laya"` in the ladder for the old behaviour.
+
+**Direct-only mode.** `routing.gate: "direct"` — or `rlp --direct`, or
+`RLP_DIRECT=1` — takes the gate out of the decision altogether: every request is
+`direct`, laya is never loaded, and no plan is ever built. That is a supported
+way to use RLP rather than a broken state: it is what someone who wants a good
+coding agent and no fan-out asks for. It is therefore cheap, honest about
+itself in every report, and one edit away from being turned off again.
 """
 from __future__ import annotations
 
@@ -218,8 +225,37 @@ def _apply_hybrid(decision: dict, request: str, context: str, gate: str, signal_
     return decision
 
 
-def triage(request: str, context: str = "") -> dict:
+def direct_answer(gate: str, source: str, request: str = "", context: str = "") -> dict:
+    """The verdict direct-only mode gives every request, without a model.
+
+    The same shape as a real gate answer, because callers branch on `mode`: a
+    caller that had to special-case this one is a caller that can get it wrong.
+    `signals` still rides along, so `/rlp-plan` can show what *would* have
+    escalated — the information is free, and it is what makes the mode
+    explainable instead of mysterious.
+    """
+    return {
+        "mode": "direct",
+        "confidence": 1.0,
+        "engine": "direct-mode",
+        "escalate": False,
+        "escalate_below": None,
+        "gate": gate,
+        "direct_only": True,
+        "direct_source": source,
+        "default_on_escalate": "direct",
+        "reason": f"direct-only mode ({source}): every request is handled inline",
+        "signals": signals(request, context),
+        "how_to_change": "rlp mode full (in a session: /direct off)",
+    }
+
+
+def triage(request: str, context: str = "", *, force: bool = False) -> dict:
     """Triage via laya, transparently downgrading to the LLM on any failure.
+
+    `force` asks the gate anyway in direct-only mode. It exists for a caller who
+    has been *told* to orchestrate rather than one that is deciding to: the mode
+    declines to choose, it does not overrule an instruction from outside.
 
     `escalate: true` means low confidence: the default is `direct` (cheap and
     always correct-enough); a hybrid gate may raise it to `orchestrate` on
@@ -227,6 +263,15 @@ def triage(request: str, context: str = "") -> dict:
     only if it can name two or more independent deliverables.
     """
     threshold, gate, signal_threshold = _gate_config()
+    # Decided before the model is touched: loading laya to answer a question
+    # with a constant answer is a hundred and fifty seconds of arithmetic for
+    # the word "direct".
+    # `force` skips only this short-circuit: everything below is the ordinary
+    # gate, and a report that shows a laya decision on a host whose ladder says
+    # "never" is honest because the caller said who asked.
+    source = None if force else orch.direct_source(gate)
+    if source:
+        return direct_answer(gate, source, request, context)
     try:
         from .route import _router
 

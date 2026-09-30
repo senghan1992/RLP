@@ -268,24 +268,30 @@ sh "$ROOT/scripts/sync-agent-dir" "$ROOT"
 # before the report is the difference between "next step" and "it crashed".
 echo ""
 echo "[rlp] doctor — on a first install the provider and ladder-arm lines are"
-echo "[rlp] expected to FAIL; /setup is what clears them."
+echo "[rlp] expected to FAIL. Starting \`rlp\` asks for what they need."
 echo ""
 (cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc doctor) || true
 
 cat <<EOF
 
-[rlp] installed. One step left — connect a provider:
+[rlp] installed. One step left — start it, and it asks:
 
-  cd <any project> && rlp      # start the agent
-  /setup                       # guided: providers -> brain -> worker arms -> roles
+  cd <any project> && rlp
 
-  \`/setup\` is what turns the ladder from policy into something dispatchable:
-  it reads your endpoint's own model list and writes the arms. Until then RLP
-  runs every request inline, and \`rlp doctor\` says exactly what is missing.
+The first run on a host with no credential and no model arms begins the guided
+setup by itself: the mode, then the endpoints and their keys, then the model RLP
+works on, then the worker arms, then the model for each role. Every question is
+skippable, and cancelling all of them writes nothing. \`/setup\` reruns it by
+hand, and \`rlp doctor\` says the same thing with no terminal in the way.
 
-Then:
+Want RLP without the fan-out? Say so at the first question ("Direct only"), or
+any time afterwards: \`/direct on\`, \`rlp mode direct\`, or \`rlp --direct\`
+for one session. Nothing is orchestrated, and no decision model is loaded.
+
+  RLP_NO_SETUP=1 rlp                               # never ask (scripted sessions)
   rlp -p "add a --wc flag, test it, document it"   # one shot, same agent
   rlp plan "<request>"                             # plan only, nothing executed
+  rlp mode                                         # does this host orchestrate?
   rlp doctor --warm                                # health, incl. a real laya pass
   sh $ROOT/scripts/selftest.sh --fast              # the offline suite
 EOF

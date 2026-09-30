@@ -598,6 +598,9 @@ function stripAnsi(text: string): string {
  */
 let lastPlan: Record<string, unknown> | null = null;
 
+/** How long a forced plan stays a licence to dispatch in direct-only mode. */
+const FORCED_PLAN_WINDOW_MS = 15 * 60_000;
+
 function planPath(): string {
 	return join(RLP_HOME, "last-plan.json");
 }
@@ -621,11 +624,26 @@ function latestPlan(): Record<string, unknown> | null {
 	}
 }
 
+/**
+ * Was this plan produced under `force`, i.e. on the user's instruction rather
+ * than by the gate? Dispatch asks it before spending a fan-out in direct-only
+ * mode, so the escape hatch is bounded to the run it was used on.
+ */
+function plannedForced(plan: Record<string, unknown> | null): boolean {
+	if (plan?.force !== true) return false;
+	// The engine stamps a forced plan, and the stamp is what bounds the claim:
+	// `last-plan.json` outlives the turn, and a fan-out authorised an hour ago in
+	// a mode that says never is not an authorisation, it is a stale file.
+	const at = Date.parse(String(plan.forced_at ?? ""));
+	return Number.isFinite(at) && Date.now() - at < FORCED_PLAN_WINDOW_MS;
+}
+
 /** Map an engine op and its arguments onto the equivalent CLI invocation. */
 function cliArgsFor(op: string, args: Record<string, unknown>): string[] {
 	switch (op) {
 		case "plan": {
 			const out = ["plan", String(args.request ?? ""), "--json"];
+			if (args.force) out.push("--force");
 			if (args.context) out.push("--context", String(args.context));
 			if (args.mode && args.mode !== "auto") {
 				out.push("--mode", String(args.mode));
@@ -634,7 +652,7 @@ function cliArgsFor(op: string, args: Record<string, unknown>): string[] {
 			return out;
 		}
 		case "triage":
-			return ["triage", String(args.request ?? ""), "--json"];
+			return ["triage", String(args.request ?? ""), ...(args.force ? ["--force"] : []), "--json"];
 		case "decompose":
 			return ["decompose", String(args.request ?? ""), "--json"];
 		case "ladder":
@@ -725,6 +743,33 @@ function roleBindingsSection(): string {
 	}
 }
 
+/**
+ * Is this session direct-only — the mode in which RLP is a plain coding agent?
+ *
+ * Read from the file rather than asked of the engine, because the two places
+ * that need the answer are the two places that must not wait on a subprocess:
+ * the session-start hook (do not load a 421M model in a mode that will never
+ * consult it) and the per-turn prompt (which contract the brain runs under).
+ * The engine reads the same file, so the two cannot disagree.
+ *
+ * `$RLP_DIRECT` counts too, and outranks the ladder: `rlp --direct` is a
+ * session-level instruction, and a session launched that way must not advertise
+ * an orchestration surface the launcher just switched off.
+ */
+function directOnly(): boolean {
+	if (process.env.RLP_DIRECT) return true;
+	const dir = process.env.RLP_CODING_AGENT_DIR || process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".rlp", "agent");
+	const path = process.env.RLP_ORCHESTRATION
+		? resolve(process.env.RLP_ORCHESTRATION)
+		: join(dir, "orchestration.json");
+	try {
+		const doc = JSON.parse(readFileSync(path, "utf8")) as { routing?: { gate?: string } };
+		return doc.routing?.gate === "direct";
+	} catch {
+		return false; // an unreadable ladder is the engine's problem to report, not a mode
+	}
+}
+
 export default function rlpOrchestrate(pi: ExtensionAPI): void {
 	// One binary, two identities (set by scripts/rlp and by rlp_dispatch).
 	//
@@ -758,6 +803,18 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
 		if (!IS_BRAIN) return; // the bare harness has no engine to warm
+		// Direct-only mode never asks the gate a question, so warming laya would
+		// spend ~150 s of CPU and a few hundred MB of RSS on a model that is never
+		// consulted. This is the line that makes `/direct on` a real mode change
+		// rather than a label.
+		if (directOnly()) {
+			try {
+				ctx.ui.setStatus("rlp-mode", "◈ direct mode");
+			} catch {
+				/* headless */
+			}
+			return;
+		}
 		const client = getEngine(ctx);
 		if (!client) return;
 		// Fire and forget: warming is the engine's job, and a failure here is
@@ -826,11 +883,44 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 						description: "The two or more independent deliverables that justify overriding the gate",
 					}),
 				),
+				force: Type.Optional(
+					Type.Boolean({
+						description:
+							"Set true only when the user explicitly asked to orchestrate while RLP is in " +
+							"direct-only mode (/direct on, or launched with --direct). It asks the engine " +
+							"instead of taking the mode's answer, and it does not change the mode.",
+					}),
+				),
 			},
 			{ additionalProperties: false },
 		),
 		async execute(_id, params, signal, _onUpdate, ctx) {
+			// Direct-only mode answers here rather than through the engine. The
+			// resident engine is deliberately never warmed in that mode, so an `ask`
+			// would either queue behind a 170 s model load or start one — to be told
+			// the thing the mode already says. `force` is the user's own instruction,
+			// and outranks a default.
+			if (directOnly() && !params.force) {
+				return ok(
+					JSON.stringify(
+						{
+							mode: "direct",
+							direct_only: true,
+							triage: { engine: "direct-mode", confidence: 1.0, escalate: false },
+							recommended:
+								"RLP is in direct-only mode: do the work inline with your own tools — no DAG, " +
+								"no workers, no worktrees. Only if the user explicitly asked to orchestrate, " +
+								"call this again with force=true (that asks the engine; it does not change the mode).",
+						},
+						null,
+						2,
+					),
+				);
+			}
 			const args: Record<string, unknown> = { request: params.request, context: params.context ?? "" };
+			// Forwarded, not just honoured here: the resident engine and the CLI
+			// fallback both need to know the mode was outranked on purpose.
+			if (params.force) args.force = true;
 			if (params.mode && params.mode !== "auto") {
 				args.mode = params.mode;
 				if (params.because) args.because = params.because;
@@ -875,6 +965,19 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 			{ additionalProperties: false },
 		),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
+			// The mode is the answer to "may I fan out", so a brain that forgot to ask
+			// the gate still cannot spend a fan-out in direct-only mode — unless the
+			// plan this run was built from was produced under `force`, which is the
+			// user's own instruction. The escape hatch opens one run, not the mode:
+			// the next plan without force answers `direct` again.
+			const plannedNow = lastPlan ?? latestPlan();
+			if (directOnly() && !plannedForced(plannedNow)) {
+				return fail(
+					"RLP is in direct-only mode, so nothing is dispatched. Do the work inline, or " +
+						"plan with force=true when the *user* asked for a fan-out, or have them turn " +
+						"the mode off (/direct off) and plan again.",
+				);
+			}
 			const rpi = findRpi(ctx.cwd);
 			if (!rpi) return fail("The rpi worker binary was not found. Run: sh scripts/install.sh");
 
@@ -975,9 +1078,20 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 					continue;
 				}
 
-				// Preflight: an arm with no credential, or a harness this plane cannot
-				// spawn, is a plan error. Fail the node loudly rather than burn a
-				// dispatch on a worker that is guaranteed to die.
+				// Preflight: an arm with no credential, no model at all, or a harness
+				// this plane cannot spawn is a plan error. Fail the node loudly rather
+				// than burn a dispatch on a worker that is guaranteed to die.
+				//
+				// "no model at all" is the state RLP ships in — an unconfigured ladder
+				// still routes a node, so `arm` is empty — and without this the worker
+				// spawned with `--model ""` and failed somewhere three steps from the
+				// cause, which is exactly the silence this tool keeps getting judged on.
+				if (!node.arm.includes("/")) {
+					node.status = "failed";
+					node.error = `${node.arm || "(no model arm)"} is not a provider/model arm — run /setup to give the ladder one`;
+					lines.push(`${id}: NOT dispatched — ${node.error}`);
+					continue;
+				}
 				if (node.credential === "missing") {
 					node.status = "failed";
 					node.error = `no credential for ${node.arm} — run /login ${node.arm.split("/")[0]}, or /rlp-config to change the arm`;
@@ -1471,7 +1585,41 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 		},
 	});
 
-	// --- the contract ---------------------------------------------------------------	// The system prompt already carries <rlp_orchestration> (the ladder, rendered
+	/**
+	 * Direct-only mode's whole contract: one agent, working inline.
+	 *
+	 * Short on purpose. The orchestration contract is long because driving a DAG,
+	 * waves, collection and verification is the part a model gets wrong unaided;
+	 * in this mode there is nothing to get wrong, and leaving the fan-out rules in
+	 * the prompt would keep advertising tools the mode has just switched off.
+	 */
+	const DIRECT_CONTRACT = `
+## RLP — direct mode
+
+This session runs in RLP's direct-only mode: one agent, working inline. There is
+no triage gate, no decomposition, no worker fan-out, and no decision model to
+load. That is a choice, not a broken install, so do not go looking for the
+orchestration surface or report it as missing.
+
+Work the request yourself with your normal tools: read, change, run the relevant
+test or check, and report what you did and how you verified it. Take a big task
+in order, in one line of work at a time, rather than trying to delegate it.
+
+The one exception is the user's own instruction. If *they* ask for a fan-out, or
+for parallel workers, you may call \`rlp_plan\` with \`force: true\`: that asks the
+gate for this one request and licenses this one run to dispatch — it does not
+change the mode, and the stamp expires. Do not reach for it on your own
+judgement; the mode exists so that judgement is not made per request.
+
+To change the mode itself, say so and let the user do it: \`/direct off\`, or
+\`rlp mode full\` outside a session.
+
+Keep the guardrails: commit on a branch, never merge, never force-push, never
+touch a protected branch.
+`.trim();
+
+	// --- the contract ---------------------------------------------------------------
+	// The system prompt already carries <rlp_orchestration> (the ladder, rendered
 	// by the fork). What it does not carry is the rule for *when* to orchestrate
 	// and how to drive these tools, which is the part a model will get wrong
 	// without being told.
@@ -1493,7 +1641,8 @@ orchestration at all. Ceremony is a bug: never fan out a one-line fix.
   as \`because\`. Do not escalate on a hunch.
 - \`orchestration_unavailable: "<reason>"\` — this host cannot dispatch at all
   (usually a ladder with no model arms yet). Do the work inline and, **once**,
-  tell the user the reason verbatim and that \`/setup\` fixes it. Do not call
+  tell the user the reason verbatim and that \`/setup\` fixes it — or \`/direct on\`
+  if they would rather never orchestrate here. Do not call
   \`rlp_dispatch\`, and do not retry \`rlp_plan\` with \`mode: "orchestrate"\`:
   an override cannot conjure an arm, and the answer will not change.
 
@@ -1579,6 +1728,14 @@ waiting on \`rlp_collect\`, or when the deliverable is done.
 		// The bare harness gets plain pi: no orchestration contract, no role
 		// bindings. Only the brain is told how to drive rlp_plan/rlp_dispatch.
 		if (!IS_BRAIN) return;
+		// Which contract depends on the mode, and the mode is read every turn
+		// because `/direct` can change it mid-session and the next prompt must not
+		// still be telling the model it may fan out. Handing a direct-only session
+		// the fan-out contract is how a mode becomes a label: the tools answer, so
+		// the model obeys the instructions instead.
+		if (directOnly()) {
+			return { systemPrompt: `${ctx.getSystemPrompt()}\n\n${DIRECT_CONTRACT}` };
+		}
 		return {
 			systemPrompt: `${ctx.getSystemPrompt()}\n\n${CONTRACT}${roleBindingsSection()}`,
 		};

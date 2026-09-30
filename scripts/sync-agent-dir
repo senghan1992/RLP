@@ -85,8 +85,18 @@ if [ -f "$AGENT_DIR/rlp-location.json" ]; then
   done
 fi
 
-printf '{\n  "root": "%s",\n  "agentDir": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
-  "$ROOT" "$AGENT_DIR" "$EXT_LIST" "$SKILL_LIST" > "$AGENT_DIR/rlp-location.json"
+# Which interpreter owns the decision engine goes into the marker, because it is
+# no longer guessable from the checkout: `RLP_ENGINE=system` (the default since
+# the venv-less install) pip-installs the engine into a PATH python and creates
+# no `rlp-svc/.venv` at all. The extensions looked only for that `.venv`, found
+# none, and reported "the decision engine is not installed" from inside a
+# perfectly good install — which is exactly how a first run dies quietly.
+# `scripts/svc-py` remains the rule; this records its answer.
+PY=${RLP_PYTHON:-$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)}
+
+printf '{\n  "root": "%s",\n  "agentDir": "%s",\n  "python": "%s",\n  "extensions": [%s],\n  "skills": [%s]\n}\n' \
+  "$ROOT" "$AGENT_DIR" "$PY" "$EXT_LIST" "$SKILL_LIST" > "$AGENT_DIR/rlp-location.json"
+[ -n "$PY" ] || note "  no decision-engine python found: /setup and /rlp-plan cannot work until sh scripts/install.sh runs"
 
 # The ladder ships RLP's orchestration *policy* (gate, waves, dispatch cap,
 # cross-vendor review, RLM and planning budgets) and no model arms: which models

@@ -45,7 +45,7 @@ def _emit(payload: Any, as_json: bool, human: str = "") -> int:
 def _cmd_triage(args: argparse.Namespace) -> int:
     from . import triage as mod
 
-    envelope = mod.triage(args.request, args.context)
+    envelope = mod.triage(args.request, args.context, force=args.force)
     if not args.json:
         t = envelope
         human = "\n".join(
@@ -55,7 +55,15 @@ def _cmd_triage(args: argparse.Namespace) -> int:
                     f"mode:       {t.get('mode')}",
                     f"confidence: {t.get('confidence')}",
                     f"engine:     {t.get('engine')}",
-                    f"escalate:   {t.get('escalate')} (below {t.get('escalate_below')})",
+                    # The mode's answer is not a measurement, so "escalate: False
+                    # (below None)" would be a lie about a threshold that was never
+                    # consulted. Say what answered instead.
+                    (
+                        f"source:     direct-only mode ({t.get('direct_source')}) — the gate was not asked\n"
+                        f"            {t.get('reason')}"
+                        if t.get("direct_only")
+                        else f"escalate:   {t.get('escalate')} (below {t.get('escalate_below')})"
+                    ),
                     f"note:       low confidence defaults to {t.get('default_on_escalate')}"
                     if t.get("escalate")
                     else None,
@@ -132,10 +140,16 @@ def _ladder_envelope() -> dict:
         return {"ok": False, "error": str(e)[:300]}
     if config is None:
         return {"ok": False, "error": f"no orchestration config at {orch.config_path()}"}
+    direct = orch.direct_mode(config)
     return {
         "ok": True,
         "result": {
             **config,
+            # The *effective* mode, which is the gate plus any session override:
+            # `mode` alone says what the file says, and a caller that shows only
+            # that is showing a file rather than what this host will do.
+            "direct_only": direct["direct"],
+            "direct_source": direct["source"],
             "roster": orch.roster(config),
             "roster_all": orch.roster(config, include_unavailable=True),
             "excluded_workers": orch.excluded(config),
@@ -155,9 +169,10 @@ def _cmd_ladder(args: argparse.Namespace) -> int:
     c = envelope["result"]
     lines = [
         f"ladder: {c['path']}",
+        f"mode:   {'DIRECT-ONLY — nothing is orchestrated (from ' + c['direct_source'] + ')' if c['direct_only'] else 'full — the gate decides per request'}",
         f"brain:  {c['brain'] or '(not chosen yet)'}",
         f"gate:   escalateBelow={c['routing'].get('escalateBelow')} "
-        f"mode={c['routing'].get('gate')} signalThreshold={c['routing'].get('signalThreshold')} "
+        f"value={c['routing'].get('gate')} signalThreshold={c['routing'].get('signalThreshold')} "
         f"maxDispatchesPerTurn={c['routing'].get('maxDispatchesPerTurn')} "
         f"workerTimeoutMs={c['routing'].get('workerTimeoutMs')} "
         f"crossVendor={c['review'].get('crossVendor')}",
@@ -172,7 +187,7 @@ def _cmd_ladder(args: argparse.Namespace) -> int:
         f"maxTimeout={(c.get('rlm') or {}).get('maxTimeout')}",
         "",
     ]
-    if not c.get("configured"):
+    if not c.get("configured") and not c["direct_only"]:
         lines[1:1] = [
             "status: NOT CONFIGURED — policy is set, but there are no model arms, so nothing",
             "        can be dispatched and every request is handled inline.",
@@ -259,6 +274,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         decompose=not args.no_decompose,
         mode=args.mode,
         because=args.because,
+        force=args.force,
     )
     if args.json:
         return _emit(envelope, True)
@@ -314,6 +330,64 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         lines.append(f"warning: {r['warning']}")
     lines.append(f"recommended: {r['recommended']}")
     return _emit(envelope, False, "\n".join(lines))
+
+
+def _cmd_mode(args: argparse.Namespace) -> int:
+    """`rlp mode [direct|full]` — the one question a person actually asks.
+
+    The ladder's gate is the answer, but "set routing.gate" is three facts the
+    user has to already know. This names the two modes, says which is in effect
+    and *why* (the gate, or a $RLP_DIRECT left over in the shell), and writes the
+    change through the same validated, backed-up path `/rlp-config` uses.
+    """
+    from . import orchestration as orch
+
+    want = args.name
+    if want in ("direct", "full"):
+        gate = "direct" if want == "direct" else "hybrid"
+        try:
+            applied = orch.mutate([{"op": "set_routing", "key": "gate", "value": gate}])
+        except Exception as e:
+            return _emit({"ok": False, "error": str(e)[:300]}, args.json, f"mode change rejected: {e}")
+        result = {"path": applied["path"], "backup": applied["backup"], **orch.direct_mode(applied["ladder"])}
+        result["mode"] = "direct" if result["direct"] else "full"
+        envelope = {"ok": True, "result": result}
+        if args.json:
+            return _emit(envelope, True)
+        lines = _mode_lines(result, changed=True)
+        return _emit(envelope, False, "\n".join(lines))
+
+    direct = orch.direct_mode()
+    direct["mode"] = "direct" if direct["direct"] else "full"
+    direct["path"] = str(orch.config_path())
+    envelope = {"ok": True, "result": direct}
+    if args.json:
+        return _emit(envelope, True)
+    return _emit(envelope, False, "\n".join(_mode_lines(direct)))
+
+
+def _mode_lines(state: dict, *, changed: bool = False) -> list[str]:
+    from . import orchestration as orch
+
+    env = f"${orch.DIRECT_ENV}"
+    lines = [
+        f"mode:   {'direct-only' if state['direct'] else 'full (the gate decides)'}",
+        f"gate:   {state['gate']}  (source: {state['source']})",
+    ]
+    if not changed:
+        lines.append(f"ladder: {orch.config_path()}")
+    if state["direct"]:
+        lines.append("        every request is handled inline: no gate, no DAG, no workers, no worktrees.")
+        if state["source"] == env:
+            lines.append(f"        it comes from {env}, so the ladder is untouched — `unset {env}` (or start")
+            lines.append("        `rlp` without --direct) keeps the gate for the next session.")
+        lines.append("        `rlp mode full` gives orchestration back for good.")
+    else:
+        lines.append("        the laya gate decides per request; unsure defaults to direct.")
+        lines.append("        `rlp mode direct` stops orchestrating — and stops loading laya entirely.")
+        if orch.env_direct():
+            lines.append(f"        (note: {env} is set, so this session is direct-only regardless of the gate)")
+    return lines
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -643,7 +717,12 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", action="store_true", help="raw JSON output")
         return sp
 
-    add_request("triage", "decide direct vs orchestrate (one laya forward pass)")
+    sp = add_request("triage", "decide direct vs orchestrate (one laya forward pass)")
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="ask the gate even in direct-only mode (the mode is not changed)",
+    )
 
     add_request("decompose", "decompose into a validated DAG of 2-12 nodes")
 
@@ -733,6 +812,13 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--json", action="store_true")
 
     sub.add_parser("ladder", help="print the resolved orchestration ladder").add_argument("--json", action="store_true")
+
+    # `rlp mode` — the two-word version of "what does this host do with a
+    # request", and the one switch a person who wants a plain coding agent
+    # should not have to read a config file to find.
+    sp = sub.add_parser("mode", help="direct-only or full: does this host orchestrate? (no argument = report)")
+    sp.add_argument("name", nargs="?", default="", choices=["", "direct", "full"], help="set the mode")
+    sp.add_argument("--json", action="store_true")
     sub.add_parser("roster", help="print the router roster derived from the ladder").add_argument("--json", action="store_true")
 
     sp = sub.add_parser("config", help="edit the ladder: validate, back up, write atomically")
@@ -752,6 +838,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--because",
         default="",
         help="the >= 2 independent deliverables that justify an override (kept in the plan)",
+    )
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="ask the gate even in direct-only mode; unlike --mode it does not claim a verdict",
     )
 
     sp = sub.add_parser("doctor", help="diagnose this host: deps, creds, ladder, checkpoint, wiring")
@@ -786,6 +877,7 @@ def main(argv: list[str] | None = None) -> int:
         "route": _cmd_route,
         "llm-route": _cmd_llm_route,
         "ladder": _cmd_ladder,
+        "mode": _cmd_mode,
         "roster": _cmd_roster,
         "provider": _cmd_provider,
         "config": _cmd_config,

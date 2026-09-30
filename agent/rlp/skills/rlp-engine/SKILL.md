@@ -41,6 +41,13 @@ rlp plan "<request>"     # gate -> DAG -> routes -> waves
 rlp triage "<request>"   # the gate alone
 ```
 
+`rlp mode` says whether this host orchestrates at all. In **direct-only mode**
+(`routing.gate: "direct"`, or `RLP_DIRECT=1` for one session) every request
+answers `direct` with `engine: "direct-mode"`, no decomposition is ever built,
+and the decision model is not loaded — so do not "warm up" a plan that cannot
+fan out. An explicit `--mode` still outranks the mode, which is the way out when
+somebody asks for a fan-out by name.
+
 `rlp plan --mode orchestrate --because "…"` forces orchestration when the gate
 is unsure; `--because` is the justification and is recorded in the output, so
 give a real one. An orchestrate plan pays a cold laya load (~170 s on CPU) and

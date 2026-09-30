@@ -7,7 +7,14 @@
     "`brain` null and an empty `models` array mean 'no arms chosen yet'. RLP ships no",
     "arms on purpose: a model ref only means something on a host that has that",
     "provider, so /setup writes them from the endpoints you connected rather than",
-    "RLP guessing and failing at the worker."
+    "RLP guessing and failing at the worker.",
+    "",
+    "routing.gate is how much RLP does on its own: 'hybrid' (laya, plus deterministic",
+    "fan-out signals when unsure) or 'laya' (the model alone) are the orchestrating",
+    "modes; 'direct' never orchestrates at all — every request is handled inline, the",
+    "decision model is never loaded, and the rest of this file simply stops being",
+    "consulted. Switch it with /direct on|off in a session, `rlp mode direct|full`",
+    "from a shell, or `rlp --direct` for one session without touching this file."
   ],
 
   "brain": null,

@@ -13,6 +13,8 @@
 #   harness contract    — every command loads, exactly once, in a real session
 #   provider / setup    — the wizards, driven through a real session over RPC
 #   first-run report    — every non-ok doctor line names an actionable fix
+#   first-run asks      — a real TUI starts the setup by itself, escape writes
+#                        nothing, and RLP_NO_SETUP is honoured
 #
 # Pass --fast to stop after the offline suite.
 set -eu
@@ -46,7 +48,42 @@ if [ -n "$TSC" ]; then
   echo
 fi
 
-# --- 2. offline suite ---
+# --- 2. the launcher routes every engine subcommand ---
+# `rlp <name>` dispatches on a hardcoded list in `scripts/rlp`, and a name that
+# is missing from it is not an error — it is handed to the harness as an
+# argument, so `rlp progress` silently became "start a session and ignore the
+# word progress". One list, checked against the parser that owns it.
+CASE_LINE=$(grep -m1 -E '^  [a-z|-]+\)$' "$ROOT/scripts/rlp" || true)
+if [ -n "$CASE_LINE" ]; then
+  ROUTES=$("$PY" -c '
+from rlp_svc.cli import build_parser
+
+p = build_parser()
+for a in p._actions:
+    if hasattr(a, "choices") and isinstance(a.choices, dict):
+        print(" ".join(sorted(a.choices)))
+        break
+')
+  ROUTED=$(printf '%s' "${CASE_LINE%)}" | tr -d ' \t')
+  unrouted=""
+  for name in $ROUTES; do
+    case "|$ROUTED|" in
+      *"|$name|"*) ;;
+      *) unrouted="$unrouted $name" ;;
+    esac
+  done
+  if [ -n "$unrouted" ]; then
+    echo "selftest: engine subcommands not routed by scripts/rlp:$unrouted" >&2
+    echo "          add them to the dispatch case in scripts/rlp" >&2
+    exit 1
+  fi
+  echo "== launcher routing ok: every engine subcommand is dispatched =="
+else
+  echo "selftest: could not find the dispatch case in scripts/rlp" >&2
+  exit 1
+fi
+
+# --- 3. offline suite ---
 echo "== offline suite =="
 (cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc.tests)
 
@@ -55,12 +92,12 @@ if [ "${1:-}" = "--fast" ]; then
   exit 0
 fi
 
-# --- 3. integration suite ---
+# --- 4. integration suite ---
 echo
 echo "== integration suite (real models, slow) =="
 (cd "$ROOT/rlp-svc" && "$PY" -m rlp_svc.selftest)
 
-# --- 4. harness contract ---
+# --- 5. harness contract ---
 # Only reachable from the running harness: two extensions registering one
 # command name type-checks fine and then shows up in the menu as /name:1 and
 # /name:2, where neither invocation looks like what you typed. Then the same
@@ -82,9 +119,16 @@ node "$ROOT/scripts/check-provider.mjs" "$ROOT/scripts/rlp" || {
   exit 1
 }
 
-# --- 5. the first-run report ---
+# --- 6. the first-run report ---
 # Cheap, and it guards the property users judge the tool by: every non-ok
 # doctor line names a fix this host can act on.
+echo
+echo "== first-run asks (real TUI in a pty) =="
+sh "$ROOT/scripts/check-first-ask" "$ROOT/scripts/rlp" || {
+  echo "selftest: first-run asks FAILED" >&2
+  exit 1
+}
+
 echo
 echo "== first-run report =="
 RLP_FIRST_RUN_EXPECT_MODELS=1 sh "$ROOT/scripts/check-first-run" "$ROOT/scripts/rlp" || {

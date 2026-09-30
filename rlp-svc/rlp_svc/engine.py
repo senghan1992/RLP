@@ -46,7 +46,7 @@ def _ops() -> dict[str, Callable[[dict], Any]]:
     def triage(args: dict) -> Any:
         from . import triage as mod
 
-        return mod.triage(args.get("request", ""), args.get("context", ""))
+        return mod.triage(args.get("request", ""), args.get("context", ""), force=bool(args.get("force", False)))
 
     def decompose(args: dict) -> Any:
         from . import decompose as mod
@@ -62,6 +62,7 @@ def _ops() -> dict[str, Callable[[dict], Any]]:
             decompose=args.get("decompose", True),
             mode=args.get("mode"),
             because=args.get("because", ""),
+            force=bool(args.get("force", False)),
         )
 
     def route(args: dict) -> Any:

@@ -26,6 +26,12 @@ correct again the moment it has.
 The last three come from the run ledgers `rlp_dispatch` already keeps under
 `$RLP_HOME/runs/`, which is also why "did a dispatch ever work here" is
 answerable at all: the evidence outlives the session.
+
+**Direct-only mode shortens the sequence.** A host whose gate never orchestrates
+has chosen not to have a decision model, a plan, a dispatch or a worker verdict,
+so those four milestones are dropped rather than counted as missing — reporting
+3/7 forever, with no door on that wall, is worse than reporting 3/3 of the work
+that mode can actually do. `rlp progress` says so on its face.
 """
 from __future__ import annotations
 
@@ -87,6 +93,12 @@ def _ladder() -> tuple[bool, str, str]:
         return False, f"the ladder is invalid: {str(e)[:80]}", "fix it, or /rlp-config"
     if config is None:
         return False, "no ladder installed", "sh scripts/install.sh"
+    # In direct-only mode the ladder's job is to say "do not orchestrate", and it
+    # is doing that, arms or not. Requiring arms here would tell someone who
+    # chose the simple mode that their install is unfinished.
+    direct = orch.direct_mode(config)
+    if direct["direct"]:
+        return True, f"direct-only mode (from {direct['source']}) — every request handled inline", ""
     if not config["configured"]:
         return False, "the ladder has no model arms", "/setup"
     return True, f"brain={config['brain']}, {config['arm_count']} arm(s)", ""
@@ -181,6 +193,22 @@ def _result(ledgers: list[dict]) -> tuple[bool, str, str]:
 #: telling somebody about.
 MILESTONES = ("harness", "engine", "provider", "ladder", "plan", "dispatch", "result")
 
+#: The milestones that only exist *because* of orchestration. A host in
+#: direct-only mode has chosen never to do any of them, and laya is the model
+#: the gate reads — so counting four of the seven as "not reached" would report
+#: a finished, working install as stuck at 3/7 forever, with no door on that
+#: wall. They are dropped from the sequence rather than marked done, because
+#: marking them done would be a lie.
+ORCHESTRATION_MILESTONES = ("engine", "plan", "dispatch", "result")
+
+#: Shown when the sequence is shortened, so `rlp progress` cannot read as if it
+#: had forgotten the rest of the list.
+DIRECT_NOTE = (
+    "direct-only mode: the gate, the decision model and everything downstream of "
+    "them are not counted here — this host chose not to orchestrate. "
+    "`rlp mode full` puts the sequence back."
+)
+
 TITLES = {
     "harness": "the harness is built",
     "engine": "the decision model is installed",
@@ -190,6 +218,23 @@ TITLES = {
     "dispatch": "a worker has been dispatched",
     "result": "a worker met its acceptance",
 }
+
+
+def _direct_mode() -> dict | None:
+    """The direct-only verdict, or None when this host may orchestrate.
+
+    Read once per `progress()` and shared by the probes: four milestones are
+    about orchestration, and they have to agree with the `ladder` probe about
+    whether they exist at all. Never raises — a ladder nobody can read is not
+    in direct-only mode, and `_ladder` reports why.
+    """
+    try:
+        from . import orchestration as orch
+
+        direct = orch.direct_mode()
+    except Exception:
+        return None
+    return direct if direct["direct"] else None
 
 
 def progress() -> dict:
@@ -204,14 +249,24 @@ def progress() -> dict:
         "dispatch": lambda: _dispatch(ledgers),
         "result": lambda: _result(ledgers),
     }
+    milestones = list(MILESTONES)
+    direct = _direct_mode()
+    if direct:
+        milestones = [m for m in milestones if m not in ORCHESTRATION_MILESTONES]
     steps: list[dict] = []
-    for name in MILESTONES:
+    for name in milestones:
         try:
             done, detail, action = checks[name]()
         except Exception as e:  # a broken probe must not hide the rest
             done, detail, action = False, f"could not tell: {str(e)[:80]}", ""
         steps.append(
-            {"id": name, "title": TITLES[name], "done": done, "detail": detail, "action": action}
+            {
+                "id": name,
+                "title": "the mode is chosen (direct-only)" if direct and name == "ladder" else TITLES[name],
+                "done": done,
+                "detail": detail,
+                "action": action,
+            }
         )
     # `reached` counts the leading run of completed steps, not the total number
     # completed: onboarding is a sequence, and "5 of 7, but not the first two"
@@ -225,6 +280,7 @@ def progress() -> dict:
     return {
         "reached": reached,
         "total": len(steps),
+        "direct_only": bool(direct),
         "complete": pending is None,
         "next": None
         if pending is None
@@ -236,11 +292,14 @@ def progress() -> dict:
 def summary_line(report: dict | None = None) -> str:
     """One line for the top of another report. The whole point is the `next`."""
     r = report or progress()
+    mode = " — direct-only mode" if r.get("direct_only") else ""
     if r["complete"]:
-        return f"onboarding: {r['total']}/{r['total']} — a worker has met its acceptance here"
+        if r.get("direct_only"):
+            return f"onboarding: {r['total']}/{r['total']} — ready to work inline{mode}"
+        return f"onboarding: {r['total']}/{r['total']} — a worker has met its acceptance here{mode}"
     nxt = r["next"]
     action = f" — next: {nxt['action']}" if nxt["action"] else f" — next: {nxt['title']}"
-    return f"onboarding: {r['reached']}/{r['total']}{action}"
+    return f"onboarding: {r['reached']}/{r['total']}{action}{mode}"
 
 
 def render(report: dict | None = None) -> str:
@@ -248,14 +307,23 @@ def render(report: dict | None = None) -> str:
     r = report or progress()
     glyph = {True: "[done]", False: "[    ]"}
     lines = ["rlp progress — install to first green worker", ""]
+    if r.get("direct_only"):
+        lines[0] = "rlp progress — install to a working agent (direct-only mode)"
     for step in r["steps"]:
         lines.append(f"{glyph[step['done']]} {step['title']}")
         lines.append(f"         {step['detail']}")
         if not step["done"] and step["action"]:
             lines.append(f"         -> {step['action']}")
     lines.append("")
+    if r.get("direct_only"):
+        lines.append(DIRECT_NOTE)
+        lines.append("")
     if r["complete"]:
-        lines.append(f"{r['total']}/{r['total']} — RLP has done real work on this host.")
+        lines.append(
+            f"{r['total']}/{r['total']} — RLP is ready to work on this host, inline."
+            if r.get("direct_only")
+            else f"{r['total']}/{r['total']} — RLP has done real work on this host."
+        )
     else:
         nxt = r["next"]
         lines.append(f"{r['reached']}/{r['total']}. Next: {nxt['title']}.")

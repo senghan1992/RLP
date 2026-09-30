@@ -8,7 +8,63 @@ offline suite fails if they drift.
 
 ## Unreleased
 
+### Added
+
+- **A fresh install asks.** Starting `rlp` in a terminal on a host with no
+  credential and no model arms now runs the guided setup by itself — the mode,
+  then the endpoints and their keys, then the model RLP works on, then the
+  worker arms, then the model for each role — instead of printing a line and
+  waiting for somebody to know the word `/setup`. It is a TUI behaviour only
+  (`RLP_NO_SETUP=1` is the quiet start, `rpi` and every dispatched worker never
+  ask), the trigger is derived from `rlp progress` rather than recorded in a
+  flag, and answering every question with escape writes nothing — which is what
+  makes being asked again honest. `scripts/check-first-ask` drives the real TUI
+  in a pty and fails if any of that stops being true.
+- **Direct-only mode: `/direct on`, `rlp mode direct`, `rlp --direct`.**
+  `routing.gate` gains a third value, and it means what it says: every request
+  is handled inline, the gate never runs, `rlp plan` returns before a
+  decomposition exists, the resident engine is never warmed, and the brain gets
+  a short contract instead of the fan-out one. `$RLP_DIRECT` does the same for
+  one session without touching the ladder, and `/direct off` clears it rather
+  than writing a file that changes nothing. Every report tells the mode from a
+  fault — `rlp doctor` says the ladder needs no arms *in this mode* and where
+  the mode came from, `rlp ladder` leads with `mode:`, and `rlp progress`
+  stops counting the four milestones that only exist for orchestration instead
+  of reporting a finished install as stuck at 3/7.
+- **`rlp mode [direct|full]`** — the two-word version of "does this host
+  orchestrate", reporting the *effective* mode and what set it, writing through
+  the same validated, backed-up config path `/direct` uses. `rlp config mode
+  direct` and `/rlp-config gate direct` are the same key, not a second switch.
+- **A forced plan is the mode's escape hatch.** `rlp_plan(force=true)` — and
+  `rlp plan --force` · `rlp triage --force` — asks the gate on the *user's*
+  instruction instead of taking the mode's answer, and stamps the plan
+  (`force`, `forced_at`). `rlp_dispatch` honours that stamp for 15 minutes and
+  nothing else: the run the user asked for is licensed, a `last-plan.json` left
+  over from an hour ago is not. Explicit `--mode` outranks the mode as before,
+  because a switch with no way out under pressure is a trap.
+
 ### Fixed
+
+- **`rlp progress` did nothing.** The subcommand existed in the engine, was
+  documented in its own report, and was missing from the launcher's dispatch
+  list — so the word `progress` was handed to the harness as an argument and
+  swallowed. `scripts/selftest.sh` now checks the launcher's list against the
+  parser that owns it, which is the only way this class of gap fails loudly.
+
+- **Every in-session RLP command was dead on the default install.** The
+  extensions looked for the decision engine at `rlp-svc/.venv/bin/python`, but
+  `RLP_ENGINE=system` — the default since the venv-less install — creates no
+  `.venv` at all. `/provider`, `/setup`, `/rlp-plan` and the resident engine all
+  reported "the decision engine is not installed" on a host where `rlp provider`
+  worked fine from the shell. The interpreter install actually used is now
+  recorded in `rlp-location.json`, and the extensions fall back to a PATH python
+  that can `import rlp_svc`, following `scripts/svc-py`'s order instead of
+  inventing a fourth one.
+- **A first run said "connect a provider" to a host that had one.** In
+  direct-only mode the ladder check still failed with the fix "run /setup", and
+  the endpoint check kept pointing at a step that was already done. Each line
+  now reports the mode it is in.
+
 
 - **A fresh `curl | sh` failed for everyone.** `install.sh` cloned upstream pi's
   default branch and applied `scripts/rlp-fork.patch` to whatever it found

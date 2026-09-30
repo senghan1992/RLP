@@ -189,8 +189,16 @@ function renderLadder(): string {
 	const doc = ladderRaw();
 	if (!doc) return [`◈ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one"].join("\n");
 	const routing = (doc.routing as Json) ?? {};
+	// The *effective* mode, which is the gate plus `$RLP_DIRECT`. Naming both is
+	// what keeps this card from describing a file while the session behaves like
+	// something else.
+	const directEnv = Boolean(process.env.RLP_DIRECT);
+	const directGate = routing.gate === "direct";
 	const lines = [
 		`◈ RLP ladder · ${ladderPath()}`,
+		`  mode   ${directGate || directEnv
+			? `DIRECT-ONLY — every request inline, nothing orchestrated (from ${directEnv && !directGate ? "$RLP_DIRECT" : directEnv ? "routing.gate and $RLP_DIRECT" : "routing.gate"}; /direct off)`
+			: "full — the gate decides per request (/direct on to stop that)"}`,
 		`  brain  ${doc.brain ?? "(not chosen yet — /setup, or /rlp-config brain <provider/model>)"}`,
 		`  gate   ${routing.gate ?? "hybrid"} · escalateBelow=${routing.escalateBelow ?? "-"} · cap=${routing.maxDispatchesPerTurn ?? "-"} · timeout=${routing.workerTimeoutMs ?? "-"}ms`,
 		`  review crossVendor=${((doc.review as Json) ?? {}).crossVendor ?? false}`,
@@ -211,9 +219,10 @@ function renderLadder(): string {
 		0,
 	);
 	lines.push("");
-	if (doc.brain == null || armTotal === 0) {
+	if ((doc.brain == null || armTotal === 0) && !directGate) {
 		// The shipped state. Saying so here is the difference between "the ladder
-		// is empty, is that a bug?" and "one command left".
+		// is empty, is that a bug?" and "one command left". Not said in direct
+		// mode, where no arms is the choice rather than the gap.
 		lines.push("  This ladder carries policy but no model arms, so nothing can be dispatched");
 		lines.push("  and every request is handled inline. /setup reads your endpoint's own model");
 		lines.push("  list and writes the brain and the arms.");
@@ -225,7 +234,8 @@ function renderLadder(): string {
 	lines.push("  /rlp-config set-arm <worker> <i|ref> <ref> replace one arm");
 	lines.push("  /rlp-config rm-arm <worker> <i|ref>        remove one arm");
 	lines.push("  /rlp-config worker <id> on|off [note]      enable/disable a worker");
-	lines.push("  /rlp-config gate <laya|hybrid>             how triage decides when unsure");
+	lines.push("  /rlp-config gate <laya|hybrid|direct>      how triage decides (direct = never)");
+	lines.push("  /direct on|off                            the same switch, in one word");
 	lines.push("  /rlp-config critique on|off · refines <n> · recursion <n>   plan quality loop");
 	lines.push("  /rlp-config rlm-depth <n> · rlm-iterations <n> · rlm-budget <n|off>   RLM knobs");
 	lines.push("  /rlp-config escalate <0..1> · cap <n> · timeout <ms> · cross-vendor on|off");
@@ -272,8 +282,12 @@ function opsFromArgs(args: string): unknown[] | string {
 			return [{ op: "set_worker_available", worker: id, available: toggle === "on", note: note.join(" ") || undefined }];
 		}
 		case "gate":
-			if (!["laya", "hybrid"].includes(rest[0] ?? "")) return "usage: /rlp-config gate <laya|hybrid>";
+			if (!["laya", "hybrid", "direct"].includes(rest[0] ?? "")) return "usage: /rlp-config gate <laya|hybrid|direct>";
 			return [{ op: "set_routing", key: "gate", value: rest[0] }];
+		case "mode":
+			// `rlp mode`'s spelling, so the two names for the switch cannot drift.
+			if (!["direct", "full"].includes(rest[0] ?? "")) return "usage: /rlp-config mode <direct|full>";
+			return [{ op: "set_routing", key: "gate", value: rest[0] === "direct" ? "direct" : "hybrid" }];
 		case "escalate":
 			return rest[0] === undefined ? "usage: /rlp-config escalate <0..1>" : [{ op: "set_routing", key: "escalateBelow", value: Number(rest[0]) }];
 		case "cap":
@@ -350,7 +364,7 @@ async function editLadderInteractively(ctx: ExtensionCommandContext, setModel: S
 		"Add a worker arm",
 		"Replace a worker arm",
 		"Enable / disable a worker",
-		"Escalation gate (laya vs hybrid)",
+		"Escalation gate (laya vs hybrid vs direct)",
 	]);
 	if (!action) return;
 
@@ -424,9 +438,16 @@ async function editLadderInteractively(ctx: ExtensionCommandContext, setModel: S
 	const gate = await ctx.ui.select("Escalation gate", [
 		"hybrid — laya plus deterministic fan-out signals (recommended)",
 		"laya — laya alone; unsure always defaults to direct",
+		"direct — never orchestrate: every request inline, and no decision model to load",
 	]);
 	if (!gate) return;
-	const reply = await applyConfig(ctx, [{ op: "set_routing", key: "gate", value: gate.startsWith("hybrid") ? "hybrid" : "laya" }]);
+	const reply = await applyConfig(ctx, [
+		{
+			op: "set_routing",
+			key: "gate",
+			value: gate.startsWith("hybrid") ? "hybrid" : gate.startsWith("direct") ? "direct" : "laya",
+		},
+	]);
 	ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
 }
 
@@ -779,7 +800,8 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 			[
 				"◈ no provider has a credential, so there is no model to switch to.",
 				"",
-				"  /setup                 guided: connect a provider and build the ladder",
+				"  /setup                 guided: mode, providers, models per role",
+				"  /direct on|off         never orchestrate (or the gate back)",
 				"  /provider connect      attach one endpoint",
 				`  ${rows.length} model(s) are configured but unusable without a key.`,
 			].join("\n"),
@@ -1020,13 +1042,14 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 	bucket((n) => ["orchestration"].includes(n), "RLP ladder (harness)");
 
 	const rlpAll: Array<[string, string]> = [
-		["/setup", "guided first run: connect providers, pick the brain and the worker arms"],
+		["/setup", "guided first run: mode, providers, brain, worker arms, per-role models"],
+		["/direct on|off|status", "direct-only mode: work inline and never orchestrate"],
 		["/rlp", "status card and action menu"],
 		["/rlp-plan <request>", "headless plan: gate → DAG → routing → waves"],
 		["/rlp-triage <request>", "the gate alone, one forward pass"],
 		["/rlp-doctor", "is this host runnable?"],
 		["/rlp-ladder", "the resolved model ladder"],
-		["/rlp-config", "show or edit the ladder (brain, worker arms, gate)"],
+		["/rlp-config", "show or edit the ladder (brain, worker arms, gate, mode)"],
 		["/rlp-roles", "set the orchestration model per role (role -> model)"],
 		["/rlp-run <request>", "compose the orchestrator command"],
 		["/commands", "this index"],

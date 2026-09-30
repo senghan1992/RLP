@@ -5,8 +5,14 @@ description: RLP orchestration pipeline — triage, then decompose, route, dispa
 
 # RLP workflow
 
-Triage gate first; the five-stage pipeline only for what earns it. Act in the
-same turn you announce.
+Triage gate first; the five-stage pipeline only for what earns it.
+
+**Unless this host is in direct-only mode** — check `rlp mode`, or `/direct
+status`. Then none of this workflow applies: work inline with your own tools, do
+not call `rlp_plan` or `rlp_dispatch`, and do not report the absent fan-out as a
+fault. `/direct off` puts the pipeline back.
+
+When the pipeline does apply: act in the same turn you announce.
 
 ## Gate: TRIAGE
 

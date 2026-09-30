@@ -143,16 +143,23 @@ planner·critique·verify·route 모델을 여기서 해석하고, `doctor`가 �
   계획하고, 그 실패는 원인에서 세 단계 떨어진 워커에서 터진다. `rlp ladder`가
   `NOT CONFIGURED`를, `rlp doctor`가 한 줄로 수정안을 말하며, `/setup`이
   엔드포인트의 `GET /models` 응답에서 암을 채운다. 그 전까지 RLP는 평범한 코딩
-  에이전트로 정상 동작한다.
+  에이전트로 정상 동작한다. 그리고 `/setup`을 치기를 기다리지 *않는다*: 자격증명이 없거나 래더가
+  dispatch 가능하지 않으면, 터미널에서 `rlp`을 처음 켤 때 설정이 스스로 시작한다(모드 → 엔드포인트 → 모델 → 워커 암 → 역할별 모델). TUI에서만,
+  `RLP_IDENTITY=rlp`일 때만, `RLP_NO_SETUP=1`로 끌 수 있다. 전부 esc로 막으면
+  아무 것도 쓰이지 않기 때문에 다음 시작에 다시 묻는 것은 잔소리가 아니라 사실이다.
 - laya 게이트의 이 질문 유형 보정은 약하다 (실측 conf 0.003–0.50). 게이트 기본은
   **hybrid**다: laya가 확신하면 그대로, 불확실하면 `triage.py`의 결정론적 fan-out
   신호가 `orchestrate`로 올리고 `engine: laya+signals`·`signals`를 남긴다. 확신한
   laya `direct`는 뒤집지 않는다. `routing.gate: "laya"`로 옛 동작(불확실=direct)
-  복원. 브레인의 최종 어필은 그대로다: 2+ 독립 산출물을 명명할 때만 escalate.
+  복원. `routing.gate: "direct"`는 질문 자체를 취소한다 — 모든 요청이 inline이고
+  laya는 애초에 로딩되지 않는다(`/direct on`, `rlp mode direct`, 그리고 이번 런만
+  `rlp --direct` = `$RLP_DIRECT`). 명백한 `--mode` 오버라이드는 모드를 이긴다:
+  빠져나갈 구멍 없는 스위치는 함정이다. 브레인의 최종 어필은 그대로다: 2+ 독립
+  산출물을 명명할 때만 escalate.
   CLI에서도 `rlp plan --mode orchestrate --because "…"`가 같은 계약이며 결과에
   `gate_override`로 기록된다.
 - 래더는 세션 안에서 편집된다: `/setup`, `/rlp-config`(메뉴 또는
-  `brain|add-arm|set-arm|move-arm|rm-arm|worker|gate|escalate|cap|timeout|cross-vendor`),
+  `brain|add-arm|set-arm|move-arm|rm-arm|worker|gate|mode|escalate|cap|timeout|cross-vendor`),
   `/rlp-roles`, `/models --pick`의 "add to the RLP ladder"/"make it the
   orchestrator", 스크립트용 `rlp config '<ops-json>'`. 쓰기 전에 검증하고
   `.bak.<ts>` 백업 + 원자적 교체를 한다.
@@ -168,5 +175,7 @@ planner·critique·verify·route 모델을 여기서 해석하고, `doctor`가 �
   이 둘이 계약이다.
 - laya 첫 로딩은 프로세스당 ~170s (CPU 체크포인트). 그래서 엔진은 세션 시작 시
   백그라운드로 뜨고 세션당 한 번만 로딩한다. 프로세스를 재시작하면 다시 로딩한다.
+  direct 전용 모드에서는 애초에 띄우지 않는다 — 상답에 대한 질문을 위해 150초를
+  쓰지 않는다.
 - 원격 없는 저장소에서 워커는 브랜치 커밋까지만 한다. 머지·push·force-push는
   절대 하지 않는다 — 언제나 사람이 머지한다.

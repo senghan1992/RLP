@@ -8,6 +8,11 @@ description: Diagnose whether this host can actually run RLP — dependencies, c
 Run the health check and report it. It is read-only, takes about 0.2 s, and is
 the fastest way to explain a failure that looks like RLP being broken.
 
+Read the `ladder` line before anything that says "no model arms": a host in
+direct-only mode has chosen not to orchestrate, so missing arms are not its
+fault, and the line says where the mode came from (`routing.gate`, or a
+`$RLP_DIRECT` left over in the shell).
+
 ```bash
 rlp doctor
 ```

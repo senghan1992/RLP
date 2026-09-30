@@ -43,6 +43,72 @@ NOT_CONFIGURED = (
 )
 
 
+#: The gate modes the ladder may name, and what each one means in practice:
+#:
+#:   laya    the laya pass alone; unsure means direct
+#:   hybrid  laya, plus the deterministic fan-out signals when unsure
+#:   direct  never orchestrate — every request is handled inline by design, and
+#:           laya is never loaded. The ladder keeps carrying the rest of the
+#:           policy, so switching back is one edit rather than a re-setup.
+GATES = ("laya", "hybrid", "direct")
+
+#: Session-only override: `rlp --direct` (and RLP_DIRECT=1 anywhere else) says
+#: "this run does not orchestrate" without rewriting the ladder, which holds
+#: the user's model choices.
+DIRECT_ENV = "RLP_DIRECT"
+
+_TRUE = ("1", "true", "yes", "on")
+
+
+def env_direct() -> bool:
+    """Whether the session override asked for direct-only behaviour."""
+    return str(os.environ.get(DIRECT_ENV, "")).strip().lower() in _TRUE
+
+
+def direct_source(gate: str | None) -> str | None:
+    """What makes this host direct-only, or None when it is not.
+
+    The single place that knows the two things which decide it — the session
+    override first, then the ladder's gate. A caller that compared against
+    `"direct"` itself would be a caller that ignores `RLP_DIRECT` and reports a
+    mode that is not in effect.
+    """
+    if env_direct():
+        return f"${DIRECT_ENV}"
+    if gate == "direct":
+        return "routing.gate"
+    return None
+
+
+def gate_of(config: dict | None) -> str:
+    """The gate a resolved ladder names, defaulting the way `triage` defaults."""
+    if not config:
+        return "hybrid"
+    return (config.get("routing") or {}).get("gate") or "hybrid"
+
+
+def direct_mode(config: dict | None = None) -> dict:
+    """{"direct", "gate", "source"} — is this host in direct-only mode, and why.
+
+    Never raises: an unreadable or absent ladder means the default (hybrid),
+    which is what `triage` falls back to as well. `source` names the decider so
+    every report can say "from $RLP_DIRECT" or "from routing.gate" instead of
+    leaving the user to work out which file to edit.
+    """
+    if config is None:
+        try:
+            config = load()
+        except Exception:
+            config = None
+    gate = gate_of(config)
+    source = direct_source(gate)
+    return {
+        "direct": source is not None,
+        "gate": gate,
+        "source": source or ("routing.gate" if config else "default"),
+    }
+
+
 def config_path() -> Path:
     """`$RLP_ORCHESTRATION`, else `<agent dir>/orchestration.json`.
 
@@ -148,12 +214,13 @@ def parse(raw: str, source: str) -> dict:
     if cap is not None:
         _require(isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1,
                  f"{source}: routing.maxDispatchesPerTurn must be a positive integer")
-    # `gate` selects how triage decides once laya is unsure: "laya" keeps the
-    # old behaviour (low confidence always defaults to direct), "hybrid" also
-    # consults the deterministic fan-out signals. Omitted means hybrid, because
-    # on the bundled checkpoint every decision lands below escalateBelow.
+    # `gate` selects how triage decides: "laya" keeps the old behaviour (low
+    # confidence always defaults to direct), "hybrid" also consults the
+    # deterministic fan-out signals, "direct" never orchestrates and never loads
+    # laya at all. Omitted means hybrid, because on the bundled checkpoint every
+    # decision lands below escalateBelow.
     gate = routing_raw.get("gate", "hybrid")
-    _require(gate in ("laya", "hybrid"), f"{source}: routing.gate must be 'laya' or 'hybrid'")
+    _require(gate in GATES, f"{source}: routing.gate must be one of {', '.join(GATES)}")
     signal_threshold = routing_raw.get("signalThreshold")
     if signal_threshold is not None:
         _require(isinstance(signal_threshold, (int, float)) and signal_threshold >= 0,
@@ -262,6 +329,10 @@ def parse(raw: str, source: str) -> dict:
         # on this rather than re-deriving it and disagreeing.
         "configured": brain is not None and arm_count > 0,
         "arm_count": arm_count,
+        # "direct" when the ladder chose direct-only mode, "full" otherwise. A
+        # derived field, so it is never a second source of truth: `gate` stays
+        # the thing that is written, and this is the thing a caller branches on.
+        "mode": "direct" if gate == "direct" else "full",
         "workers": workers,
         "roles": roles,
         "routing": {

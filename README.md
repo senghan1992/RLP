@@ -110,9 +110,9 @@ never type it).
 - ~1.5 GB of disk (the harness, a CPU-only torch, and the laya checkpoint)
 - Model credentials: RLP keeps its own state under `~/.rlp/agent/` —
   `auth.json` + `models.json`, never pi's `~/.pi`. Any OpenAI-compatible
-  provider works. Configure them inside `rlp` with `/setup` (or
-  `/provider connect`), which is the guided path; a hand-edited file works too,
-  and `rlp provider` is the scriptable equivalent.
+  provider works. Starting `rlp` for the first time asks for them (the guided
+  setup), `/provider connect` attaches one on its own, `rlp provider` is the
+  scriptable equivalent, and a hand-edited file works too.
 The installer uses [`uv`](https://github.com/astral-sh/uv) when it is present and
 plain `pip` otherwise. By default there is **no venv**: the engine is pip-installed into your existing python (≥ 3.10), like any other package. Pass `RLP_ENGINE=venv` to install it in a self-contained `rlp-svc/.venv` instead (isolated from the system python; the old default, still fully supported):
 
@@ -124,22 +124,42 @@ RLP_ENGINE=venv sh scripts/install.sh # isolated .venv, system python untouched
 ### First run
 
 ```bash
-rlp            # the agent, in the project you are working on
-/setup         # guided: doctor → providers → brain → worker arms → roles
+rlp            # the agent, in the project you are working on — and it asks
 ```
 
-**`/setup` is not optional.** A fresh install has no provider and a ladder that
-carries policy but no model arms, so until you run it RLP behaves as a plain
-coding agent: every request is handled inline, and `rlp doctor` and `rlp ladder`
-both say why in one line. This is on purpose — RLP ships no default model names
-because a model ref only means something on a host that has that provider.
+**You do not have to know the word `/setup`.** A host with no credential and no
+model arms cannot do anything yet, so the first time you start `rlp` in a
+terminal the guided setup begins by itself: the mode, then the endpoints and
+their keys, then the model RLP works on, then the worker arms, then the model for
+each role. Every question is skippable, each one says what it changed, and
+answering all of them with escape writes nothing at all — which is why being
+asked again next launch is honest rather than a nag. `RLP_NO_SETUP=1` is the
+quiet start for a session nobody is sitting at; `/setup` runs it again by hand,
+and `rlp doctor` says the same thing in a shell.
 
-`/setup` asks the four questions that decide whether RLP can do anything at all,
-in order, with the defaults stated: which endpoints exist and which have no
-credential, which model orchestrates, which models work, and which roles they
-cover. Every step is skippable and reports exactly what it changed. Afterwards
-`/rlp-ladder` shows what will actually happen, and `/rlp-plan "<request>"`
-shows the decision without running anything.
+The first question is the one everything else depends on:
+
+| Mode | What RLP does with a request |
+|---|---|
+| **full** | the laya gate decides each time — inline when one agent can finish it, a fan-out of workers when the work earns it |
+| **direct-only** | always inline. No gate, no DAG, no workers, and the 421M decision model is never loaded at all |
+
+```bash
+/direct on                    # in a session: stop orchestrating (stored in the ladder)
+/direct off · /direct status  # hand it back · say which mode is in effect and what put it there
+rlp mode direct|full          # the same switch outside a session
+rlp --direct                  # direct-only for one launch, without touching the ladder
+RLP_DIRECT=1 rlp              # the same, in any argument position
+```
+
+Direct-only mode is a supported way to use RLP, not a crippled one: it is the
+harness, the extensions and the same guardrails with the fan-out switched off.
+`rlp doctor`, `rlp ladder` and `rlp progress` all report it as a choice rather
+than as a missing ladder, and `rlp progress` stops counting the milestones that
+only exist for orchestration.
+
+This is on purpose in the other direction too: RLP ships no default model names,
+because a model ref only means something on a host that has that provider.
 
 Attaching an endpoint on its own is `/provider connect`: pick from a preset
 (OpenAI, Anthropic, OpenRouter, Groq, DeepSeek, Qwen, Ollama, any local
@@ -176,6 +196,13 @@ laya checkpoint is weakly calibrated, the default gate is *hybrid*: when laya is
 unsure, deterministic fan-out signals (an explicit "in parallel"/"delegate" cue,
 an implementation plus an independent review, several deliverable verbs joined
 into clauses) may raise the call to `orchestrate` and name the signal that fired.
+
+`routing.gate` can also be **`direct`**, which takes the decision away from the
+model entirely: every request is handled inline, no fan-out is ever planned, and
+laya is never loaded — the ~150 s and a few hundred MB are not spent on a
+question with a constant answer. That is `/direct on`, `rlp mode direct`, or
+`rlp --direct` for one launch, and it is a supported way to run RLP rather than a
+disabled one: the harness, the extensions and the guardrails are all still there.
 
 **The human always merges.** RLP commits branches and can open PRs. It never
 merges, never force-pushes, never touches a protected branch.
@@ -233,6 +260,7 @@ Filled in, it looks like this (the provider ids are whatever *you* connected):
   "roles": { "review": ["anthropic/claude-opus-5-5"] },
   "routing": { "escalateBelow": 0.55, "maxDispatchesPerTurn": 4,
                "gate": "hybrid", "signalThreshold": 1, "workerTimeoutMs": 1200000 },
+               // gate: "laya" | "hybrid" | "direct" — direct never orchestrates
   "review": { "crossVendor": true },
   "rlm": { "maxDepth": 1, "maxIterations": 8, "maxConcurrentSubcalls": 4, "maxTimeout": 300 },
   "planning": { "critique": true, "maxRefines": 1, "recursiveDepth": 1,
@@ -310,6 +338,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | Command | What it does |
 |---|---|
 | `rlp` | the interactive agent; triages each request, orchestrates when it earns it |
+| `rlp --direct` | the same agent, never orchestrating, for this launch only |
 | `rlp -p "<request>"` | the same, non-interactive |
 | `rlp plan "<request>"` | the whole decision headless: gate → DAG → routes → waves (executes nothing) |
 | `rlp triage "<request>"` | the gate alone, one laya forward pass |
@@ -318,6 +347,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp replan "<node brief>"` | recursively re-decompose one task into a sub-DAG |
 | `rlp verify --acceptance A --avoid-family F` | independent cross-vendor best-of-N verdict |
 | `rlp ladder` · `rlp roster` | the resolved ladder · the router's roster cards |
+| `rlp mode [direct\|full]` | does this host orchestrate? no argument reports the mode and what set it |
 | `rlp provider list` | every endpoint: credential state, models, and the ladder arms it carries |
 | `rlp provider probe <id>` | one real round trip; a failure comes back classified, with a fix |
 | `rlp provider discover <id>` | ask the endpoint which models it serves |
@@ -326,6 +356,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp config '<ops-json>'` | edit the ladder (validated, backed up, atomic) |
 | `rlp memory` · `rlp remember "<text>"` | the project's cross-run knowledge log |
 | `rlp doctor [--warm]` | is this host runnable? one fix per failure |
+| `rlp progress [--json]` | how far this host is from installed to working, and the next step |
 | `rlp update [--check]` | RLP to the newest release + the fork to newest upstream, verified |
 | `rlp version [--json]` | the release, the commit, the harness build — what a bug report needs |
 | `rpi` | the same harness with no orchestration surface at all |
@@ -337,7 +368,8 @@ Add `--json` to any engine subcommand for the raw envelope. Exit codes:
 
 | Command | What it does |
 |---|---|
-| `/setup` | guided first run: doctor → endpoints → brain → worker arms → roles |
+| `/setup` | guided first run: mode → endpoints → model → worker arms → per-role models |
+| `/direct on\|off\|status` | direct-only mode: work inline and never orchestrate |
 | `/rlp` | status card (ladder, brain, endpoints, unusable arms) + an action menu |
 | `/rlp-plan <request>` | the headless plan, rendered in chat |
 | `/rlp-triage <request>` | the gate verdict alone |
@@ -389,9 +421,10 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | Symptom | Try |
 |---|---|
 | `rlp: decision engine not installed` | `sh scripts/install.sh` |
-| nothing ever orchestrates, even for obviously multi-part work | the ladder has no model arms yet — `rlp ladder` says `NOT CONFIGURED`; `/setup` fills it |
+| nothing ever orchestrates, even for obviously multi-part work | `rlp ladder`'s `mode:` line first (direct-only is a choice), then the arms: `NOT CONFIGURED` means `/setup` fills it |
 | `the laya decision model` seems stuck | first load is ~150 s on CPU; it is loaded once per session in the background |
 | a request never fans out | the gate defaults to direct; use `rlp plan --mode orchestrate --because "…"` or ask explicitly |
+| nothing orchestrates *at all*, and `/rlp-plan` says `direct-only mode` | the mode, not a fault: `rlp mode` (or `/direct status`) says whether it came from `routing.gate` or `$RLP_DIRECT`; `/direct off` ends it |
 | a worker dies instantly | `rlp doctor` — usually a missing credential for that arm (`/provider key <id>`, or `/login <provider>`) |
 | a model is in the list but nothing runs on it | it is not a *ladder arm*: `/provider` names this under "ladder arms that cannot run", `/rlp-config add-arm` attaches it |
 | a connection fails and you cannot tell why | `/provider test <id>` — a rejected key, a wrong URL, a bad model id, no network and TLS are told apart, each with a fix |
@@ -406,6 +439,8 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | `RLP_CODING_AGENT_DIR` | RLP's agent dir (`~/.rlp/agent` by default) |
 | `RPI_CODING_AGENT_DIR` | the same, under the harness's own name — still honoured |
 | `RLP_ORCHESTRATION` | path to the ladder, overriding `<agent dir>/orchestration.json` |
+| `RLP_DIRECT=1` | direct-only for this session: outranks the ladder, cleared by `/direct off` |
+| `RLP_NO_SETUP=1` | do not run the guided setup on first launch (sessions with no keyboard at the other end) |
 | `RPI_DEFAULT_MODEL` | the `rpi` session default (`provider/model`) |
 | `RLP_DECOMPOSE_MODEL` · `RLP_CRITIQUE_MODEL` · `RLP_VERIFY_MODEL` · `RLP_ROUTE_MODEL` | override the planner / critic / verifier / router model (`provider/model`); each otherwise comes from the ladder |
 | `RLP_SKIP_CREDENTIAL_PREFLIGHT=1` | skip the per-arm credential check |

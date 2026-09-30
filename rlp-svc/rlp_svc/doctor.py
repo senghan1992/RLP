@@ -91,6 +91,22 @@ def _credentials() -> list[dict]:
         )
         return out
     if spec is None:
+        # In direct-only mode nothing is decomposed, so an unresolved planner model
+        # is not a warning about a missing piece — it is a piece that is not part of
+        # this host's design. Saying so is what keeps the report readable for the
+        # person who chose the simple mode.
+        from . import orchestration as orch
+
+        if orch.direct_mode()["direct"]:
+            out.append(
+                _check(
+                    OK,
+                    "decompose-model",
+                    "not resolved — direct-only mode never decomposes, so no planner model is needed",
+                    "",
+                )
+            )
+            return out
         out.append(
             _check(
                 WARN,
@@ -134,6 +150,26 @@ def _ladder() -> list[dict]:
                 "ladder",
                 f"not installed at {path}",
                 "sh scripts/install.sh, or set RLP_ORCHESTRATION=<file>",
+            )
+        )
+        return out
+    # Direct-only mode is a choice rather than a hole in the ladder, so it gets
+    # its own answer: nothing to fix, and the line says where the mode came from
+    # — a $RLP_DIRECT left over in a shell is otherwise invisible, and reads
+    # like a broken install. Everything below only means something to a host
+    # that may orchestrate.
+    direct = orch.direct_mode(config)
+    if direct["direct"]:
+        back = "`rlp mode full` (or /direct off) gives orchestration back"
+        if direct["source"] == f"${orch.DIRECT_ENV}":
+            back += " — unsetting $RLP_DIRECT ends it for this shell only"
+        out.append(
+            _check(
+                OK,
+                "ladder",
+                f"{path} — direct-only mode (from {direct['source']}): every request is handled "
+                f"inline, by choice, so no brain and no model arms are needed. {back}",
+                "",
             )
         )
         return out
@@ -344,6 +380,10 @@ def _providers() -> list[dict]:
                 "sh scripts/install.sh installs the default ladder",
             )
         )
+    elif ladder["arm_count"] == 0 and orch.direct_mode(ladder)["direct"]:
+        # In direct-only mode the router is never consulted, so "no arms to
+        # reach" is the design and not a warning with a fix attached.
+        out.append(_check(OK, "ladder-arms-reachable", "direct-only mode: the router is not used", ""))
     elif ladder["arm_count"] == 0:
         # "Every arm is reachable" is vacuously true of zero arms, and reading it
         # as `ok` next to a failing ladder line is the kind of report that makes

@@ -18,10 +18,13 @@
  *   /provider and /setup are registered by rlp-provider.ts, which owns the
  *   endpoint/credential conversation.
  *
- * Two rules the commands keep:
+ * Three rules the commands keep:
  *   - never raise into the TUI: every failure is a rendered line, not a stack;
  *   - never mutate: all of them are read-only, so a wrong `/rlp-plan` costs
- *     time but cannot cost state.
+ *     time but cannot cost state. The one exception is that the status menu can
+ *     *put a mutating command in the editor* (`/setup`, `/direct`) — the user
+ *     still presses enter, and the write itself belongs to the extension that
+ *     owns that config path.
  */
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -217,8 +220,9 @@ const setup: Handler = async (_args, ctx) => {
 		[
 			"◈ RLP setup",
 			"",
-			"The guided first run: doctor → connect providers → orchestrator model →",
-			"worker arms → role bindings. Every step is skippable.",
+			"The guided first run: mode → connect providers → the model RLP works on →",
+			"worker arms → per-role models. Every step is skippable, and it runs by",
+			"itself the first time you start `rlp` on a host that cannot work yet.",
 			"",
 			"It is in the editor now — press enter to start it.",
 		].join("\n"),
@@ -226,8 +230,27 @@ const setup: Handler = async (_args, ctx) => {
 	if (ctx.hasUI) ctx.ui.pasteToEditor("/setup");
 };
 
+const directMode: Handler = async (_args, ctx) => {
+	report(
+		ctx,
+		[
+			"◈ RLP mode",
+			"",
+			"direct-only  every request handled inline: no gate, no DAG, no workers,",
+			"             and no decision model loaded. RLP as a plain coding agent.",
+			"full         the laya gate decides per request and fans out when the work",
+			"             earns it. This is RLP's default.",
+			"",
+			"The command is in the editor now — press enter for the current state,",
+			"or type \`/direct on\` / \`/direct off\`.",
+		].join("\n"),
+	);
+	if (ctx.hasUI) ctx.ui.pasteToEditor("/direct");
+};
+
 const MENU: Array<{ label: string; run: Handler; prompt?: string }> = [
 	{ label: "Setup (connect providers, choose models)", run: setup },
+	{ label: "Mode (direct-only, or let the gate decide)", run: directMode },
 	{ label: "Plan a request (gate → DAG → waves)", run: plan, prompt: "Plan which request?" },
 	{ label: "Triage a request (gate only)", run: triage, prompt: "Triage which request?" },
 	{ label: "Doctor (is this host runnable?)", run: doctor },
@@ -263,7 +286,15 @@ const status: Handler = async (args, ctx) => {
 		const config = JSON.parse(ladderJson.stdout)?.result;
 		if (config) {
 			lines.push(`  ladder    ${config.path}`);
-			lines.push(`  brain     ${config.brain}`);
+			// The effective mode, from the engine rather than from a guess here: it
+			// is the first thing a person reading a status card needs, and the one
+			// thing they cannot infer from the brain or the arm count.
+			lines.push(
+				`  mode      ${config.direct_only
+					? `direct-only — nothing is orchestrated (from ${config.direct_source})`
+					: "full — the gate decides per request"}`,
+			);
+			lines.push(`  brain     ${config.brain ?? "(not chosen yet — /setup)"}`);
 			lines.push(`  workers   ${(config.roster ?? []).map((c: { id: string }) => c.id).join(", ") || "none"}`);
 			for (const excluded of config.excluded_workers ?? []) {
 				lines.push(`  excluded  ${excluded.id} — ${excluded.reason}`);
@@ -286,13 +317,14 @@ const status: Handler = async (args, ctx) => {
 	}
 	lines.push(`  here      ${ctx.cwd}`);
 	lines.push("");
-	lines.push("  /setup                 guided: connect providers, pick the brain and the worker arms");
+	lines.push("  /setup                 guided first run: mode, providers, models per role");
+	lines.push("  /direct on|off         work inline and never orchestrate (or the reverse)");
 	lines.push("  /provider              endpoints, credentials, a live connection test");
 	lines.push("  /rlp-plan <request>    decide what to do, without dispatching");
 	lines.push("  /rlp-triage <request>  the gate alone, one forward pass");
 	lines.push("  /rlp-doctor            why something would not run");
 	lines.push("  /rlp-ladder            the model ladder in full");
-	lines.push("  /rlp-config            show or edit the ladder (brain, arms, gate)");
+	lines.push("  /rlp-config            show or edit the ladder (brain, arms, gate, mode)");
 	lines.push("  /rlp-run <request>     run a request through the whole pipeline");
 	report(ctx, lines.join("\n"), health.code === 0 ? "info" : "warning");
 

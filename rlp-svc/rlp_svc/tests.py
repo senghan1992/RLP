@@ -110,7 +110,7 @@ def with_ladder(fn, *, tasks: list[dict] | None = None, triage: dict | None = No
         "route": route.route,
     }
     orchestration.load = lambda: orchestration.parse(json.dumps(ladder or LADDER), "test")
-    triage_mod.triage = lambda request, context="": triage or {
+    triage_mod.triage = lambda request, context="", **_kwargs: triage or {
         "mode": "orchestrate",
         "confidence": 0.9,
         "engine": "laya",
@@ -563,7 +563,7 @@ def test_cli_surface() -> None:
     from .cli import EXIT_USAGE, build_parser
 
     parser = build_parser()
-    expected = {"triage", "decompose", "route", "llm-route", "ladder", "roster", "provider", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "progress", "serve", "version"}
+    expected = {"triage", "decompose", "route", "llm-route", "ladder", "mode", "roster", "provider", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "progress", "serve", "version"}
     actions = [a for a in parser._actions if hasattr(a, "choices") and isinstance(a.choices, dict)]
     check(bool(actions), "the parser declares subcommands")
     if actions:
@@ -991,6 +991,220 @@ def test_signals_and_hybrid_gate() -> None:
     # ...and routing.gate=laya restores the old behaviour exactly.
     check(_apply_hybrid(dict(unsure), "add X, document it, review the diff", "", "laya", 1.0)["mode"] == "direct",
           "gate=laya disables the signal upgrade")
+
+
+def test_direct_mode() -> None:
+    """Direct-only mode: valid config, honoured by every layer, honest in reports.
+
+    The mode exists because most of what people want from RLP is a good coding
+    agent and none of the fan-out. Three properties are worth pinning: the gate
+    is never consulted (so no decision model is loaded), the reports say the mode
+    is a choice rather than a missing ladder, and an explicit override still
+    outranks it — a mode with no way out is a trap.
+    """
+    import os
+
+    from . import doctor, onboarding, orchestration as orch, plan as plan_mod, triage as triage_mod
+
+    direct_ladder = {**LADDER, "routing": {"gate": "direct", "escalateBelow": 0.55}}
+    thin_ladder = {**UNCONFIGURED_LADDER, "routing": {**UNCONFIGURED_LADDER["routing"], "gate": "direct"}}
+
+    parsed = orch.parse(json.dumps(direct_ladder), "test")
+    check(parsed["mode"] == "direct", f"gate=direct parses and reports the mode: {parsed['mode']}")
+    check(parsed["routing"]["gate"] == "direct", "the gate value survives validation")
+    try:
+        orch.parse(json.dumps({**LADDER, "routing": {"gate": "sometimes"}}), "test")
+        check(False, "an unknown gate was accepted")
+    except ValueError as e:
+        check("routing.gate" in str(e), f"the rejection names the field: {e}")
+
+    # The gate must not be consulted at all: loading laya to answer a constant is
+    # the exact cost this mode exists to avoid.
+    from . import route as route_mod
+
+    def boom():
+        raise AssertionError("direct-only mode must not load the decision model")
+
+    saved_router, saved_env = route_mod._router, os.environ.get("RLP_DIRECT")
+    route_mod._router = boom
+    try:
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(direct_ladder)
+        decision = triage_mod.triage("add a payments module, document it, and review the diff independently")
+        check(decision["mode"] == "direct", f"direct-only mode answers direct: {decision['mode']}")
+        check(decision["engine"] == "direct-mode", f"and says which engine answered: {decision['engine']}")
+        check(decision["direct_only"] is True, "the answer is marked as the mode, not a measurement")
+        check(decision["escalate"] is False, "an answer with no uncertainty cannot escalate")
+        check("how_to_change" in decision, "the answer names the way out")
+
+        # Same from the environment, with an ordinary ladder in the file: a
+        # session launched `--direct` is direct-only without anybody editing state.
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(LADDER)
+        os.environ["RLP_DIRECT"] = "1"
+        env_decision = triage_mod.triage("add a payments module, document it, and review the diff independently")
+        check(env_decision["direct_only"] is True, "$RLP_DIRECT decides triage without a ladder edit")
+        check(env_decision["direct_source"] == "$RLP_DIRECT", f"and names itself as the source: {env_decision}")
+        del os.environ["RLP_DIRECT"]
+
+        # plan() answers before the ladder's arms are read, so a host that chose
+        # the mode is not reported as broken.
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(thin_ladder)
+        planned = plan_mod.plan("add a payments module, document it, and review the diff independently")
+        r = planned["result"]
+        check(r["mode"] == "direct", "plan: direct-only on an armless ladder still says direct")
+        check(r.get("direct_only") is True, "and marks it as the mode")
+        check("orchestration_unavailable" not in r,
+              f"it is not reported as a broken ladder: {r.get('orchestration_unavailable')}")
+        check("inline" in r["recommended"], "the recommendation is the one line to act on")
+
+        # The escape hatch, tested at the layer that decides. A stubbed router
+        # stands in for laya: `force` must reach the real gate, because a forced
+        # call that came back "direct" again would be a switch that lies.
+        class FakeRouter:
+            def predict(self, state, questions):
+                return {"answers": {"mode": {"choice": "orchestrate", "confidence": 0.9}}}
+
+        route_mod._router = lambda: FakeRouter()
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(direct_ladder)
+        os.environ.pop("RLP_DIRECT", None)
+        forced_gate = triage_mod.triage("add X, document it, review the diff", force=True)
+        check(forced_gate["engine"] == "laya", f"force asks the gate: {forced_gate['engine']}")
+        check(forced_gate["mode"] == "orchestrate", "and takes the gate's answer")
+        check(not forced_gate.get("direct_only"), "the verdict is a measurement, not the mode")
+        route_mod._router = boom
+
+        # ...while an explicit override still outranks it: the mode declines to
+        # decide, it does not overrule a human who named the mode and said why.
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(direct_ladder)
+        forced = with_ladder(
+            lambda: plan_mod.plan("two independent services, built and reviewed", mode="orchestrate", because="code and review"),
+            ladder=direct_ladder,
+        )
+        check(bool(forced.get("ok")) and forced["result"].get("gate_override", {}).get("mode") == "orchestrate",
+              f"an explicit override is honoured in direct-only mode: {forced}")
+        check(bool(forced["result"].get("tasks")), "and the overridden plan really plans")
+
+        # `force` is the other way out, and the one the brain uses: it asks the
+        # gate without claiming a verdict, so the plan carries a triage block
+        # rather than a gate_override.
+        force_planned = with_ladder(
+            lambda: plan_mod.plan("two independent services, built and reviewed", force=True),
+            ladder=direct_ladder,
+            triage={"mode": "orchestrate", "confidence": 0.9, "engine": "laya", "escalate": False},
+        )
+        check(bool(force_planned.get("ok")) and force_planned["result"].get("mode") == "orchestrate",
+              f"force plans in direct-only mode: {force_planned}")
+        check("gate_override" not in force_planned["result"], "and is not reported as an override")
+        check(bool(force_planned["result"].get("tasks")), "the DAG is built")
+        # The stamp is what bounds the claim: `last-plan.json` outlives the turn, and
+        # a dispatcher in direct-only mode must be able to tell "the user asked for
+        # this run" from "somebody forced a plan an hour ago".
+        check(force_planned["result"].get("force") is True, "the forced plan records that it was forced")
+        import datetime
+
+        stamp = datetime.datetime.fromisoformat(str(force_planned["result"]["forced_at"]))
+        age = (datetime.datetime.now(datetime.timezone.utc) - stamp).total_seconds()
+        check(abs(age) < 120, f"the stamp is now: {age}s old")
+
+        # doctor reports the mode as a state, not a fault, and keeps the fix
+        # visible. Read against the armless ladder, because that is the state a
+        # fresh install is actually in: no arms, and the mode says they are not
+        # wanted. An armless ladder with real arms would be testing orphan arms,
+        # which are a different warning and are still correct here.
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(thin_ladder)
+        report = doctor.run()
+        ladder_line = next(c for c in report["checks"] if c["name"] == "ladder")
+        check(ladder_line["status"] == "ok", f"doctor: direct-only is not a failure: {ladder_line}")
+        check("direct-only" in ladder_line["detail"], "doctor names the mode")
+        check("rlp mode full" in ladder_line["detail"], "and the way back")
+        arms = next(c for c in report["checks"] if c["name"] == "ladder-arms-reachable")
+        check(arms["status"] == "ok", f"doctor: no arms to reach is the design here: {arms}")
+        check(not any(c["status"] == "fail" and c["name"] == "ladder" for c in report["checks"]),
+              "the fresh-but-direct host has no ladder failure to fix")
+
+        # `rlp mode` is the switch a person can remember. It reports the
+        # *effective* mode (which is not always what the file says, when a
+        # session override is in play) and writes through the same validated,
+        # backed-up path /direct uses, so the two spellings cannot drift.
+        import contextlib
+        import io
+
+        from . import cli
+
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder({**LADDER, "routing": {"gate": "hybrid"}})
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            status_code = cli.main(["mode", "--json"])
+        check(status_code == 0 and '"direct": false' in sink.getvalue(), f"rlp mode reports full: {sink.getvalue()[:160]}")
+
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            set_code = cli.main(["mode", "direct", "--json"])
+        check(set_code == 0 and '"direct": true' in sink.getvalue(), f"rlp mode direct writes it: {sink.getvalue()[:160]}")
+        check(orch.parse(Path(os.environ["RLP_ORCHESTRATION"]).read_text(), "test")["routing"]["gate"] == "direct",
+              "the ladder on disk really says direct")
+
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            cli.main(["mode", "full", "--json"])
+        check('"direct": false' in sink.getvalue(), "rlp mode full hands the gate back")
+        check(orch.parse(Path(os.environ["RLP_ORCHESTRATION"]).read_text(), "test")["routing"]["gate"] == "hybrid",
+              "and restores the gate that decides")
+
+        # The report a person actually reads. With an endpoint that has a
+        # credential and a ladder that chose not to orchestrate, nothing is
+        # missing — and the old wording sent exactly this host to connect a
+        # provider it had already connected, which reads as a tool that does not
+        # know what mode it is in.
+        store = Path(_write_ladder(direct_ladder)).parent
+        models_path, auth_path = store / "models.json", store / "auth.json"
+        models_path.write_text(json.dumps({"providers": {"alpha": {"baseUrl": "https://alpha.example/v1", "models": [{"id": "alpha-large"}]}}}))
+        auth_path.write_text(json.dumps({"alpha": {"key": "k"}}))
+        os.environ["RLP_PI_MODELS"] = str(models_path)
+        os.environ["RLP_PI_AUTH"] = str(auth_path)
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(thin_ladder)
+        ready = doctor.run()
+        by_name = {c["name"]: c for c in ready["checks"]}
+        check("credential" in by_name["providers"]["detail"].lower() or by_name["providers"]["status"] == "ok",
+              f"a credentialed endpoint is enough for the provider line: {by_name.get('providers')}")
+        check(not any(c["status"] == "fail" and c["name"] == "providers" for c in ready["checks"]),
+              "a host that connected a provider is not told to connect one")
+        check("/setup" not in by_name["providers"].get("hint", "") or by_name["providers"]["status"] == "ok",
+              "and no fix is offered for a step that is done")
+
+        # onboarding stops counting what this mode never does. The ladder is
+        # written again because the `rlp mode` checks above changed the file.
+        os.environ["RLP_ORCHESTRATION"] = _write_ladder(thin_ladder)
+        saved_harness, saved_engine = onboarding._harness, onboarding._engine
+        onboarding._harness = lambda: (True, "stub", "")
+        onboarding._engine = lambda: (True, "stub", "")
+        try:
+            prog = onboarding.progress()
+            ids = [s["id"] for s in prog["steps"]]
+            check("dispatch" not in ids and "result" not in ids and "plan" not in ids,
+                  f"direct-only mode drops the orchestration milestones: {ids}")
+            check(prog["direct_only"] is True, "and says so in the report")
+            check(prog["total"] == len(ids), "the count matches the shortened sequence")
+            check("direct-only" in onboarding.summary_line(prog), "the header line names the mode")
+        finally:
+            onboarding._harness, onboarding._engine = saved_harness, saved_engine
+    finally:
+        route_mod._router = saved_router
+        os.environ.pop("RLP_ORCHESTRATION", None)
+        os.environ.pop("RLP_PI_MODELS", None)
+        os.environ.pop("RLP_PI_AUTH", None)
+        os.environ.pop("RLP_DIRECT", None)
+        if saved_env is not None:
+            os.environ["RLP_DIRECT"] = saved_env
+
+
+def _write_ladder(ladder: dict) -> str:
+    """Put a ladder where the engine will read it, and return the path."""
+    import os
+
+    directory = os.environ.setdefault("_RLP_TEST_TMP", tempfile.mkdtemp(prefix="rlp-direct-"))
+    path = Path(directory) / f"orchestration-{abs(hash(json.dumps(ladder, sort_keys=True)))}.json"
+    path.write_text(json.dumps(ladder))
+    return str(path)
 
 
 def test_intent_refinement() -> None:
@@ -1659,6 +1873,7 @@ def main() -> None:
         test_ladder_validation,
         test_unconfigured_ladder,
         test_signals_and_hybrid_gate,
+        test_direct_mode,
         test_intent_refinement,
         test_ladder_mutation,
         test_config_cli,

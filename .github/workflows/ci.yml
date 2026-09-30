@@ -39,7 +39,7 @@ jobs:
       # so it is derived from what is actually there.
       - name: POSIX sh syntax check
         run: |
-          for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh \
+          for f in install.sh scripts/rlp scripts/rpi-bin scripts/install.sh scripts/check-first-ask \
                    scripts/selftest.sh scripts/rlp-update scripts/sync-agent-dir \
                    scripts/release scripts/changelog-section; do
             [ -f "$f" ] || { echo "::error::$f is listed here but missing"; exit 1; }
@@ -144,6 +144,13 @@ jobs:
 
       - name: /provider and /setup, driven as a person would
         run: node scripts/check-provider.mjs ./scripts/rlp
+
+      - name: a fresh terminal is asked, and escape is a complete answer
+        # The first-run experience is the product. `check-first-run` judges the
+        # report; this judges the running TUI: start `rlp` on a host with nothing
+        # configured and the guided setup begins by itself, cancelling everything
+        # writes no configuration at all, and RLP_NO_SETUP=1 really is silent.
+        run: sh scripts/check-first-ask ./scripts/rlp
 
       - name: a fresh install reports what is missing, and only that
         # The first-run report is a deliverable: every non-ok line must name a

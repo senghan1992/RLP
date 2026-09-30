@@ -104,6 +104,13 @@ def intent(domain: str, title: str = "", brief: str = "") -> tuple[str, str]:
     return role, purpose
 
 
+def _now() -> str:
+    """ISO-8601 UTC, second resolution. One place, so stamps are comparable."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _load_ladder(*, require_arms: bool = True) -> dict:
     """The installed ladder. Planning without one would mean inventing models.
 
@@ -345,8 +352,13 @@ def plan(
     decompose: bool = True,
     mode: str | None = None,
     because: str = "",
+    force: bool = False,
 ) -> dict:
     """Decide, decompose, route and wave a request. Never raises.
+
+    `force` asks the gate even in direct-only mode — the same claim the brain's
+    `force` parameter makes, and it is reported as such. `mode` overrides the
+    gate either way.
 
     `mode` overrides the gate: "direct" skips the laya pass entirely (the
     cheapest possible way to say "not worth orchestrating"), "orchestrate"
@@ -368,14 +380,43 @@ def plan(
          "gate_table": ["id | title | …", …],
          "recommended": "…one line for the caller to act on…" }}
     """
-    # A ladder with no arms is not an error here: with nothing to dispatch to,
-    # `direct` is the only truthful verdict, and it is also a perfectly good one
-    # — RLP is a working coding agent without orchestration. Returning ok:false
-    # instead would hand the brain an error for a question that has an answer.
     try:
         config = _load_ladder(require_arms=False)
     except ValueError as e:
         return {"ok": False, "error": str(e)[:300]}
+
+    # Direct-only mode is answered here rather than by the gate, and before the
+    # "no arms" check below: a host that chose never to fan out is not a host
+    # with a broken ladder, and `orchestration_unavailable` would tell the user
+    # the opposite of what they asked for. No laya load, no decomposer call.
+    #
+    # An explicit `mode` outranks it. Direct-only mode declines to *decide*; it
+    # does not overrule a human who named the mode and said why, and a caller
+    # that could not force one orchestration in an emergency would have no way
+    # out except editing configuration under pressure.
+    if mode not in ("direct", "orchestrate") and not force:
+        direct = orch.direct_mode(config)
+        if direct["direct"]:
+            return {
+                "ok": True,
+                "result": {
+                    "ladder": config["path"],
+                    "brain": config["brain"],
+                    "mode": "direct",
+                    "direct_only": True,
+                    "direct_source": direct["source"],
+                    "triage": triage_mod.direct_answer(direct["gate"], direct["source"], request, context),
+                    "recommended": (
+                        f"direct-only mode (from {direct['source']}): handle inline — no DAG, no workers, "
+                        "no worktrees. `rlp mode full` (or /direct off in a session) gives the gate back."
+                    ),
+                },
+            }
+
+    # A ladder with no arms is not an error here: with nothing to dispatch to,
+    # `direct` is the only truthful verdict, and it is also a perfectly good one
+    # — RLP is a working coding agent without orchestration. Returning ok:false
+    # instead would hand the brain an error for a question that has an answer.
     if not config.get("configured") or not orch.roster(config):
         why = (
             orch.NOT_CONFIGURED
@@ -395,6 +436,13 @@ def plan(
         }
 
     result: dict[str, Any] = {"ladder": config["path"], "brain": config["brain"]}
+    if force:
+        # Provenance, not a flag: the plan file outlives the turn, and a worker
+        # dispatcher in direct-only mode has to be able to tell "the user asked
+        # for this run" from "somebody forced a plan an hour ago". So the claim is
+        # stamped, and the stamp is what expires.
+        result["force"] = True
+        result["forced_at"] = _now()
     if orch.excluded(config):
         result["excluded_workers"] = orch.excluded(config)
 
@@ -420,7 +468,7 @@ def plan(
             result["recommended"] = "forced direct; no gate, no DAG, no workers, no worktrees"
             return {"ok": True, "result": result}
     else:
-        decision = triage_mod.triage(request, context)
+        decision = triage_mod.triage(request, context, force=force) if force else triage_mod.triage(request, context)
         if "error" in decision:
             return {"ok": False, "error": f"triage failed: {decision['error']}"}
         result["mode"] = decision["mode"]

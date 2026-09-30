@@ -9,8 +9,11 @@ RLP is one binary with two identities, and knowing which one you are in is the
 whole map:
 
 - **`rlp`** — the agent. Same harness, plus the orchestration surface: the laya
-  triage gate, the `rlp_*` tools, the resident decision engine, and the
-  contract that tells the model when *not* to fan out.
+  triage gate, the `rlp_*` tools, the resident decision engine, and the contract
+  that tells the model when *not* to fan out. In **direct-only mode**
+  (`/direct on`, `rlp mode direct`, `rlp --direct`) none of it is consulted: no
+  gate, no workers, no decision model loaded — the harness and the guardrails,
+  without the fan-out.
 - **`rpi`** — the same harness with none of that. A plain coding agent, for when
   you already know the work is one thing and do not want a gate in the way.
 
@@ -21,7 +24,8 @@ differs is that only `rlp` can orchestrate.
 
 | Command | What it does |
 |---|---|
-| `/setup` | the guided first run: doctor → endpoints → brain → worker arms → roles |
+| `/setup` | the guided first run: mode → endpoints → model → worker arms → per-role models (it starts by itself on a host that cannot work yet) |
+| `/direct on\|off\|status` | direct-only mode: every request inline, never orchestrate |
 | `/provider` | endpoints, credential state, a live round trip, the arms that cannot run |
 | `/provider connect\|add\|test\|models\|key\|remove` | guided attach · scriptable attach · one real round trip · discovery · credentials · removal |
 | `/rlp-plan <request>` | the gate → DAG → routing → waves, without dispatching anything |
@@ -62,9 +66,10 @@ Add `--json` to any engine subcommand for a machine-readable envelope.
 
 ## Choosing
 
-- **First run on a new machine** → `rlp`, then `/setup`. Nothing orchestrates
-  until a provider is connected and the ladder has model arms; `/setup` does
-  both and `rlp doctor` says what is still missing.
+- **First run on a new machine** → `rlp`. It asks: the mode, the endpoints and
+  their keys, the model to work on, the arms, the per-role models. `/setup`
+  reruns the same flow by hand, `rlp doctor` says what is still missing in a
+  shell, and `rlp progress` says how far from working this host is.
 - **Deciding whether to orchestrate, without doing it** → `rlp plan` or
   `/rlp-plan`. Costs one forward pass and executes nothing.
 - **Actually doing the work** → just ask `rlp`. The gate decides per request;
