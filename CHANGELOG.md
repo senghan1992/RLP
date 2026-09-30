@@ -10,6 +10,27 @@ offline suite fails if they drift.
 
 ### Added
 
+- **A ladder worker can now name another harness.** The ladder schema grew two
+  honest keys: a worker's `harness` means what the catalog says it means — arms
+  on an external tool follow `<harness>/<native-id>` (`claude/sonnet`), and
+  `<harness>/default` lets the tool pick its own model — and `routing.tmux`
+  (`auto`|`on`|`off`, shipped default `auto`) is validated like every other
+  routing knob. Both are visible in `rlp ladder` and reachable by the same
+  validated mutation path (`set_worker` with `harness`, `set_routing` with
+  `tmux`). A worker whose harness the catalog does not carry still parses —
+  marked `harnessKnown: false` with a warning naming `rlp harness list` —
+  because a plan that cannot run should say so loudly, not be silently
+  rewritten. Every route record `rlp plan` emits now carries its `driver`: the
+  argv template, prompt channel and resolved binary riding along as data, so
+  the extension assembles and executes without knowing any tool by name.
+  Credential judgement for external harnesses moved from `auth.json` to the
+  catalog — a logged-in tool reads *present*, an unproven one reads *unknown*,
+  and unknown never trips preflight, because a guess must not stall a run. The
+  roster cards name each worker's tool and its auth state, so laya's existing
+  "which worker" question is now, unmodified, a cross-harness tool-selection
+  question. Dispatch still runs `pi` workers only; the tmux lens and the
+  external drivers land in the next stage.
+
 - **RLP now knows what other coding tools are on this host.** A new catalog
   (`rlp_svc/harnesses.py`) is the single source for the coding CLIs RLP can run
   workers in — `omp`, `claude`, `jcode`, `muse` beside the bundled `pi` — with

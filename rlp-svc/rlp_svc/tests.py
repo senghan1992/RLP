@@ -467,6 +467,37 @@ def test_ladder_validation() -> None:
     parsed = orch.parse(json.dumps(LADDER), "test")
     check(len(orch.roster(parsed)) == 2, "one roster card per worker")
     check(parsed["routing"]["escalateBelow"] == 0.55, "gate survives parsing")
+
+    # routing.tmux is a validated word (D4): the lens changes, the collection
+    # contract does not, and a typo must not silently mean "plain spawn" on a
+    # host that meant to watch.
+    check(parsed["routing"]["tmux"] == "auto", "routing.tmux defaults to auto")
+    for mode in ("auto", "on", "off"):
+        doc = json.loads(json.dumps(LADDER))
+        doc["routing"]["tmux"] = mode
+        check(orch.parse(json.dumps(doc), "test")["routing"]["tmux"] == mode, f"routing.tmux={mode} parses")
+    doc = json.loads(json.dumps(LADDER))
+    doc["routing"]["tmux"] = "yes"
+    try:
+        orch.parse(json.dumps(doc), "test")
+        check(False, "ladder accepted routing.tmux=yes")
+    except ValueError:
+        check(True, "routing.tmux is validated")
+
+    # An unknown harness is tolerated but never silent (D5): the ladder still
+    # parses — it is the user's ladder — yet the worker is marked and a warning
+    # names the fix, so a dispatcher that refuses it later refuses the very
+    # word this warning did. The fixture's `claude-native` is exactly that kind
+    # of name from before the catalog existed.
+    check(parsed["workers"][1].get("harnessKnown") is False,
+          "claude-native is not in the catalog, so the fixture says so")
+    check("harnessKnown" not in parsed["workers"][0], f"pi is known: no mark: {parsed['workers'][0]}")
+    check(any("claude-native" in w and "harness list" in w for w in parsed["warnings"]),
+          f"an unknown harness warns: {parsed['warnings']}")
+    clean = json.loads(json.dumps(LADDER))
+    clean["workers"][1]["harness"] = "pi"
+    check(orch.parse(json.dumps(clean), "test")["warnings"] == [], "a catalog-clean ladder warns nothing")
+
     for bad, why in [
         ('{"workers": []}', "empty workers"),
         ('{"brain": "no-slash", "workers": [{"id":"a","models":[{"model":"p/m","roles":["code"],"when":"x"}]}]}',
@@ -505,6 +536,9 @@ def test_ladder_validation() -> None:
               f"the shipped ladder names no model arms: brain={shipped['brain']} arms={shipped['arm_count']}")
         check(shipped["routing"]["maxDispatchesPerTurn"] and shipped["routing"]["workerTimeoutMs"],
               "the shipped ladder still carries its dispatch policy")
+        check(shipped["routing"].get("tmux") == "auto",
+              f"and the tmux lens default: {shipped['routing'].get('tmux')}")
+        check(shipped["warnings"] == [], f"the shipped ladder names no unknown harness: {shipped['warnings']}")
 
 
 def test_unconfigured_ladder() -> None:
@@ -1317,6 +1351,8 @@ def test_ladder_mutation() -> None:
                     {"op": "set_worker_available", "worker": "solo", "available": False, "note": "test"},
                     {"op": "set_routing", "key": "gate", "value": "laya"},
                     {"op": "set_review", "crossVendor": False},
+                    {"op": "set_worker", "worker": "solo", "harness": "claude"},
+                    {"op": "set_routing", "key": "tmux", "value": "on"},
                 ]
             )
             check(applied["backup"] and Path(applied["backup"]).is_file(), "a backup is written before the edit")
@@ -1324,6 +1360,8 @@ def test_ladder_mutation() -> None:
             check(ladder["brain"] == "beta/beta-max", "brain edited")
             check(ladder["workers"][0]["models"][0]["model"] == "anthropic/claude-x", "arm reordered to first")
             check(ladder["routing"]["gate"] == "laya", "routing knob edited")
+            check(ladder["routing"]["tmux"] == "on", "tmux edited through the same validated path")
+            check(ladder["workers"][1]["harness"] == "claude", "set_worker retargeted the harness")
             check(ladder["review"]["crossVendor"] is False, "review knob edited")
             check([c["id"] for c in orch.roster(ladder)] == ["pi"], "the disabled worker leaves the roster")
             check(any(a["when"] == "edited" and a["model"] == "alpha/alpha-large"
@@ -1338,6 +1376,13 @@ def test_ladder_mutation() -> None:
             except ValueError:
                 check(True, "an invalid mutation is rejected")
             check(path.read_text() == before, "a rejected mutation leaves the file untouched")
+            try:
+                orch.mutate([{"op": "set_routing", "key": "tmux", "value": "maybe"}])
+                check(False, "an invalid routing.tmux value was accepted")
+            except ValueError:
+                check(True, "set_routing tmux goes through the same parse validator")
+            cleared = orch.mutate([{"op": "set_worker", "worker": "solo", "harness": None}])
+            check("harness" not in cleared["ladder"]["workers"][1], "set_worker null clears the harness")
             dry = orch.mutate([{"op": "set_brain", "model": "beta/x"}], dry_run=True)
             check(dry["dry_run"] is True and dry["backup"] is None, "dry_run reports and writes nothing")
             check(orch.raw_load()["brain"] != "beta/x", "dry_run really did not write")
@@ -1390,6 +1435,19 @@ def test_credential_preflight() -> None:
             check(plan.credential_state("anthropic") == "unknown", "the preflight can be disabled")
             os.environ.pop("RLP_SKIP_CREDENTIAL_PREFLIGHT", None)
 
+            # D3: an external catalog harness is judged by the catalog, never
+            # by auth.json — and never as `missing`, because "RLP cannot see a
+            # credential" is not the same fact as "the tool has none".
+            no_host = Path(tmp) / "no-such-home"
+            check(plan.credential_for("claude", "claude", env={"ANTHROPIC_API_KEY": "set"}, home=no_host) == "present",
+                  "an env-var name the tool reads counts as a credential")
+            check(plan.credential_for("claude", "claude", env={}, home=no_host) == "unknown",
+                  "nothing seen is unknown — a guess must never stall a run")
+            check(plan.credential_for("alpha", "pi") == "present", "pi keeps the auth.json answer")
+            check(plan.credential_for("anthropic", "claude-native") == "missing",
+                  "a harness the catalog does not carry keeps the auth.json verdict too")
+            check(plan.credential_for("anthropic", None) == "missing", "no harness means no catalog")
+
             # A dead default arm is demoted in favour of a usable one.
             mixed = {
                 "brain": "alpha/alpha-large",
@@ -1428,6 +1486,88 @@ def test_credential_preflight() -> None:
                   f"a worker with no live arm is surfaced: {surfaced.get('preflight')}")
         finally:
             os.environ.pop("RLP_PI_AUTH", None)
+
+
+def test_route_external_harness() -> None:
+    """A claude worker on the ladder gets a driver on its route — and no false preflight.
+
+    This is the seam where "which worker" became "which tool": the route record
+    carries the argv template the dispatcher assembles (D1), the arm grammar
+    `<harness>/<native-id>` feeds the tool its own model id while
+    `<harness>/default` names none (D2), and the credential question goes to
+    the catalog rather than auth.json, so no external arm is ever preflighted
+    dead by a file that has no business judging it (D3). pi's routes keep
+    driver None — its dispatch is internal — and keep the auth.json verdict.
+    """
+    from . import orchestration as orch
+    from . import plan
+
+    claude_only = {
+        "brain": "claude/sonnet",
+        "workers": [
+            {
+                "id": "claude-code",
+                "harness": "claude",
+                "models": [
+                    {"model": "claude/sonnet", "roles": ["code", "review"], "when": "large refactors"},
+                    {"model": "claude/default", "roles": ["docs"], "when": "let the tool pick"},
+                ],
+            }
+        ],
+        "routing": {"escalateBelow": 0.55, "maxDispatchesPerTurn": 4},
+        "review": {"crossVendor": False},
+    }
+    parsed = orch.parse(json.dumps(claude_only), "test")
+    check(parsed["warnings"] == [], f"a catalogued harness warns nothing: {parsed['warnings']}")
+    check("harnessKnown" not in parsed["workers"][0], "and marks nothing")
+
+    routes, _, _ = with_ladder(lambda: plan.route_nodes(parsed, [TASKS[0], TASKS[1], TASKS[2]]), ladder=claude_only)
+    r1 = routes["t1"]
+    check(r1["harness"] == "claude", "the harness rides the route")
+    driver = r1.get("driver") or {}
+    check(driver.get("kind") == "external" and driver.get("harness") == "claude",
+          f"the route carries the driver: {r1.get('driver')}")
+    argv = driver.get("argv") or []
+    check("-p" in argv, "claude runs headless")
+    check("--model" in argv and argv[argv.index("--model") + 1] == "sonnet",
+          f"`claude/sonnet` feeds the tool its own model id: {argv}")
+    check(argv.index("--model") < argv.index("{prompt}"), "model flags come before the prompt")
+    check(bool(driver.get("binary")), "the driver names a binary")
+    check(driver.get("promptVia") == "argv", "claude takes the prompt on argv")
+    r2 = routes["t2"]
+    check("--model" not in (r2["driver"] or {}).get("argv", []),
+          f"`claude/default` drops the model flag entirely: {(r2['driver'] or {}).get('argv')}")
+    check(r2["driver"]["promptVia"] == "argv", "same tool, same prompt lane")
+    for node_id, route in routes.items():
+        check(route["credential"] in ("present", "unknown"),
+              f"D3: {node_id} on a catalog harness is never judged `missing` by auth.json: {route['credential']}")
+    check(routes["t1"]["model_family"] == "claude", "the review family is the harness namespace now")
+
+    # pi's path is untouched by any of this.
+    pi_routes, _, _ = with_ladder(lambda: plan.route_nodes(orch.parse(json.dumps(LADDER), "test"), [TASKS[0]]))
+    check(pi_routes["t1"]["driver"] is None, "pi dispatches internally: no driver on the record")
+    check(pi_routes["t1"]["credential"] == plan.credential_state("alpha"),
+          "internal arms keep the auth.json verdict")
+
+    # The envelope hands the dispatcher the lens mode, and preflight stays empty.
+    lensed = json.loads(json.dumps(claude_only))
+    lensed["routing"]["tmux"] = "on"
+    result = with_ladder(lambda: plan.plan("refactor it and document it", mode="orchestrate"), ladder=lensed)["result"]
+    check(result["tmux"] == "on", "the plan hands the tmux mode down")
+    check(not result["preflight"], f"external arms never trip the preflight: {result['preflight']}")
+
+    # The roster card is the decision model's view, so the tool's identity and
+    # its auth word belong there: the "which worker" question, unchanged, is
+    # now a cross-harness tool question.
+    cards = orch.roster(parsed)
+    tool_lines = [s for s in cards[0]["strengths"] if s.startswith("tool claude:")]
+    check(len(tool_lines) == 1 and "Anthropic" in tool_lines[0],
+          f"the card names the tool for the router: {cards[0]['strengths']}")
+    check(any(("(logged in)" in s) or ("(needs login)" in s) for s in cards[0]["strengths"]),
+          "and says whether a login stands in the way")
+    pi_cards = orch.roster(orch.parse(json.dumps(LADDER), "test"))
+    check(all(not any(s.startswith("tool ") for s in c["strengths"]) for c in pi_cards),
+          f"pi's cards stay byte-stable: {[c['strengths'] for c in pi_cards]}")
 
 
 def test_role_bindings() -> None:
@@ -1959,6 +2099,7 @@ def main() -> None:
         test_ladder_mutation,
         test_config_cli,
         test_credential_preflight,
+        test_route_external_harness,
         test_role_bindings,
         test_planning_policy,
         test_planning_mutation,

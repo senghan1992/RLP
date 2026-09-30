@@ -14,7 +14,16 @@
     "modes; 'direct' never orchestrates at all — every request is handled inline, the",
     "decision model is never loaded, and the rest of this file simply stops being",
     "consulted. Switch it with /direct on|off in a session, `rlp mode direct|full`",
-    "from a shell, or `rlp --direct` for one session without touching this file."
+    "from a shell, or `rlp --direct` for one session without touching this file.",
+    "",
+    "A worker may name a `harness` — pi (bundled), omp, claude, jcode or muse; `rlp",
+    "harness list` says what is catalogued and `rlp harness scan` what is on this",
+    "host. Arms on an external harness follow '<harness>/<native-id>' — 'claude/sonnet'",
+    "— and '<harness>/default' lets the tool pick its own model.",
+    "",
+    "routing.tmux is the lens workers run behind: 'auto' puts each one in a tmux window",
+    "(`tmux -L rlp attach -t …`) when this host has tmux, 'on' requires the window,",
+    "'off' spawns plainly. It changes how a run is watched, never how it is collected."
   ],
 
   "brain": null,
@@ -32,7 +41,8 @@
     "maxDispatchesPerTurn": 4,
     "gate": "hybrid",
     "signalThreshold": 1,
-    "workerTimeoutMs": 1200000
+    "workerTimeoutMs": 1200000,
+    "tmux": "auto"
   },
 
   "review": {

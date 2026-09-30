@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from . import decompose as decompose_mod
+from . import harnesses
 from . import orchestration as orch
 from . import route as route_mod
 from . import triage as triage_mod
@@ -84,6 +85,34 @@ def credential_state(provider: str) -> str:
     if isinstance(entry, dict) and (entry.get("key") or entry.get("access")):
         return "present"
     return "present" if provider in auth else "missing"
+
+
+def credential_for(
+    provider: str,
+    harness: str | None,
+    *,
+    env: dict[str, str] | None = None,
+    home: Path | None = None,
+) -> str:
+    """present|missing|unknown — judged by whoever can actually tell.
+
+    auth.json answers for pi, whose providers are the ones `/provider`
+    registers. It must not answer for an external harness: `claude/sonnet` has
+    no business in that file, and the old `credential_state("claude")` verdict
+    called every claude arm `missing` — a preflight that blocks a run a
+    logged-in claude would have carried (design decision D3). The catalog
+    decides those arms instead, folded into the same three words so `pick_arm`
+    and the preflight list stay untouched: a marker file or an env-var name
+    seen by the tool means `present`, nothing seen means `unknown` — permissive
+    on purpose, because SSO and configs the catalog cannot model exist, and the
+    worker's own log is a better witness than a guess. A harness the catalog
+    does not carry, and pi itself, keep the auth.json answer unchanged.
+    """
+    spec = harnesses.HARNESSES.get(harness or "")
+    if spec is not None and spec["dispatch"] == "template":
+        state = harnesses.auth_state(harness, env, home)["state"]
+        return "present" if state == "authenticated" else "unknown"
+    return credential_state(provider)
 
 
 def intent(domain: str, title: str = "", brief: str = "") -> tuple[str, str]:
@@ -235,6 +264,13 @@ def route_nodes(config: dict, tasks: list[dict]) -> tuple[dict[str, dict], list[
             decision["agent_corrected_from"] = decision.get("agent")
         worker = workers[agent]
         avoid = _implemented_families(task, by_id, routes) if (cross_vendor and role == "review") else None
+        # The routed worker's harness judges every arm on it: an external
+        # harness's arms are the catalog's question, pi's and unknown ones
+        # stay auth.json's (D3). Both `pick_arm` call sites below use this.
+        routed_harness = worker.get("harness")
+
+        def credential(provider: str) -> str:
+            return credential_for(provider, routed_harness)
 
         chain = orch.role_chain(config, role)
         chosen_binding: str | None = None
@@ -253,19 +289,34 @@ def route_nodes(config: dict, tasks: list[dict]) -> tuple[dict[str, dict], list[
                     break
             if carrier is None:
                 binding_unavailable = list(chain)
-                arm, rationale = pick_arm(worker, role, avoid, credential=credential_state)
+                arm, rationale = pick_arm(worker, role, avoid, credential=credential)
                 rationale += f" (role binding {role!r} -> {', '.join(chain)} has no dispatchable worker)"
         else:
-            arm, rationale = pick_arm(worker, role, avoid, credential=credential_state)
+            arm, rationale = pick_arm(worker, role, avoid, credential=credential)
 
+        # Judged on the worker that will actually carry the arm — the binding
+        # path can have moved it to another worker, and harnesses travel with
+        # workers, not with agents.
+        worker_harness = worker.get("harness")
         record = {
             "agent": agent,
             "arm": arm["model"],
             "role": role,
             "purpose": purpose,
-            "harness": worker.get("harness"),
+            "harness": worker_harness,
             "model_family": family(arm["model"]),
-            "credential": credential_state(family(arm["model"])),
+            "credential": credential_for(family(arm["model"]), worker_harness),
+            # The argv template for an external harness, riding the route as
+            # data (D1): the dispatcher assembles and spawns, it does not know
+            # any tool by heart. None for pi — its dispatch is internal — and
+            # for harnesses the catalog does not carry, which the dispatcher
+            # then fails loudly with this same name rather than guessing a
+            # command line (D5). The binary lookup is PATH-only: no spawn here.
+            "driver": harnesses.driver_for(
+                worker_harness or "",
+                harnesses.native_model(arm["model"], worker_harness or ""),
+                harnesses.resolve_binary(worker_harness or ""),
+            ),
             "confidence": decision.get("confidence"),
             "engine": decision.get("engine"),
             "escalate": decision.get("escalate", False),
@@ -519,6 +570,9 @@ def plan(
             "role_bindings": config.get("roles") or {},
             "max_dispatches_per_turn": config["routing"].get("maxDispatchesPerTurn"),
             "worker_timeout_ms": config["routing"].get("workerTimeoutMs"),
+            # The lens the dispatcher should run workers behind (D4) — mode,
+            # not protocol: collection reads the same files either way.
+            "tmux": config["routing"].get("tmux", "auto"),
             "gate_config": {
                 "gate": config["routing"].get("gate"),
                 "escalate_below": config["routing"].get("escalateBelow"),

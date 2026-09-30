@@ -316,6 +316,28 @@ const RLP_HOME = process.env.RLP_HOME || join(homedir(), ".rlp");
 
 export type NodeStatus = "pending" | "running" | "done" | "failed" | "cancelled" | "replanned";
 
+/**
+ * An external harness's command, sent along the route record as data (design
+ * decision D1): the catalog in `rlp_svc/harnesses.py` assembles the argv
+ * *template*, and `{prompt}` / `{prompt_file}` stay placeholders for whatever
+ * dispatches. This side never learns a tool's command line by heart — adding
+ * a harness is one entry in that catalog, not an edit here. pi nodes carry no
+ * driver: pi's dispatch is internal and predates this.
+ */
+export interface DriverRecord {
+	kind: string;
+	harness: string;
+	binary: string;
+	argv: string[];
+	/** "file" (the prompt rides a 0600 file) or "argv" (positional message). */
+	promptVia: string;
+	tmux: boolean;
+	interactive: boolean;
+	/** Env-var NAMES the tool may read — values are never carried on a route. */
+	envNames: string[];
+	vendor: string;
+}
+
 export interface NodeRecord {
 	id: string;
 	title: string;
@@ -330,6 +352,18 @@ export interface NodeRecord {
 	harness?: string;
 	/** Present|missing|unknown for the arm's provider, from the planner's preflight. */
 	credential?: string;
+	/**
+	 * The external harness's argv template, riding the route record as data
+	 * (D1). Absent for pi and for harnesses the catalog does not carry — the
+	 * dispatcher fails those nodes with the catalog's own hint, never with a
+	 * silent fallback. Optional so ledgers written before it load unchanged.
+	 */
+	driver?: DriverRecord;
+	/** tmux lens state (D4): session on the `-L rlp` socket, the exit-code file,
+	 *  and the 0600 prompt file, when the node runs behind the lens. */
+	tmuxSession?: string;
+	exitFile?: string;
+	promptFile?: string;
 	dependsOn: string[];
 	worktree?: string;
 	branch?: string;
@@ -360,6 +394,8 @@ export interface RunLedger {
 	maxDispatchesPerTurn: number;
 	/** Watchdog: a worker older than this is killed and marked failed. */
 	workerTimeoutMs?: number;
+	/** Ladder `routing.tmux` at plan time: "auto" | "on" | "off" (D4). */
+	tmux?: string;
 	/** Planner policy: pass dependency results as file paths + digest, not inline text. */
 	artifactPassing?: boolean;
 	/** How deep a failed node may be recursively re-planned. */
@@ -443,6 +479,7 @@ function renderLedger(run: RunLedger): string {
 		lines.push(`${node.id}  ${node.status.toUpperCase().padEnd(9)} ${node.title}`);
 		lines.push(`      arm      ${node.arm}  (${node.purpose}, ${node.modelFamily || "n/a"})`);
 		lines.push(`      harness  ${node.harness ?? "pi"}  credential=${node.credential ?? "unknown"}`);
+		if (node.driver) lines.push(`      driver   ${node.driver.binary} ${node.driver.argv.join(" ")}`);
 		lines.push(`      deps     ${node.dependsOn.join(", ") || "-"}`);
 		if (node.worktree) lines.push(`      worktree ${node.worktree}`);
 		if (node.branch) lines.push(`      branch   ${node.branch}`);
@@ -1095,6 +1132,9 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 						purpose: purposeOf(route.purpose),
 						harness: route.harness ? String(route.harness) : "pi",
 						credential: route.credential ? String(route.credential) : "unknown",
+						// The external harness's command template, taken from the
+						// route as delivered. pi routes carry none: null or absent.
+						driver: route.driver ? (route.driver as DriverRecord) : undefined,
 						dependsOn: (task.depends_on ?? []) as string[],
 						status: "pending",
 					};
@@ -1109,6 +1149,7 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 					dispatchBudgetUsed: 0,
 					maxDispatchesPerTurn: cap,
 					workerTimeoutMs: (planned.worker_timeout_ms as number) ?? DEFAULT_WORKER_TIMEOUT_MS,
+					tmux: planned.tmux ? String(planned.tmux) : "auto",
 					artifactPassing:
 						(planned.planning as { artifactPassing?: boolean } | undefined)?.artifactPassing !== false,
 					recursiveDepth:
@@ -1452,6 +1493,7 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 						purpose: purposeOf(route.purpose),
 						harness: route.harness ? String(route.harness) : node.harness,
 						credential: route.credential ? String(route.credential) : "unknown",
+						driver: route.driver ? (route.driver as DriverRecord) : node.driver,
 						dependsOn: deps,
 						status: "pending",
 					};

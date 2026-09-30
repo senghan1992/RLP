@@ -176,6 +176,7 @@ def _cmd_ladder(args: argparse.Namespace) -> int:
         f"value={c['routing'].get('gate')} signalThreshold={c['routing'].get('signalThreshold')} "
         f"maxDispatchesPerTurn={c['routing'].get('maxDispatchesPerTurn')} "
         f"workerTimeoutMs={c['routing'].get('workerTimeoutMs')} "
+        f"tmux={c['routing'].get('tmux')} "
         f"crossVendor={c['review'].get('crossVendor')}",
         f"plan:   critique={(c.get('planning') or {}).get('critique')} "
         f"maxRefines={(c.get('planning') or {}).get('maxRefines')} "

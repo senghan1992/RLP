@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import harnesses, paths
 
 
 #: What to say when the ladder cannot dispatch. One sentence, one fix, and the
@@ -51,6 +51,15 @@ NOT_CONFIGURED = (
 #:           laya is never loaded. The ladder keeps carrying the rest of the
 #:           policy, so switching back is one edit rather than a re-setup.
 GATES = ("laya", "hybrid", "direct")
+
+#: Where workers run visibly (design decision D4): tmux is a *lens*, not a
+#: protocol — the collection contract (report.json + the final ACCEPTANCE line)
+#: is identical in every mode.
+#:
+#:   auto  run each worker in a `tmux -L rlp` window when tmux is installed, plainly when not
+#:   on    require the lens — a host without tmux is a named failure, not a silent plain spawn
+#:   off   plain spawn, exactly the way every run has always been collected
+TMUX_MODES = ("auto", "on", "off")
 
 #: Session-only override: `rlp --direct` (and RLP_DIRECT=1 anywhere else) says
 #: "this run does not orchestrate" without rewriting the ladder, which holds
@@ -159,6 +168,7 @@ def parse(raw: str, source: str) -> dict:
     _require(isinstance(workers_raw, list) and workers_raw, f"{source}: 'workers' must be a non-empty array")
     workers = []
     seen: set[str] = set()
+    warnings: list[str] = []
     for i, raw_worker in enumerate(workers_raw):
         where = f"workers[{i}]"
         _require(isinstance(raw_worker, dict), f"{source}: {where} must be an object")
@@ -200,6 +210,18 @@ def parse(raw: str, source: str) -> dict:
         entry: dict = {"id": wid, "models": models, "available": available}
         if harness is not None:
             entry["harness"] = harness
+            # Tolerant, but never silent: a harness name from a hand-written
+            # ladder, a typo, or a tool this catalog does not carry yet still
+            # parses — the plan is the user's — but it is marked here so the
+            # dispatcher's later "cannot run this" names the same word the
+            # warning does (design decision D5: degrade with an explanation).
+            if harness not in harnesses.HARNESSES:
+                entry["harnessKnown"] = False
+                warnings.append(
+                    f"worker {wid!r} names harness {harness!r}, which is not in the catalog — "
+                    "`rlp harness list` shows what this tool can run workers in, "
+                    "and `rlp config` can rename the harness"
+                )
         if note:
             entry["availabilityNote"] = note
         workers.append(entry)
@@ -231,6 +253,11 @@ def parse(raw: str, source: str) -> dict:
     if worker_timeout_ms is not None:
         _require(isinstance(worker_timeout_ms, int) and not isinstance(worker_timeout_ms, bool) and worker_timeout_ms >= 1000,
                  f"{source}: routing.workerTimeoutMs must be an integer >= 1000 (ms)")
+    # Where workers run visibly (D4): validated like every other routing knob,
+    # because a typo here would silently mean "plain spawn" on a host that
+    # meant to watch. Omitted means auto: the lens when the host has one.
+    tmux = routing_raw.get("tmux", "auto")
+    _require(tmux in TMUX_MODES, f"{source}: routing.tmux must be one of {', '.join(TMUX_MODES)}")
 
     review_raw = parsed.get("review") or {}
     _require(isinstance(review_raw, dict), f"{source}: 'review' must be an object")
@@ -333,6 +360,10 @@ def parse(raw: str, source: str) -> dict:
         # derived field, so it is never a second source of truth: `gate` stays
         # the thing that is written, and this is the thing a caller branches on.
         "mode": "direct" if gate == "direct" else "full",
+        # Tolerated-but-unverifiable facts, for callers to render. Nothing in
+        # here raises; a warning is a thing the operator should *see*, not a
+        # gate on the ladder being usable.
+        "warnings": warnings,
         "workers": workers,
         "roles": roles,
         "routing": {
@@ -341,6 +372,7 @@ def parse(raw: str, source: str) -> dict:
             "gate": gate,
             "signalThreshold": signal_threshold,
             "workerTimeoutMs": worker_timeout_ms,
+            "tmux": tmux,
         },
         "review": {"crossVendor": cross_vendor},
         "rlm": rlm,
@@ -568,10 +600,24 @@ def _apply_op(raw: dict, op: dict) -> None:
             worker["available"] = False
         if op.get("note") is not None:
             worker["availabilityNote"] = op["note"]
+    elif name == "set_worker":
+        # The setup wizard needs to retarget an existing worker onto a catalog
+        # harness without removing and re-adding it (which would drop its
+        # arms): `harness` as a string sets it, null clears it back to the
+        # default pi path.
+        worker = _worker_raw(raw, op.get("worker"))
+        _require("harness" in op, "set_worker needs a `harness` (a string, or null to clear)")
+        harness = op["harness"]
+        if harness is None:
+            worker.pop("harness", None)
+        else:
+            _require(isinstance(harness, str) and harness.strip() != "",
+                     "set_worker `harness` must be a non-empty string, or null to clear")
+            worker["harness"] = harness
     elif name == "set_routing":
         routing = raw.setdefault("routing", {})
         key = op.get("key")
-        _require(key in ("escalateBelow", "maxDispatchesPerTurn", "gate", "signalThreshold", "workerTimeoutMs"),
+        _require(key in ("escalateBelow", "maxDispatchesPerTurn", "gate", "signalThreshold", "workerTimeoutMs", "tmux"),
                  f"unknown routing key {key!r}")
         if op.get("value") is None:
             routing.pop(key, None)
@@ -671,6 +717,15 @@ def roster(config: dict, *, include_unavailable: bool = False) -> list[dict]:
     unconfigured ladder must produce an empty roster rather than a card with
     nothing behind it, so the caller reports "no arms" instead of routing to
     one that does not exist.
+
+    A worker on an *external catalog harness* carries one more strength: what
+    that tool is and whether this host can log into it. That is the whole
+    cross-harness tool selection — laya's existing "which worker should handle
+    this task?" question is asked over cards that now name their tools, so the
+    decision needs no new question and no new prompt. pi's cards are untouched
+    (its dispatch is internal, and its credentials are the ladder's own
+    business); an auth word is context for the router, never a gate —
+    Stage 5's availability path does the gating.
     """
     cards = []
     for worker in workers(config, only_available=not include_unavailable):
@@ -683,6 +738,14 @@ def roster(config: dict, *, include_unavailable: bool = False) -> list[dict]:
                     roles.append(role)
         arm_notes = [f"{e['model']} when {e['when']}" for e in worker["models"]]
         strengths = (roles + arm_notes)[:5]
+        spec = harnesses.HARNESSES.get(worker.get("harness") or "")
+        if spec is not None and spec["dispatch"] == "template":
+            # One extra line, one tool: what the thing is and whether a login
+            # is standing in its way. The word is the catalog's file/env
+            # judgement (`harnesses.auth_state`), not a gate.
+            state = harnesses.auth_state(worker["harness"])["state"]
+            word = "logged in" if state == "authenticated" else "needs login"
+            strengths = strengths + [f"tool {worker['harness']}: {spec['one_liner']} ({word})"]
         arms = ", ".join(e["model"] for e in worker["models"])
         harness = f" on the {worker['harness']} harness" if worker.get("harness") else ""
         description = (
