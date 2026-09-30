@@ -481,6 +481,7 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | `RLP_NO_SETUP=1` | do not run the guided setup on first launch (sessions with no keyboard at the other end) |
 | `RPI_DEFAULT_MODEL` | the `rpi` session default (`provider/model`) |
 | `RLP_DECOMPOSE_MODEL` · `RLP_CRITIQUE_MODEL` · `RLP_VERIFY_MODEL` · `RLP_ROUTE_MODEL` | override the planner / critic / verifier / router model (`provider/model`); each otherwise comes from the ladder |
+| `RLP_RLM_DECOMPOSE=1` | the decomposition spike: the RLM loop submits its DAG as an `emit_dag(answer, tasks)` tool call instead of prose JSON (reported as `engine: rlm+emit_dag`); off by default |
 | `RLP_SKIP_CREDENTIAL_PREFLIGHT=1` | skip the per-arm credential check |
 | `RLP_NO_MIGRATE=1` | do not copy credentials out of pi's `~/.pi` on install |
 | `RLP_HOME` | where run ledgers and project memory live (`~/.rlp`) |

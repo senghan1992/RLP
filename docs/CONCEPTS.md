@@ -170,9 +170,16 @@ now walks its candidates in order and records which one answered (`planner`,
   framings disagree, so the RLM loop sometimes spends its iterations exploring
   and then reports "no usable tasks" (or, at three iterations, invents a DAG
   about the wrong question) and the contingency produces the DAG that is used.
-  The reported `engine` and `planner_fallback` fields say which happened; fixing
-  the framing — RLM as the engine, the request as a prompt it can act on — is an
-  open question, not a completed one.
+  The reported `engine` and `planner_fallback` fields say which happened.
+  Fixing the framing is now *under experiment*, not just open:
+  `RLP_RLM_DECOMPOSE=1` swaps the answer channel — instead of asking for prose
+  JSON, the decomposer submits by calling `emit_dag(answer, tasks=[...])`
+  inside the REPL, and because that call writes into the very dict the loop
+  watches, submitting is exiting. A rejected submission returns guidance and
+  leaves the run going, so a malformed DAG self-corrects instead of burning the
+  iterations out. Those runs report `engine: "rlm+emit_dag"`; whether that
+  label deserves to be the default is measured on the host gateway — `rlm`
+  against `rlm+emit_dag`, counting the fallbacks — not decided by preference.
 - **Planner-side models are ladder roles.** `plan`, `critique` and `verify` name
   the models the planner itself calls; they resolve like worker roles
   (`RLP_DECOMPOSE_MODEL`/`RLP_CRITIQUE_MODEL`/`RLP_VERIFY_MODEL` override the

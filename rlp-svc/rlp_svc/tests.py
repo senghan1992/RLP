@@ -1154,6 +1154,138 @@ def test_decompose_budget() -> None:
         ) = original
 
 
+def test_decompose_emit_dag() -> None:
+    """Stage-8 spike: the decomposer's answer gets an action to exit through.
+
+    The recorded failure is a framing disagreement: `DECOMPOSE_PROMPT` says
+    "JSON now" while RLM's system prompt says "explore, then set the answer" —
+    so the loop explores, prose comes back, and the plain-LLM contingency ends
+    up authoring most DAGs. The spike (opt-in: `RLP_RLM_DECOMPOSE=1`) makes the
+    submission a tool call instead. This test judges the *mechanism*, not the
+    model — no gateway, no network, no spawn: the flag selects the framing;
+    a shaped submission flips `ready` and the wrong one only returns guidance
+    (a rejection must not end the run); the engine label tells the two apart
+    in the ledger; and the submission is proven through the library's own
+    environment, because the stop signal belongs to *its* `answer` dict — a
+    copy of it would flip and the loop would never notice.
+    """
+    from rlm.environments.local_repl import LocalREPL
+
+    from . import decompose as mod
+    from . import orchestration
+
+    # The switch: only "1" means on, and the reading is at call time.
+    check(not mod._emit_dag_enabled({}), "the spike is opt-in: no env, no emit_dag")
+    check(mod._emit_dag_enabled({"RLP_RLM_DECOMPOSE": "1"}), "RLP_RLM_DECOMPOSE=1 chooses the framing")
+    check(not mod._emit_dag_enabled({"RLP_RLM_DECOMPOSE": "0"}), "=0 keeps the documented framing")
+    check(not mod._emit_dag_enabled({"RLP_RLM_DECOMPOSE": "yes"}), "anything but 1 is off, not a typo-trip")
+
+    # The two framings share every rule and differ only in the exit. The
+    # documented one must not have drifted: this is the prompt the default path
+    # formats, and byte-stability across the split is what makes flag-off a
+    # no-change guarantee rather than a new prompt with old branding.
+    check("emit_dag" not in mod.DECOMPOSE_PROMPT, "the documented framing never mentions the tool")
+    check("emit_dag" in mod.DECOMPOSE_PROMPT_EMIT, "the spike framing names the one way to answer")
+    check(
+        mod._DECOMPOSE_RULES in mod.DECOMPOSE_PROMPT and mod._DECOMPOSE_RULES in mod.DECOMPOSE_PROMPT_EMIT,
+        "both framings carry the identical rules",
+    )
+    for name in ("DECOMPOSE_PROMPT", "DECOMPOSE_PROMPT_EMIT"):
+        formatted = getattr(mod, name).format(request="REQ", context="CTX")
+        check("REQ" in formatted and "CTX" in formatted, f"{name} formats request/context")
+    # The library does `system_prompt.format(custom_tools_section=…)` on the
+    # prompt we hand it; a stray brace in the emit variant would raise on every
+    # emit run at RLM construction, far from any test of the tool itself.
+    injected = mod.RLM_EMIT_DAG_SYSTEM_PROMPT.format(custom_tools_section="- emit_dag: submit the DAG")
+    check("- emit_dag: submit the DAG" in injected, "the tool section lands in the emit system prompt")
+
+    # The contract of the tool itself: shape submits, everything else guides.
+    ok_task = {"id": "t1", "title": "x", "brief": "b", "acceptance": "a",
+               "depends_on": [], "domain": "code", "size": "S"}
+    answer: dict = {"content": "", "ready": False}
+    out = mod._emit_dag_tool(answer, [ok_task])
+    check(out.startswith("submitted 1"), f"a shaped submission is confirmed: {out!r}")
+    check(answer["ready"] is True and json.loads(answer["content"])["tasks"][0]["id"] == "t1",
+          "the submission lands in the answer dict as the DAG payload")
+
+    rejected: dict = {"content": "", "ready": False}
+    out = mod._emit_dag_tool(rejected, [{"id": "t2"}])
+    check("missing" in out and rejected["ready"] is False,
+          f"an incomplete task is guidance, not a stop: {out!r}")
+    out = mod._emit_dag_tool(rejected, "t1: do the thing")
+    check("list" in out and rejected["ready"] is False, "a prose 'DAG' is rejected the same way")
+    out = mod._emit_dag_tool("not the answer dict", [ok_task])
+    check("answer" in out, "calling it without the dict tells the model how")
+
+    # The walk: the flag selects the runner and the engine says which framing
+    # built the DAG — that label is the spike's measurement instrument.
+    original = (mod._rlm_decompose, mod._rlm_decompose_emit, mod._policy, mod._critique_spec, orchestration.load)
+    try:
+        mod._critique_spec = lambda: ("p", "m")
+        orchestration.load = lambda: orchestration.parse(json.dumps(LADDER), "test")
+        mod._policy = lambda: (
+            {**mod._DEFAULT_RLM, "maxTimeout": 90.0},
+            {**mod._DEFAULT_PLANNING, "critique": False, "maxRefines": 0},
+        )
+        seen: list[str] = []
+
+        def records(which: str, wants: str):
+            def run(prompt, knobs, spec=None):
+                seen.append(which)
+                check(wants in prompt, f"the {which} runner got its own framing")
+                return json.dumps({"tasks": TASKS})
+
+            return run
+
+        mod._rlm_decompose = records("plain", "Respond ONLY with JSON")
+        mod._rlm_decompose_emit = records("emit", "emit_dag")
+        with _environ({"RLP_RLM_DECOMPOSE": "1"}):
+            env = mod.decompose("add subtract plus tests")
+        check(seen == ["emit"], f"the flag routes to the emit runner: {seen}")
+        check(env["ok"] and env["result"]["engine"] == "rlm+emit_dag",
+              f"the envelope names the framing: {env.get('result', {}).get('engine')}")
+        # Compared as sets on purpose: the DAG is topo-sorted before it returns,
+        # and two sibling roots can come back in either order.
+        check({t["id"] for t in env["result"]["tasks"]} == {t["id"] for t in TASKS},
+              "the DAG survives the tool channel intact")
+
+        seen.clear()
+        with _environ({"RLP_RLM_DECOMPOSE": None}):
+            env = mod.decompose("add subtract plus tests")
+        check(seen == ["plain"], f"flag off runs the documented framing: {seen}")
+        check(env["ok"] and env["result"]["engine"] == "rlm", "and labels it honestly")
+    finally:
+        (mod._rlm_decompose, mod._rlm_decompose_emit, mod._policy, mod._critique_spec, orchestration.load) = original
+
+    # Round trip through the library's own environment: the only proof that
+    # `emit_dag` flips the dict the environment is watching, so `ready` ENDS the
+    # run instead of merely filling a field nobody reads. No model needed — this
+    # is exactly the line the model would write. (LocalREPL execs in-process;
+    # this spawns nothing.)
+    repl = LocalREPL(custom_tools={
+        "emit_dag": {"tool": mod._emit_dag_tool, "description": mod._EMIT_DAG_DESCRIPTION},
+    })
+    res = repl.execute_code(
+        "emit_dag(answer, tasks=[{'id': 't1', 'title': 'x', 'brief': 'b',"
+        " 'acceptance': 'a', 'depends_on': [], 'domain': 'code', 'size': 'S'}])"
+    )
+    check(res.final_answer is not None, "a submission through the real REPL captures a final answer")
+    check(res.final_answer is not None and json.loads(res.final_answer)["tasks"][0]["id"] == "t1",
+          f"and it is the DAG: {str(res.final_answer)[:80]!r}")
+    check(repl.locals["answer"]["ready"] is True, "the environment's own answer dict flipped ready")
+
+    # A rejected call in the same environment: guidance comes back, `ready` was
+    # already set by the submission above, but the rejection must not overwrite
+    # the captured content. Fresh environment for the clean case: nothing flips.
+    fresh = LocalREPL(custom_tools={
+        "emit_dag": {"tool": mod._emit_dag_tool, "description": mod._EMIT_DAG_DESCRIPTION},
+    })
+    res = fresh.execute_code("r = emit_dag(answer, tasks=[{'oops': 1}])")
+    check(res.final_answer is None, "a rejected submission does not end the run")
+    check(res.stderr == "" and "missing" in str(res.locals.get("r", "")),
+          f"and the guidance is visible to the model as the return value: {res.locals.get('r')!r}")
+
+
 def test_paths() -> None:
     """One rule for where RLP keeps its files, and it is not pi's directory.
 
@@ -2360,6 +2492,7 @@ def main() -> None:
         test_onboarding_names_external_tools,
         test_planner_fallbacks,
         test_decompose_budget,
+        test_decompose_emit_dag,
         test_paths,
         test_doctor,
         tests_providers.test_providers_store,

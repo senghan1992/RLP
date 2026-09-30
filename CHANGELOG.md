@@ -10,6 +10,19 @@ offline suite fails if they drift.
 
 ### Added
 
+- **The decomposer can now be given an action to exit through.** RLM frames its
+  input as a context to explore and asks for the answer at the end, while the
+  decomposition prompt asked for JSON *now* — and the recorded consequence was
+  the plain-LLM contingency quietly authoring most DAGs. Behind
+  `RLP_RLM_DECOMPOSE=1` the framing splits: the model submits by calling
+  `emit_dag(answer, tasks=[...])` inside the REPL, and because the call writes
+  into the dict the library's own loop watches, submitting *is* exiting. A
+  malformed submission returns guidance and leaves the run going — self-
+  correction instead of timeout — and DAGs built this way report
+  `engine: "rlm+emit_dag"`, which is how the spike gets judged: against `rlm`
+  on the host gateway, by measurement rather than preference. With the flag
+  off, the documented prompt is byte-identical to the one it was before.
+
 - **`/setup` now looks before it asks.** The guided first run had grown a
   question for every external tool — *what is its name, what is its model* —
   on a host where RLP can simply see. Detection comes first: between the mode

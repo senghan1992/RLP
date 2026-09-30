@@ -9,7 +9,9 @@ Three modern-planning ideas are layered on top of the raw RLM call:
 1. **Configured recursion.** RLM's `max_depth` / `max_iterations` / budget are
    read from the ladder's `rlm` block instead of left at the library defaults,
    and a `custom_system_prompt` pins the model to emitting one JSON DAG rather
-   than chatting through the REPL.
+   than chatting through the REPL. That pinning is itself under experiment:
+   `RLP_RLM_DECOMPOSE=1` swaps in the `emit_dag` framing, where the submission
+   is a tool call rather than a prose format — see `DECOMPOSE_PROMPT_EMIT`.
 2. **A candidate ladder, not one arm.** The configured planner goes first, the
    ladder's DEFAULT arm is the safety net, and every remaining arm follows; the
    same candidates are reused by the plain-LLM contingency. A single arm that
@@ -34,7 +36,10 @@ from typing import Any
 
 from .llm import DAG_TOKENS, chat, chat_first, decomp_spec
 
-DECOMPOSE_PROMPT = """You are a task decomposer for a multi-agent orchestrator. Given the REQUEST below,
+#: The decomposition rules are one string; the *answer channel* differs per
+#: framing. Keep the rules shared — two copies drift, and the rules are the
+#: part that is not in dispute.
+_DECOMPOSE_RULES = """You are a task decomposer for a multi-agent orchestrator. Given the REQUEST below,
 decompose it (recursively if needed) into a flat DAG of 2-12 subtasks, each of which
 a single agent can complete INDEPENDENTLY given only its brief and acceptance text.
 Rules:
@@ -49,7 +54,25 @@ Rules:
   give one a dependency on the other instead.
 - If the request needs verification of the whole result, add a final `integration`
   task depending on the leaves.
-Respond ONLY with JSON: {{"tasks": [...]}} matching exactly the schema above.
+"""
+
+DECOMPOSE_PROMPT = _DECOMPOSE_RULES + """Respond ONLY with JSON: {{"tasks": [...]}} matching exactly the schema above.
+REQUEST:
+{request}
+CONTEXT (may be empty):
+{context}"""
+
+#: Stage-8 spike (`RLP_RLM_DECOMPOSE=1`). The failure this framing fixes is on
+#: the record in CONCEPTS.md: RLM's loop explores a context in a REPL and answers
+#: at the end, while `DECOMPOSE_PROMPT` asks for the JSON *now* — so the model
+#: sometimes spends its budget exploring, submits prose or nothing, and the
+#: plain-LLM contingency makes the DAG that gets used. `emit_dag` removes the
+#: disagreement instead of arguing with it: the submission is a tool call, so
+#: "answer" and "stop" become the same event, and a malformed submission comes
+#: back as guidance for the next turn rather than a timed-out rollout.
+DECOMPOSE_PROMPT_EMIT = _DECOMPOSE_RULES + """Do not answer in prose. Submit by calling emit_dag(answer, tasks) inside a repl block,
+where tasks is the list of subtask dicts in the schema above. That call is the only
+answer this run can give, and it ends the run.
 REQUEST:
 {request}
 CONTEXT (may be empty):
@@ -68,6 +91,73 @@ RLM_SYSTEM_PROMPT = (
     "only if the input is too large to read directly; otherwise do not write code. Finish with the "
     "JSON and nothing else."
 )
+
+#: The system prompt for the emit_dag framing. The library formats this string
+#: (`system_prompt.format(custom_tools_section=…)`), so the placeholder below is
+#: the *only* legal brace pair; the tool's own description is injected there.
+#: Where RLM_SYSTEM_PROMPT asks for immediate JSON — the framing that loses to
+#: the loop's explore-then-answer nature — this one takes a side: there is one
+#: channel, it is a call, and prose is declared void rather than discouraged.
+RLM_EMIT_DAG_SYSTEM_PROMPT = (
+    "You are the planning module of RLP, a coding orchestrator, running in an RLM REPL loop. "
+    "There is exactly one way to answer: call emit_dag(answer, tasks) inside a repl block. "
+    "Printing the DAG as prose does not count, and neither does setting answer by hand — only "
+    "emit_dag's verdict ends the run, and ends it successfully. Shape and check the task list in "
+    "the REPL if that helps you, then submit once. If emit_dag returns guidance instead of "
+    "submitted, fix what it names and call it again. Each turn on this gateway costs about 45 "
+    "seconds: explore the request, not the environment.\n{custom_tools_section}"
+)
+
+_EMIT_DAG_DESCRIPTION = (
+    "emit_dag(answer, tasks) — submit the DAG and end the run. First argument: the REPL's "
+    "answer dict, passed as-is (only emit_dag can reach it). Second: tasks, a list of dicts "
+    "with id (t1, t2, in order), title, brief, acceptance, depends_on (list of ids), domain "
+    "(code, research, review, docs or integration) and size (S, M or L). Returns 'submitted "
+    "N tasks' once the run has ended, or one line naming what to fix — guidance, not failure."
+)
+
+
+def _emit_dag_enabled(env: dict[str, str] | None = None) -> bool:
+    """`RLP_RLM_DECOMPOSE=1`: run decomposition through the emit_dag framing.
+
+    A spike switch, off by default. Which framing is better on the host gateway
+    is the question the flag exists to answer, and answering it changes the
+    observable `engine` field — so promotion is a measurement, not a preference.
+    """
+    e = os.environ if env is None else env
+    return e.get("RLP_RLM_DECOMPOSE", "").strip() == "1"
+
+
+def _emit_dag_tool(answer: Any, tasks: Any) -> str:
+    """The model's submission channel — see DECOMPOSE_PROMPT_EMIT.
+
+    The model passes the REPL's own `answer` dict in, because an injected
+    function cannot reach the sandbox namespace it is called from; mutating that
+    dict is what the environment captures as the final answer (its
+    `ready` flip is the library's stop signal, delivered through the env's own
+    dict subclass). Validation stops at *shape*: `_validated` owns the real DAG
+    contract downstream, and a wrong-but-parseable DAG is its finding to report,
+    not this call's to relitigate. A rejected submission leaves `ready` false
+    and returns a sentence — the loop corrects itself instead of timing out.
+    """
+    if not isinstance(answer, dict):
+        return "emit_dag takes the REPL's answer dict first: emit_dag(answer, tasks=[...])"
+    if not isinstance(tasks, list) or not tasks:
+        return "tasks must be a non-empty list of subtask dicts"
+    required = {"title", "brief", "acceptance", "domain", "size"}
+    for index, task in enumerate(tasks, start=1):
+        if not isinstance(task, dict):
+            return f"task {index} is a {type(task).__name__}, not a dict"
+        missing = sorted(required - set(task))
+        if missing:
+            return f"task {index} is missing {', '.join(missing)}"
+    try:
+        payload = json.dumps({"tasks": tasks}, ensure_ascii=False)
+    except (TypeError, ValueError) as e:
+        return f"tasks are not JSON-serializable: {str(e)[:120]}"
+    answer["content"] = payload
+    answer["ready"] = True
+    return f"submitted {len(tasks)} tasks — the run ends with this answer now"
 
 CRITIC_PROMPT = """Return raw JSON only — your reply's first character must be {{. No prose, no markdown, no code fences.
 You are a planning critic for a multi-agent orchestrator. Judge this DAG against the REQUEST.
@@ -391,6 +481,33 @@ def _rlm_decompose(prompt: str, knobs: dict, spec: tuple[str, str] | None = None
 
     `spec` is the arm to run it on; omitting it means the configured planner.
     """
+    return _rlm_run(prompt, knobs, spec, system_prompt=RLM_SYSTEM_PROMPT, custom_tools=None)
+
+
+def _rlm_decompose_emit(prompt: str, knobs: dict, spec: tuple[str, str] | None = None) -> str:
+    """The emit_dag framing (Stage-8 spike; see DECOMPOSE_PROMPT_EMIT).
+
+    Same arms, knobs and budget — only the answer channel differs. The tool call
+    *is* the submission, so the run ends when the DAG is handed over rather than
+    when the model decides it has explored enough.
+    """
+    return _rlm_run(
+        prompt, knobs, spec,
+        system_prompt=RLM_EMIT_DAG_SYSTEM_PROMPT,
+        custom_tools={"emit_dag": {"tool": _emit_dag_tool, "description": _EMIT_DAG_DESCRIPTION}},
+    )
+
+
+def _rlm_run(
+    prompt: str,
+    knobs: dict,
+    spec: tuple[str, str] | None,
+    *,
+    system_prompt: str,
+    custom_tools: dict[str, Any] | None,
+) -> str:
+    """Build one RLM and return its completion text. The two framings differ
+    only by what is passed here, so the budget history below is shared truth."""
     from rlm import RLM
 
     from .llm import _provider_base_url, _provider_key
@@ -409,8 +526,13 @@ def _rlm_decompose(prompt: str, knobs: dict, spec: tuple[str, str] | None = None
             "base_url": _provider_base_url(provider),
         },
         environment="local",
-        custom_system_prompt=RLM_SYSTEM_PROMPT,
+        custom_system_prompt=system_prompt,
         verbose=False,
+        # Sub-agents get no tools under the emit framing: `answer` is per-REPL,
+        # and a child flipping ready in its own environment is not the root's
+        # submission. `custom_sub_tools={}` is the library's way to say that.
+        custom_tools=custom_tools,
+        custom_sub_tools={} if custom_tools is not None else None,
         # The completion budget goes to `sampling_args`, which reaches each
         # chat-completions call. It must NOT go to RLM's own `max_tokens`: that
         # one is a *total* input+output ceiling for the whole recursive run, and
@@ -499,7 +621,13 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
             "Break THIS single task into 2-6 subtasks that together complete it. Do not add work "
             "the task does not ask for.\nTASK:\n" + focus.strip() + "\n\nOriginal request, for context only:\n" + request
         )
-    prompt = DECOMPOSE_PROMPT.format(request=target, context=context)
+    # Which framing answers — the documented one, or the Stage-8 spike whose
+    # submission is a tool call — is decided once here, and the `engine` field
+    # at the bottom says which one produced the DAG. That label is the spike's
+    # instrument: comparing `rlm` against `rlm+emit_dag` on the host gateway is
+    # how one of them gets promoted to default.
+    emit = _emit_dag_enabled()
+    prompt = (DECOMPOSE_PROMPT_EMIT if emit else DECOMPOSE_PROMPT).format(request=target, context=context)
 
     # Contingency ladder (plan): rlm on each candidate arm, then plain-LLM on
     # the same candidates. Never stall: the DAG shape is the contract, not the
@@ -511,10 +639,13 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
     deadline = (time.monotonic() + float(budget)) if budget else None
     rlm_deadline = (deadline - max(30.0, float(budget) / 4)) if deadline else None
 
-    engine = "rlm"
+    engine = "rlm+emit_dag" if emit else "rlm"
     rlm_error = None
     raw = None
     candidates = _planner_fallbacks()
+    # Name lookup at call time, so a test (or a future default) can replace the
+    # runner on the module without touching this loop.
+    runner = _rlm_decompose_emit if emit else _rlm_decompose
     planner_used: tuple[str, str] | None = None
     for index, spec in enumerate(candidates):
         timeout = _attempt_timeout(rlm_deadline, len(candidates) - index)
@@ -528,7 +659,7 @@ def decompose(request: str, context: str = "", *, focus: str = "", refine: bool 
             configured = attempt_knobs.get("maxTimeout")
             attempt_knobs["maxTimeout"] = timeout if configured is None else min(float(configured), timeout)
         try:
-            raw = _rlm_decompose(prompt, attempt_knobs, spec)
+            raw = runner(prompt, attempt_knobs, spec)
             planner_used = spec
             break
         except Exception as e:
