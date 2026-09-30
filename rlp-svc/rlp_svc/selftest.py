@@ -159,6 +159,15 @@ def main() -> None:
     if not full.get("ok"):
         print(f"plan FAILED: {full.get('error')}")
         failures += 1
+    elif full.get("result", {}).get("mode") != "orchestrate" or "tasks" not in full.get("result", {}):
+        # An `ok` envelope that answered direct/unavailable is not a crash to
+        # walk past: on a host whose ladder has no arms this is the honest
+        # shape, and the suite must report why orchestration did not happen
+        # rather than KeyError on `tasks`.
+        r = full["result"]
+        why = r.get("orchestration_unavailable") or str(r)[:200]
+        print(f"plan FAILED: asked to orchestrate, got mode={r.get('mode')} — {why}")
+        failures += 1
     else:
         r = full["result"]
         print(f"plan(orchestrate): {len(r['tasks'])} tasks, waves={r['waves']}, "
@@ -182,7 +191,9 @@ def main() -> None:
     # 7. doctor must agree with itself and never crash.
     from . import doctor
 
-    report = doctor.run(host=False)
+    # `host=False` was a kwarg doctor dropped; a suite that crashes instead of
+    # reporting is a suite nobody trusts at 2 a.m.
+    report = doctor.run()
     print(f"doctor: {'runnable' if report['ok'] else 'NOT runnable'} — {report['summary']}")
     if any(c["status"] == "fail" for c in report["checks"]):
         for c in report["checks"]:

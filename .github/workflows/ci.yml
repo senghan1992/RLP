@@ -145,6 +145,13 @@ jobs:
       - name: /provider and /setup, driven as a person would
         run: node scripts/check-provider.mjs ./scripts/rlp
 
+      - name: external-harness drivers, with fake CLIs
+        # The dispatch lane spawns tools this repo does not own; fakes on a
+        # sandbox path prove spawn/collect/watchdog/cancel without a model call
+        # or a real tool. ubuntu-latest carries tmux, so the lens lane runs too;
+        # without it the check says so and tests the plain lane instead.
+        run: node scripts/check-drivers.mjs
+
       - name: a fresh terminal is asked, and escape is a complete answer
         # The first-run experience is the product. `check-first-run` judges the
         # report; this judges the running TUI: start `rlp` on a host with nothing

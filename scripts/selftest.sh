@@ -12,6 +12,7 @@
 #                         (~4 min on CPU; pays the checkpoint load once)
 #   harness contract    — every command loads, exactly once, in a real session
 #   provider / setup    — the wizards, driven through a real session over RPC
+#   drivers             — fake CLIs dispatched, watched and killed for real
 #   first-run report    — every non-ok doctor line names an actionable fix
 #   first-run asks      — a real TUI starts the setup by itself, escape writes
 #                        nothing, and RLP_NO_SETUP is honoured
@@ -116,6 +117,18 @@ echo
 echo "== provider / setup (live session) =="
 node "$ROOT/scripts/check-provider.mjs" "$ROOT/scripts/rlp" || {
   echo "selftest: provider check FAILED" >&2
+  exit 1
+}
+
+# --- drivers: fake CLIs, real dispatch ------------------------------------------
+# The external-harness lane spawns, watches and collects things this repo does
+# not own. The check proves the mechanism with fakes on a sandbox path (never a
+# real tool), and skips the tmux lens on hosts without tmux — both lanes end in
+# the same collected contract either way.
+echo
+echo "== drivers (fake CLIs, real dispatch/collect/kill) =="
+node "$ROOT/scripts/check-drivers.mjs" || {
+  echo "selftest: driver check FAILED" >&2
   exit 1
 }
 

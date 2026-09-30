@@ -10,6 +10,28 @@ offline suite fails if they drift.
 
 ### Added
 
+- **Workers can now actually run on other people's tools.** The route's driver
+  stopped being paperwork: `rlp_dispatch` executes it. The argv template
+  assembles into a headless `claude`, `omp`, `jcode` or `muse` in the node's
+  own worktree, under the same worker contract pi has always had — the final
+  `ACCEPTANCE:` line, the `report.json`, the promoted log — and `routing.tmux`
+  decides only how it is *watched*: behind the lens a worker runs in a window
+  on RLP's own tmux socket (`tmux -L rlp`, sessions `rlp-<run>-<node>`),
+  `rlp_watch` and the new `/rlp-watch` name each window and its attach command
+  (watching is the human's move; RLP never attaches for anyone), completion is
+  the session going away plus its exit file, and the watchdog and
+  `rlp_cancel` end the whole tree with `kill-session`. A host without tmux
+  spawns the same workers plainly; the lens changes nothing about how a run is
+  collected. The prompt rides a 0600 file (inline on argv only while it fits
+  comfortably, and `{prompt_file}` tools read the file directly), a harness
+  with no driver fails its *node* with the catalog's word rather than silently
+  falling back to pi, and a plan on external harnesses no longer needs the `pi`
+  binary at all. New `scripts/check-drivers.mjs` proves the lane end to end —
+  three real catalog drivers spawned, contracts collected, a driverless harness
+  refused, watchdog and cancel killing the tree — against fake CLIs on a
+  sandbox path: it never calls a real tool and never needs a model, and it
+  skips the lens lane honestly on a host without tmux.
+
 - **A ladder worker can now name another harness.** The ladder schema grew two
   honest keys: a worker's `harness` means what the catalog says it means — arms
   on an external tool follow `<harness>/<native-id>` (`claude/sonnet`), and

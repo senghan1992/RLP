@@ -19,7 +19,7 @@
 import { spawn } from "node:child_process";
 
 const binary = process.argv[2] || "rlp";
-const EXPECTED = ["rlp", "rlp-plan", "rlp-triage", "rlp-doctor", "rlp-ladder", "rlp-config", "rlp-roles", "rlp-run", "rlp-state", "commands", "models", "provider", "setup", "direct"];
+const EXPECTED = ["rlp", "rlp-plan", "rlp-triage", "rlp-doctor", "rlp-ladder", "rlp-config", "rlp-roles", "rlp-run", "rlp-state", "rlp-watch", "commands", "models", "provider", "setup", "direct"];
 
 const child = spawn(binary, ["--mode", "rpc", "--no-session"], { stdio: ["pipe", "pipe", "pipe"] });
 let buffer = "";

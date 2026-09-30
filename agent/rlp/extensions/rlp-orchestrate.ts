@@ -4,8 +4,10 @@
  * RLP decides *what* to do with a request using the laya gate, the RLM
  * decomposer and the laya router — all of which live in the decision engine —
  * and then executes the plan right here: one worktree per node, one headless
- * `rpi` worker per node, waves dispatched together, results collected back for
- * synthesis.
+ * worker per node — the bundled `rpi`, or the external coding tool the route's
+ * driver names — waves dispatched together, results collected back for
+ * synthesis. Workers behind the tmux lens (`tmux -L rlp`) are watchable; how
+ * they are collected is the same either way.
  *
  * Why in-process: `rlp` is meant to be a single command. Every step that needs
  * a second program (a server, a daemon, a runner zygote) is a step that can be
@@ -28,11 +30,13 @@
  *   rlp_dispatch  start the workers for one wave, each in its own worktree
  *   rlp_collect   block until results arrive (or `waitMs` elapses), then report
  *   rlp_state     the ledger: every node, its model, worktree, branch and status
+ *   rlp_watch     the run's tmux windows and how to attach to each (read-only)
  *   rlp_cancel    stop running workers for the run
  *
- * Registered commands (the person types these; both are brain-only, like the tools):
+ * Registered commands (the person types these; all are brain-only, like the tools):
  *   /rlp-run      put a request into the session so the contract runs it
  *   /rlp-state    read the ledger without going through the model
+ *   /rlp-watch    the attach commands for this run's worker windows
  *
  * Plus a per-turn system-prompt section, because the orchestration contract is
  * what makes the model use these tools correctly — and the laya gate decides
@@ -348,7 +352,8 @@ export interface NodeRecord {
 	arm: string;
 	modelFamily: string;
 	purpose: string;
-	/** Harness the ladder says this node runs on. Only `pi` is dispatchable locally. */
+	/** Harness the ladder says this node runs on — "pi" (the internal lane) or
+	 *  an external tool whose command rides the route as a `driver`. */
 	harness?: string;
 	/** Present|missing|unknown for the arm's provider, from the planner's preflight. */
 	credential?: string;
@@ -480,12 +485,36 @@ function renderLedger(run: RunLedger): string {
 		lines.push(`      arm      ${node.arm}  (${node.purpose}, ${node.modelFamily || "n/a"})`);
 		lines.push(`      harness  ${node.harness ?? "pi"}  credential=${node.credential ?? "unknown"}`);
 		if (node.driver) lines.push(`      driver   ${node.driver.binary} ${node.driver.argv.join(" ")}`);
+		if (node.tmuxSession) lines.push(`      watch    tmux -L rlp attach -t ${node.tmuxSession}`);
 		lines.push(`      deps     ${node.dependsOn.join(", ") || "-"}`);
 		if (node.worktree) lines.push(`      worktree ${node.worktree}`);
 		if (node.branch) lines.push(`      branch   ${node.branch}`);
 		if (node.verdict) lines.push(`      verdict  ${node.verdict}`);
 		if (node.error) lines.push(`      error    ${node.error}`);
 	}
+	return lines.join("\n");
+}
+
+/**
+ * The watch view of a run (D4): tmux is a lens, and attaching through it is
+ * something a *person* does in their own terminal — this names where to look,
+ * never attaches or sends keys on anyone's behalf.
+ */
+function renderWatch(run: RunLedger): string {
+	const mode = run.tmux ?? "auto";
+	const lens = tmuxAvailable();
+	const running = Object.values(run.nodes).filter((n) => n.status === "running");
+	const lines = [`Run ${run.runId} — tmux lens: ${mode}${lens ? "" : " (no tmux on this host; workers run plainly)"}`];
+	const windows = running.filter((n) => n.tmuxSession);
+	if (windows.length) {
+		lines.push("", "Live windows (attach to watch; Ctrl-b d detaches, and detaching changes nothing):");
+		for (const n of windows) lines.push(`  ${n.id}  ${n.title}  →  tmux -L rlp attach -t ${n.tmuxSession}`);
+	}
+	const plain = running.filter((n) => !n.tmuxSession);
+	if (plain.length) {
+		lines.push("", `Plain spawns: ${plain.map((n) => `${n.id} (pid ${n.pid ?? "?"})`).join(", ")} — logs in ${runDir(run.runId)}`);
+	}
+	if (!running.length) lines.push("", "No workers running — everything has finished, failed or been cancelled.");
 	return lines.join("\n");
 }
 
@@ -602,8 +631,6 @@ function callEngine(
 
 /** Purposes a dispatch may carry. Anything else is a plan error, not a new mode. */
 const ALLOWED_PURPOSES = new Set(["implement", "review", "explore", "search"]);
-/** Harnesses local orchestration can actually spawn. Anything else is a plan error. */
-const DISPATCHABLE_HARNESSES = new Set(["pi"]);
 /** Worker watchdog default when the ladder sets none: 20 minutes. */
 const DEFAULT_WORKER_TIMEOUT_MS = 20 * 60 * 1000;
 /** How much of one dependency's report a dependent worker receives. */
@@ -624,6 +651,131 @@ function truncate(text: string, limit = DEP_RESULT_LIMIT): string {
 function extractVerdict(body: string): string | undefined {
 	const match = body.match(/^\s*(?:ACCEPTANCE|VERDICT):\s*(.+)$/im);
 	return match ? match[1].trim().slice(0, 240) : undefined;
+}
+
+// --- external harness drivers (design decisions D1 and D4) ----------------------
+
+/**
+ * A prompt under this size rides argv inline; a bigger one rides a `$(cat …)`
+ * expansion in the same shell command, so ARG_MAX is never the reason a node
+ * failed. The 0600 prompt file is written either way — it is what `{prompt_file}`
+ * harnesses (muse) read, and it is the post-mortem for the rest.
+ */
+const INLINE_PROMPT_MAX = 96_000;
+
+/** Single-quoted for /bin/sh. Every token assembled into a worker command goes
+ *  through this; nothing else reaches the shell unquoted. */
+function shquote(text: string): string {
+	return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+/** tmux is asked once per session — the lens is a host fact, not a per-node guess.
+ *  A missing tmux is not an error: `routing.tmux` auto/off spawn plainly. */
+let tmuxProbed: boolean | undefined;
+function tmuxAvailable(): boolean {
+	if (tmuxProbed === undefined) {
+		try {
+			tmuxProbed = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0;
+		} catch {
+			tmuxProbed = false;
+		}
+	}
+	return tmuxProbed;
+}
+
+/** RLP's own socket (D4): a private server that a stray `tmux ls` never shows
+ *  and that a user's own tmux sessions can neither collide with nor be killed by. */
+function runTmux(args: string[]): { code: number; out: string } {
+	const r = spawnSync("tmux", ["-L", "rlp", ...args], { encoding: "utf8" });
+	return { code: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`.trim() };
+}
+
+function tmuxSessionName(runId: string, nodeId: string): string {
+	return `rlp-${runId}-${nodeId}`;
+}
+
+/**
+ * The worker's command line, assembled from the driver's argv *template*.
+ * The catalog leaves `{prompt}` / `{prompt_file}` as placeholders precisely
+ * because only dispatch knows where the prompt landed; substituting them here
+ * is the whole of what this side knows about any external tool (D1).
+ */
+function externalWorkerCommand(driver: DriverRecord, prompt: string, promptFile: string): string {
+	const parts: string[] = [shquote(driver.binary)];
+	for (const token of driver.argv) {
+		if (token === "{prompt_file}") parts.push(shquote(promptFile));
+		else if (token === "{prompt}")
+			parts.push(prompt.length <= INLINE_PROMPT_MAX ? shquote(prompt) : `"$(cat ${shquote(promptFile)})"`);
+		else parts.push(shquote(token));
+	}
+	return parts.join(" ");
+}
+
+/** The one shell script both lanes run: the worker's output is its log, and its
+ *  exit code is a file — that is how a tmux session with no parent process still
+ *  reports how it ended. */
+function wrapWorkerShell(workerCmd: string, logFile: string, exitFile: string): string {
+	return `${workerCmd} > ${shquote(logFile)} 2>&1; echo $? > ${shquote(exitFile)}`;
+}
+
+/**
+ * Finish a node, whichever lane it ran in: promote the log into the result file
+ * (collect shows that, dependents read that), strip ANSI, find the ACCEPTANCE
+ * line, record status. The close handler and the tmux poll share this so no
+ * lens can collect the same worker slightly differently.
+ */
+function finalizeNode(run: RunLedger, node: NodeRecord, code: number): void {
+	const live = node.status === "running";
+	// The worker's stdout is its report. Promote the log into the result file,
+	// because that is what rlp_collect shows and what a dependent node receives
+	// as context — the log also keeps the full transcript for post-mortem.
+	try {
+		const raw = node.logFile && existsSync(node.logFile) ? readFileSync(node.logFile, "utf8") : "";
+		const clean = stripAnsi(raw);
+		if (node.resultFile) writeFileSync(node.resultFile, clean);
+		node.verdict = extractVerdict(clean);
+	} catch {
+		/* a missing result is reported as such by rlp_collect */
+	}
+	node.exitCode = code;
+	// A node the watchdog already killed or the user cancelled keeps *that*
+	// error — the late process-exit is evidence, not a new verdict.
+	if (live) {
+		node.finishedAt = new Date().toISOString();
+		node.status = code === 0 ? "done" : "failed";
+		if (code !== 0) node.error = `worker exited ${code}; full output in ${node.logFile}`;
+	}
+	save(run);
+}
+
+/**
+ * tmux completion = the session is gone (D4). When it is, the exit file says how
+ * it ended; a missing exit file means the session died before the shell could
+ * write it, which is a failure like any other.
+ */
+function pollTmuxNodes(run: RunLedger): void {
+	for (const node of Object.values(run.nodes)) {
+		if (node.status !== "running" || !node.tmuxSession) continue;
+		if (runTmux(["has-session", "-t", node.tmuxSession]).code === 0) continue;
+		const raw = node.exitFile && existsSync(node.exitFile) ? readFileSync(node.exitFile, "utf8").trim() : "";
+		finalizeNode(run, node, /^\d+$/.test(raw) ? parseInt(raw, 10) : 1);
+	}
+}
+
+/** Stop a running node's process tree: the window is the tree on the tmux lane;
+ *  plain external spawns are detached group leaders, so the negative pid kills
+ *  the tool and its children, never just the shell in front of it. */
+function stopNode(node: NodeRecord): void {
+	if (node.tmuxSession) {
+		runTmux(["kill-session", "-t", node.tmuxSession]);
+		return;
+	}
+	if (!node.pid) return;
+	try {
+		process.kill(node.driver ? -node.pid : node.pid, "SIGTERM");
+	} catch {
+		/* already gone */
+	}
 }
 
 /** The brief a worker receives. Self-contained on purpose: it has no context
@@ -1061,8 +1213,9 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 			name: "rlp_dispatch",
 		label: "RLP dispatch",
 		description:
-			"Start the workers for one dispatch wave. Each node gets its own git worktree, branch and headless rpi " +
-			"process on the model arm rlp_plan chose. Returns immediately with one handle per node; collect with " +
+			"Start the workers for one dispatch wave. Each node gets its own git worktree, branch and headless " +
+			"worker — the bundled pi, or the external coding tool whose driver rlp_plan put on the route — on the " +
+			"model arm rlp_plan chose. Returns immediately with one handle per node; collect with " +
 			"rlp_collect. Never dispatch a node whose dependencies are not yet done, and never split one wave " +
 			"across two calls — the whole point of a wave is that independent work runs at once.",
 		promptSnippet: "rlp_dispatch(nodes) — start one wave of workers, each in its own worktree",
@@ -1096,8 +1249,10 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 						"the mode off (/direct off) and plan again.",
 				);
 			}
+			// Nullable on purpose: an external-harness plan does not need the pi
+			// binary at all, and failing the whole dispatch for it was a way for
+			// one lane's missing piece to stall another's.
 			const rpi = findRpi(ctx.cwd);
-			if (!rpi) return fail("The rpi worker binary was not found. Run: sh scripts/install.sh");
 
 			// Build the run from the plan rlp_plan already produced. Re-running the
 			// plan here was both a doubled ~150 s cost and a correctness hole: the
@@ -1220,9 +1375,20 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 					lines.push(`${id}: NOT dispatched — ${node.error}`);
 					continue;
 				}
-				if (node.harness && !DISPATCHABLE_HARNESSES.has(node.harness)) {
+				// What is dispatchable is driver presence, not a name list (D1/D5):
+				// pi nodes carry no driver and run the internal lane that predates
+				// the catalog; external nodes carry the command itself; a harness the
+				// catalog could not give a driver to fails with the catalog's own
+				// word — never a silent fallback to pi.
+				if (node.driver && run.tmux === "on" && !tmuxAvailable()) {
 					node.status = "failed";
-					node.error = `local orchestration only spawns pi workers; '${node.harness}' is not reachable here — /rlp-config to disable it`;
+					node.error = `routing.tmux is "on" and this host has no tmux to put ${node.driver.harness} behind — install tmux, or set the lens to auto/off`;
+					lines.push(`${id}: NOT dispatched — ${node.error}`);
+					continue;
+				}
+				if (!node.driver && node.harness && node.harness !== "pi") {
+					node.status = "failed";
+					node.error = `no RLP driver for harness '${node.harness}' — \`rlp harness list\` names what this build can run; /rlp-config to move the node to pi`;
 					lines.push(`${id}: NOT dispatched — ${node.error}`);
 					continue;
 				}
@@ -1242,6 +1408,68 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 				const waveIndex = run.waves.findIndex((w) => w.includes(id));
 				const prompt = workerPrompt(node, run, Math.max(0, waveIndex), run.waves.length);
 				const out = existsSync(resultFile) ? readFileSync(resultFile, "utf8") : "";
+
+				if (node.driver) {
+					// External lane. The prompt rides a 0600 file either way — the
+					// command inlines it when it fits ARG_MAX comfort, `{prompt_file}`
+					// tools read it directly — and the lens follows routing.tmux.
+					const full = `${prompt}\n${out}`;
+					const promptFile = join(dir, `${id}.prompt.txt`);
+					writeFileSync(promptFile, full, { mode: 0o600 });
+					node.promptFile = promptFile;
+					node.exitFile = join(dir, `${id}.exit`);
+					const script = wrapWorkerShell(
+						externalWorkerCommand(node.driver, full, promptFile),
+						logFile,
+						node.exitFile,
+					);
+					if (node.driver.tmux && (run.tmux === "on" || (run.tmux !== "off" && tmuxAvailable()))) {
+						const sess = tmuxSessionName(run.runId, id);
+						// tmux concatenates trailing args and runs them through the
+						// default shell, so the script must ride as ONE quoted argument.
+						const started = runTmux([
+							"new-session", "-d", "-s", sess, "-c", node.worktree ?? ctx.cwd,
+							`sh -c ${shquote(script)}`,
+						]);
+						if (started.code !== 0) {
+							node.status = "failed";
+							node.error = `tmux could not start ${node.driver.binary}: ${started.out.slice(-300)}`;
+							lines.push(`${id}: NOT dispatched — ${node.error}`);
+							continue;
+						}
+						node.tmuxSession = sess;
+					} else {
+						const child = spawn("sh", ["-c", script], {
+							cwd: node.worktree ?? ctx.cwd,
+							env: { ...process.env, RLP_IDENTITY: "worker" },
+							// Its own process group: the watchdog and cancel must be
+							// able to kill the tool, not just the shell in front of it.
+							detached: true,
+							stdio: ["ignore", "ignore", "ignore"],
+						});
+						node.pid = child.pid;
+						child.on("close", (code) => finalizeNode(run, node, code ?? 1));
+					}
+					node.status = "running";
+					node.startedAt = new Date().toISOString();
+					run.dispatchBudgetUsed += 1;
+					lines.push(
+						`${id}: started ${node.driver.harness} on ${node.arm} in ${node.worktree} (branch ${node.branch}${
+							node.tmuxSession
+								? `, window ${node.tmuxSession} — attach: tmux -L rlp attach -t ${node.tmuxSession}`
+								: `, pid ${node.pid}`
+						})` + (wt.shared ? "  [shared working tree — not a git repo]" : ""),
+					);
+					continue;
+				}
+
+				// pi lane — the internal path, byte-identically what it always was.
+				if (!rpi) {
+					node.status = "failed";
+					node.error = "The rpi worker binary was not found. Run: sh scripts/install.sh";
+					lines.push(`${id}: NOT dispatched — ${node.error}`);
+					continue;
+				}
 				const logFd = openSync(logFile, "w");
 				const child = spawn(rpi, ["-p", `${prompt}\n${out}`, "--model", node.arm], {
 					cwd: node.worktree,
@@ -1256,29 +1484,7 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 				node.status = "running";
 				node.startedAt = new Date().toISOString();
 				run.dispatchBudgetUsed += 1;
-
-				child.on("close", (code) => {
-					// The worker's stdout is its report. Promote the log into the
-					// result file, because that is what rlp_collect shows and what a
-					// dependent node receives as context — the log also keeps the full
-					// transcript for post-mortem when a worker went wrong.
-					try {
-						const raw = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
-						const clean = stripAnsi(raw);
-						writeFileSync(resultFile, clean);
-						node.verdict = extractVerdict(clean);
-					} catch {
-						/* a missing result is reported as such by rlp_collect */
-					}
-					node.exitCode = code ?? 1;
-					node.finishedAt = new Date().toISOString();
-					node.status = code === 0 ? "done" : "failed";
-					if (code !== 0) {
-						node.error = `worker exited ${code}; full output in ${node.logFile}`;
-					}
-					save(run);
-				});
-
+				child.on("close", (code) => finalizeNode(run, node, code ?? 1));
 				lines.push(
 					`${id}: started on ${node.arm} in ${node.worktree} (branch ${node.branch}, pid ${child.pid})` +
 						(wt.shared ? "  [shared working tree — not a git repo]" : ""),
@@ -1330,17 +1536,15 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 
 			// Watchdog: a worker that never exits would otherwise hang collect
 			// forever. Kill it, mark it failed, and let the brain re-dispatch. The
-			// ceiling is the ladder's routing.workerTimeoutMs.
+			// ceiling is the ladder's routing.workerTimeoutMs. On the tmux lane the
+			// kill is `kill-session` — the whole tree, stronger than signalling the
+			// pid that merely fronts it.
 			const watchdog = () => {
 				if (!run.workerTimeoutMs) return;
 				for (const node of Object.values(run.nodes)) {
 					if (node.status !== "running" || !node.startedAt) continue;
 					if (Date.now() - Date.parse(node.startedAt) <= run.workerTimeoutMs) continue;
-					try {
-						if (node.pid) process.kill(node.pid, "SIGTERM");
-					} catch {
-						/* already gone */
-					}
+					stopNode(node);
 					node.status = "failed";
 					node.finishedAt = new Date().toISOString();
 					node.error = `worker exceeded the ${run.workerTimeoutMs} ms watchdog and was killed`;
@@ -1350,8 +1554,12 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 			while (pending() && Date.now() < deadline) {
 				if (signal?.aborted) return fail("cancelled");
 				await new Promise((r) => setTimeout(r, 1000));
+				// A tmux node has no parent process to notify us: its completion is
+				// the session going away, which the poll turns into a finalized node.
+				pollTmuxNodes(run);
 				watchdog();
 			}
+			pollTmuxNodes(run);
 			watchdog();
 
 			const out: string[] = [`Run ${run.runId}`];
@@ -1359,7 +1567,10 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 				if (!wanted(node.id)) continue;
 				if (node.status === "running") {
 					const ran = node.startedAt ? Math.round((Date.now() - Date.parse(node.startedAt)) / 1000) : 0;
-					out.push(`\n### ${node.id}: ${node.title}\n  status: still running (pid ${node.pid}, ${ran}s)`);
+					const where = node.tmuxSession
+						? `window ${node.tmuxSession} — attach: tmux -L rlp attach -t ${node.tmuxSession}`
+						: `pid ${node.pid}`;
+					out.push(`\n### ${node.id}: ${node.title}\n  status: still running (${where}, ${ran}s)`);
 					continue;
 				}
 				if (node.status === "pending") {
@@ -1424,6 +1635,28 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 			return ok(renderLedger(run));
 		},
 	});
+
+	// --- rlp_watch --------------------------------------------------------------------
+	// The lens, not the protocol (D4): a brain that is asked "what is it doing right
+	// now" answers with the attach command instead of guessing from log tails, and a
+	// user gets the same words from /rlp-watch. It never attaches for anybody.
+	if (IS_BRAIN)
+		pi.registerTool({
+			name: "rlp_watch",
+			label: "RLP watch",
+			description:
+				"Which workers are running now and how to watch them: the tmux window and attach command for each " +
+				"(on RLP's own `-L rlp` socket), pids and log paths for plain spawns. Read-only — it never " +
+				"attaches, never sends keys; attach is the human's own terminal move.",
+			promptSnippet: "rlp_watch() — where each running worker can be watched from",
+			parameters: Type.Object({}, { additionalProperties: false }),
+			async execute(_id, _params, _signal, _onUpdate, _ctx) {
+				const run = currentRun ?? latestRun();
+				if (!run) return fail("No run yet. Call rlp_plan, then rlp_dispatch.");
+				currentRun = run;
+				return ok(renderWatch(run));
+			},
+		});
 
 	// --- rlp_replan -------------------------------------------------------------------
 	if (IS_BRAIN)
@@ -1673,15 +1906,13 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 			if (!run) return ok("Nothing to cancel.");
 			let stopped = 0;
 			for (const node of Object.values(run.nodes)) {
-				if (node.status !== "running" || !node.pid) continue;
-				try {
-					process.kill(node.pid, "SIGTERM");
-					node.status = "cancelled";
-					node.finishedAt = new Date().toISOString();
-					stopped += 1;
-				} catch {
-					/* already gone */
-				}
+				if (node.status !== "running") continue;
+				// tmux lanes have no live pid in this process — kill-session takes the
+				// whole tree; plain external spawns are killed as process groups.
+				stopNode(node);
+				node.status = "cancelled";
+				node.finishedAt = new Date().toISOString();
+				stopped += 1;
 			}
 			save(run);
 			return ok(`Cancelled ${stopped} worker(s) in run ${run.runId}.`);
@@ -1765,11 +1996,14 @@ You never edit a worker's files; you route, verify and assemble.
 **3. COLLECT, DON'T POLL.** \`rlp_collect\` blocks until results arrive and
 hands you each node's full output. Do not sleep, do not poll the filesystem.
 If nothing is ready within the wait, spend that turn on work that does not
-depend on those nodes.
+depend on those nodes. When a user asks what a worker is doing *right now*,
+answer with \`rlp_watch\`: it names each running node's tmux window and attach
+command. Do not attach or send keys yourself — the lens is for watching, and
+attaching is the human's own move.
 
 **4. RE-DISPATCH ON FAILURE.** A node that failed, or whose result misses its
-acceptance sentence, may be re-dispatched **once** to the other pi model with
-the gap stated explicitly. On a second failure, say so and report the DAG
+acceptance sentence, may be re-dispatched **once** to the other arm — another
+model, or another tool the ladder carries — with the gap stated explicitly. On a second failure, say so and report the DAG
 short of that node rather than looping. A worker that reports
 \`ACCEPTANCE: fail\`, or whose \`verdict\` line contradicts its acceptance,
 has not met its contract even if it exited 0 — treat it as failed. A worker
@@ -1881,6 +2115,19 @@ waiting on \`rlp_collect\`, or when the deliverable is done.
 				ctx.ui.notify(
 					run ? renderLedger(run) : "No run yet. /rlp-run <request> plans one, and rlp_dispatch fills the ledger.",
 				);
+			},
+		});
+
+	// --- /rlp-watch: the human's own look inside the lens ------------------------------
+	// Same renderer the tool uses, so the model and the person can never be looking
+	// at two descriptions of one run. Attaching is still the person's move in their
+	// own terminal — this hands over the command and nothing else.
+	if (IS_BRAIN)
+		pi.registerCommand("rlp-watch", {
+			description: "List this run's tmux windows and their attach commands (read-only; RLP never attaches for you)",
+			handler: async (_args, ctx: ExtensionCommandContext) => {
+				const run = currentRun ?? latestRun();
+				ctx.ui.notify(run ? renderWatch(run) : "No run yet. /rlp-run <request> plans one, and rlp_dispatch fills the lens.");
 			},
 		});
 }
