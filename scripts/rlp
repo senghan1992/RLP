@@ -81,7 +81,8 @@ without a TUI.
   rlp digest [--run ID]      condense a finished wave's reports into a handoff
                              (RLM over reports — the `engine` line says who wrote it)
   rlp provider ...           endpoints and credentials: list|add|remove|key|
-                             discover|probe
+                             discover|probe|scan|import|
+                             (scan|import: pi's own providers, copied in)
   rlp harness [scan|list]    which coding CLIs can run workers here (omp,
                              claude, jcode, muse — present? logged in?)
   rlp doctor [--warm]        is this host runnable? (fixes per line)

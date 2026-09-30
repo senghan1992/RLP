@@ -703,3 +703,147 @@ def summary() -> dict:
         "orphanArms": orphan_arms(),
         "presets": PRESETS,
     }
+
+
+# --- pi's own store ----------------------------------------------------------------
+
+
+def pi_agent_dir() -> Path:
+    """Where pi keeps its own harness files: `$RLP_PI_AGENT_DIR`, else
+    `~/.pi/agent` — the same directory the install-time migration in
+    `scripts/sync-agent-dir` copies from. RLP is pi's fork: a person already
+    logged into pi should not have to type the same key into RLP."""
+    value = os.environ.get("RLP_PI_AGENT_DIR")
+    return Path(value).expanduser() if value else Path.home() / ".pi" / "agent"
+
+
+def _credential_present(entry: Any) -> bool:
+    """Does this auth.json entry hold a credential? Shape only, never value."""
+    return isinstance(entry, dict) and bool(
+        (isinstance(entry.get("access"), str) and entry["access"])
+        or (isinstance(entry.get("key"), str) and entry["key"])
+    )
+
+
+def pi_providers() -> dict:
+    """What pi has connected that RLP does not — the scan `/setup` offers by.
+
+    A row is ``{provider, kind, baseUrl, models, credential, in_rlp}``.
+    ``kind`` is ``custom`` for an endpoint in pi's models.json and ``builtin``
+    for a provider that only appears in pi's auth.json — one pi's own catalogue
+    knows and the user logged into, whose URL RLP's harness knows too because
+    the harness *is* pi. ``credential`` is the presence of pi's auth entry,
+    never its value: this function reads a credential file the same way
+    `doctor` reads a login — existence only. ``in_rlp`` says RLP's store
+    already has the provider, so a migrated install is not offered to
+    re-migrate itself.
+
+    With `RLP_PI_AGENT_DIR` pointing RLP's store at pi's directory (or the
+    default directories coinciding), there is nothing to find: `sameDir` says
+    so, because scan-then-import would be copying a file onto itself.
+    """
+    dir_ = pi_agent_dir()
+    try:
+        same = dir_.resolve() == paths.agent_dir().resolve()
+    except OSError:
+        same = False
+    if same:
+        return {"dir": str(dir_), "sameDir": True, "providers": []}
+    pi_models = _read_json(dir_ / "models.json")
+    bag = pi_models.get("providers") if isinstance(pi_models.get("providers"), dict) else {}
+    pi_auth = _read_json(dir_ / "auth.json")
+    rlp_models = _endpoints()
+    rlp_auth = _read_json(auth_path())
+    rows: dict[str, dict] = {}
+    for pid, entry in bag.items():
+        if not isinstance(pid, str) or not isinstance(entry, dict):
+            continue
+        ids = [str(m["id"]) for m in (entry.get("models") or []) if isinstance(m, dict) and m.get("id")]
+        rows[pid] = {
+            "provider": pid,
+            "kind": "custom",
+            "baseUrl": str(entry.get("baseUrl") or ""),
+            "models": ids,
+            "credential": "present" if _credential_present(pi_auth.get(pid)) else "absent",
+            "in_rlp": pid in rlp_models or pid in rlp_auth,
+        }
+    for pid, entry in pi_auth.items():
+        if not isinstance(pid, str) or pid in rows or not isinstance(entry, dict):
+            continue
+        rows[pid] = {
+            "provider": pid,
+            "kind": "builtin",
+            "baseUrl": "",
+            "models": [],
+            "credential": "present" if _credential_present(entry) else "absent",
+            "in_rlp": pid in rlp_models or pid in rlp_auth,
+        }
+    found = sorted(rows.values(), key=lambda r: r["provider"])
+    return {"dir": str(dir_), "sameDir": False, "providers": found}
+
+
+def import_from_pi(provider: str) -> dict:
+    """Copy one provider out of pi's store into RLP's — as data, never as text.
+
+    The models.json entry and the auth.json entry are copied **verbatim**: no
+    reshaping, no merging into an existing RLP entry (RLP's own endpoint list
+    is the one this module promises never to clobber), and no credential ever
+    passing through a return value, a log line or an error message. What is
+    copied, the harness reads the same way it reads pi's own store, because
+    the harness is pi's fork — the entry means exactly what it meant there.
+
+    The writing rules of this module apply unchanged: validate before writing,
+    keep keys this module does not model, back up, replace atomically, 0600.
+    A provider already in RLP is a refusal, not a merge: changing a configured
+    endpoint is `/provider key`'s job, asked for by name.
+    """
+    provider = _valid_id(provider)
+    dir_ = pi_agent_dir()
+    try:
+        same = dir_.resolve() == paths.agent_dir().resolve()
+    except OSError:
+        same = False
+    if same:
+        raise ValueError("pi's store and RLP's are the same directory — there is nothing to import")
+    pi_models = _read_json(dir_ / "models.json")
+    bag = pi_models.get("providers") if isinstance(pi_models.get("providers"), dict) else {}
+    pi_auth = _read_json(dir_ / "auth.json")
+    entry = bag.get(provider)
+    cred = pi_auth.get(provider)
+    if isinstance(cred, dict) and not _credential_present(cred):
+        cred = None
+    if not isinstance(entry, dict) and cred is None:
+        raise ValueError(f"pi has no provider {provider!r} to import")
+
+    doc = _read_required(models_path())
+    rlp_bag = doc.get("providers") if isinstance(doc.get("providers"), dict) else {}
+    auth_doc = _read_required(auth_path())
+    if provider in rlp_bag or provider in auth_doc:
+        raise ValueError(
+            f"{provider!r} is already in RLP's store — change it with /provider, do not re-import over it"
+        )
+
+    backup_models = None
+    if isinstance(entry, dict):
+        rlp_bag = {**rlp_bag, provider: json.loads(json.dumps(entry))}  # a copy, not a live reference
+        backup_models = _write_json(models_path(), {**doc, "providers": rlp_bag})
+    backup_auth = None
+    copied_credential = False
+    if isinstance(cred, dict):
+        auth_doc = {**auth_doc, provider: json.loads(json.dumps(cred))}
+        backup_auth = _write_json(auth_path(), auth_doc, secret=True)
+        copied_credential = True
+    # "copied" tracks the *write*, never the backup: a first auth.json write
+    # has no backup to report, and reading absence-of-backup as absence-of-key
+    # would tell a fresh install that its freshly copied key is missing.
+    return {
+        "provider": provider,
+        "kind": "custom" if isinstance(entry, dict) else "builtin",
+        "models": [
+            str(m["id"]) for m in ((entry.get("models") or []) if isinstance(entry, dict) else [])
+            if isinstance(m, dict) and m.get("id")
+        ],
+        "credential": "copied" if copied_credential else "absent",
+        "modelsBackup": backup_models,
+        "authBackup": backup_auth,
+    }

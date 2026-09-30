@@ -479,7 +479,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_provider(args: argparse.Namespace) -> int:
-    """model endpoints and credentials: list, add, remove, key, discover, probe.
+    """model endpoints and credentials: list, add, remove, key, discover, probe;
+    scan/import read pi's own store — RLP is pi's fork, so a key typed once
+    into pi should not have to be typed again.
 
     The TUI drives this instead of writing models.json/auth.json itself, so the
     validation, the backup and the 0600 on auth.json have one implementation
@@ -527,6 +529,25 @@ def _cmd_provider(args: argparse.Namespace) -> int:
                     args.json,
                     "usage: rlp-svc provider key <id> <key> | provider key <id> --drop",
                 )
+        elif verb == "scan":
+            envelope = {"ok": True, "result": mod.pi_providers()}
+        elif verb == "import":
+            # A batch, validated per provider: each import writes its own files
+            # only after its own checks, so a later bad id cannot corrupt an
+            # earlier good one. The honest report is both lists, not a
+            # half-write dressed up as success.
+            imported: list[dict] = []
+            failed: list[str] = []
+            for pid in args.id:
+                try:
+                    imported.append(mod.import_from_pi(pid))
+                except ValueError as e:
+                    failed.append(str(e))
+            envelope = {
+                "ok": not failed,
+                "error": "; ".join(failed) if failed else None,
+                "result": {"imported": imported, "failed": failed},
+            }
         elif verb == "discover":
             base_url = args.base_url or next(
                 (p["baseUrl"] for p in mod.list_providers() if p["id"] == args.id), ""
@@ -551,6 +572,11 @@ def _cmd_provider(args: argparse.Namespace) -> int:
     if args.json:
         return _emit(envelope, True)
     if not envelope.get("ok"):
+        # A partial import batch still reports what it wrote — the generic
+        # failure line would hide a real file change, and hiding that is worse
+        # than the non-zero exit that already names it.
+        if isinstance(envelope.get("result"), dict) and "imported" in envelope["result"]:
+            return _emit(envelope, False, _render_provider(envelope["result"], "import"))
         lines = [
             f"✗ {envelope.get('error', 'failed')}",
             f"  kind  {envelope.get('kind', 'unknown')}",
@@ -578,6 +604,42 @@ def _render_provider(data: dict, verb: str) -> str:
         if len(models) > 40:
             head.append(f"  …and {len(models) - 40} more")
         return "\n".join(head)
+    if verb == "scan":
+        lines = [f"pi's providers · {data.get('dir')}", ""]
+        if data.get("sameDir"):
+            lines.append("  RLP's store is pi's store (same directory) — nothing to import")
+        rows = data.get("providers") or []
+        for r in rows:
+            badge = {"present": "●", "absent": "○"}.get(r.get("credential"), "○")
+            what = (
+                f"{r.get('baseUrl')}  ({len(r.get('models') or [])} model(s))"
+                if r.get("kind") == "custom"
+                else "pi's own catalogue (logged in)"
+            )
+            tail = "  (already in RLP)" if r.get("in_rlp") else ""
+            lines.append(f"{badge} {r.get('provider')}  —  {what}{tail}")
+        if not rows and not data.get("sameDir"):
+            lines.append("  nothing in pi that RLP does not already have")
+        fresh = [r["provider"] for r in rows if not r.get("in_rlp")]
+        if fresh:
+            shown = " ".join(fresh[:3]) + (" …" if len(fresh) > 3 else "")
+            lines += ["", f"  import: rlp provider import {shown}"]
+        return "\n".join(lines)
+    if verb == "import":
+        lines = []
+        for rec in data.get("imported") or []:
+            cred = "credential copied" if rec.get("credential") == "copied" else "no credential in pi"
+            what = (
+                f"{len(rec.get('models') or [])} model(s)"
+                if rec.get("kind") == "custom"
+                else "pi's built-in endpoint"
+            )
+            lines.append(f"✓ {rec.get('provider')}  —  {what}, {cred}")
+        for err in data.get("failed") or []:
+            lines.append(f"✗ {err}")
+        if not lines:
+            lines.append("nothing imported")
+        return "\n".join(lines)
     if verb in ("add", "remove", "key"):
         lines = [f"{verb}: {data.get('provider')}"]
         for key in ("baseUrl", "credential", "models", "backup", "path"):
@@ -807,7 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_route("route", "route one subtask with the laya decision model")
     add_route("llm-route", "route one subtask with the transparent LLM fallback")
 
-    sp = sub.add_parser("provider", help="model endpoints and credentials: list, add, remove, key, discover, probe")
+    sp = sub.add_parser("provider", help="model endpoints and credentials: list, scan, import, add, remove, key, discover, probe")
     psub = sp.add_subparsers(dest="provider_command")
     psub.add_parser("list", help="every endpoint, its credential state and its ladder arms").add_argument("--json", action="store_true")
     psub.add_parser("show", help="alias for list").add_argument("--json", action="store_true")
@@ -842,6 +904,11 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--key-stdin", action="store_true", help="read the credential from stdin")
     pd.add_argument("--json", action="store_true")
 
+    psc = psub.add_parser("scan", help="providers pi itself has connected — presence only, never key values")
+    psc.add_argument("--json", action="store_true")
+    pI = psub.add_parser("import", help="copy pi's provider endpoints and credentials into RLP's own store")
+    pI.add_argument("id", nargs="+", help="provider id(s) from `provider scan`")
+    pI.add_argument("--json", action="store_true")
     pp = psub.add_parser("probe", help="one real completion round trip: does this endpoint answer?")
     pp.add_argument("id", nargs="?", default=None, help="a configured provider")
     pp.add_argument("--base-url", default=None, help="check this URL before writing it")

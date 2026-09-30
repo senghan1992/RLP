@@ -24,7 +24,7 @@ differs is that only `rlp` can orchestrate.
 
 | Command | What it does |
 |---|---|
-| `/setup` | the guided first run: mode → (coding tools already on this host) → endpoints → model → worker arms → per-role models (it starts by itself on a host that cannot work yet) |
+| `/setup` | the guided first run: mode → (coding tools already on this host) → (providers pi already has connected) → endpoints → model → worker arms → per-role models (it starts by itself on a host that cannot work yet) |
 | `/direct on\|off\|status` | direct-only mode: every request inline, never orchestrate |
 | `/provider` | endpoints, credential state, a live round trip, the arms that cannot run |
 | `/provider connect\|add\|test\|models\|key\|remove` | guided attach · scriptable attach · one real round trip · discovery · credentials · removal |
@@ -55,7 +55,9 @@ rlp triage "<request>"        # direct vs orchestrate, one forward pass
 rlp decompose "<request>"     # the DAG on its own
 rlp ladder | rlp roster       # the ladder, and the router cards derived from it
 rlp harness list | scan       # which tools can run workers here; what is installed (`--no-versions`: PATH only, spawns nothing)
-rlp provider list|probe|discover|add|key|remove
+rlp provider list|scan|import|probe|discover|add|key|remove
+                              # scan|import: pi's own logged-in providers, read
+                              # for existence only and copied in one-way
 rlp verify --acceptance ...   # independent cross-vendor best-of-N verdict
 rlp digest [--run ID] [--wave N]  # condense a finished wave's reports into a handoff
 rlp memory | rlp remember     # this project's cross-run knowledge log
@@ -78,8 +80,11 @@ Add `--json` to any engine subcommand for a machine-readable envelope.
 - **Actually doing the work** → just ask `rlp`. The gate decides per request;
   you do not choose between "chat mode" and "orchestrate mode".
 - **One thing, no gate at all** → `rpi`.
-- **Attaching a provider** → `/provider connect` (guided) or
-  `rlp provider add <id> <baseUrl> <model>` (scriptable).
+- **Attaching a provider** → `/provider connect` (guided),
+  `rlp provider add <id> <baseUrl> <model>` (scriptable), or — since RLP is
+  pi's fork — `rlp provider scan` to see what pi itself has logged into and
+  `rlp provider import <id…>` to copy it in verbatim (one-way; the scan reads
+  existence only, never key values). `/setup` offers the same as one batch.
 - **Changing which models orchestrate** → `/rlp-config`, or `/rlp-roles` to
   pin one role. The ladder is configuration, not code.
 - **Running workers on the coding CLIs you already use** → `/setup` looks for

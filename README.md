@@ -111,10 +111,13 @@ never type it).
 - `git`, `node` ≥ 18 with `npm`, `python` ≥ 3.10
 - ~1.5 GB of disk (the harness, a CPU-only torch, and the laya checkpoint)
 - Model credentials: RLP keeps its own state under `~/.rlp/agent/` —
-  `auth.json` + `models.json`, never pi's `~/.pi`. Any OpenAI-compatible
-  provider works. Starting `rlp` for the first time asks for them (the guided
-  setup), `/provider connect` attaches one on its own, `rlp provider` is the
-  scriptable equivalent, and a hand-edited file works too.
+  `auth.json` + `models.json`, never writing to pi's `~/.pi`. But RLP is pi's
+  fork, so it does not make you retype what pi already has: if pi is logged
+  into providers on this host, `/setup` offers to copy them in (one-way, and
+  the scan sees only which providers exist — never their keys). Any
+  OpenAI-compatible provider works. Starting `rlp` for the first time asks for
+  them (the guided setup), `/provider connect` attaches one on its own,
+  `rlp provider` is the scriptable equivalent, and a hand-edited file works too.
 The installer uses [`uv`](https://github.com/astral-sh/uv) when it is present and
 plain `pip` otherwise. By default there is **no venv**: the engine is pip-installed into your existing python (≥ 3.10), like any other package. Pass `RLP_ENGINE=venv` to install it in a self-contained `rlp-svc/.venv` instead (isolated from the system python; the old default, still fully supported):
 
@@ -134,8 +137,12 @@ model arms cannot do anything yet, so the first time you start `rlp` in a
 terminal the guided setup begins by itself: the mode, then — if other coding
 CLIs are already installed here — the offer to mount them as workers (a PATH
 lookup that spawns nothing; `RLP_HARNESS_SCAN=0` keeps the question unasked),
-then the endpoints and their keys, then the model RLP works on, then the
-worker arms, then the model for each role. Every question is skippable, each
+then — because RLP is pi's fork — the providers **pi itself is already logged
+into**, offered as one batch to copy in as they are (the scan reads pi's store
+for existence only: no key value ever reaches the screen, `rlp provider scan`
+is the same look in a shell, and the copy is one-way, so pi's files are never
+touched). Then the endpoints and their keys, the model RLP works on, the
+worker arms, and the model for each role. Every question is skippable, each
 one says what it changed, and answering all of them with escape writes nothing
 at all — which is why being
 asked again next launch is honest rather than a nag. `RLP_NO_SETUP=1` is the
@@ -383,6 +390,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp provider discover <id>` | ask the endpoint which models it serves |
 | `rlp provider add <id> <url> <model…> [--key-stdin]` | attach an endpoint (validated, backed up, `0600` auth) |
 | `rlp provider key <id> [--drop]` · `remove <id> [--drop-key]` | manage a credential · detach an endpoint |
+| `rlp provider scan` · `import <id…>` | what pi itself has connected (presence only, never values) · copy one or more in verbatim — validated, backed up, `0600`, one-way |
 | `rlp config '<ops-json>'` | edit the ladder (validated, backed up, atomic) |
 | `rlp memory` · `rlp remember "<text>"` | the project's cross-run knowledge log |
 | `rlp doctor [--warm]` | is this host runnable? one fix per failure |
@@ -445,6 +453,10 @@ rules — a credential is never printed and never placed on a command line.
   `models.json` is validated first, backed up, and replaced atomically; and a
   key is never passed on a command line, where `ps` could read it — the TUI
   hands it over a pipe (`--key-stdin`).
+- **pi's store is a source, never a target.** Reading it for `provider scan`
+  records only that a credential exists — the value never enters a report, a
+  dialog or an error; `provider import` copies entries verbatim into RLP's own
+  store under the rules above, and never writes back to pi.
 
 ---
 
@@ -485,6 +497,8 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | `RLP_RLM_DECOMPOSE=1` | the decomposition spike: the RLM loop submits its DAG as an `emit_dag(answer, tasks)` tool call instead of prose JSON (reported as `engine: rlm+emit_dag`); off by default |
 | `RLP_SKIP_CREDENTIAL_PREFLIGHT=1` | skip the per-arm credential check |
 | `RLP_NO_MIGRATE=1` | do not copy credentials out of pi's `~/.pi` on install |
+| `RLP_PI_AGENT_DIR` | where pi's own store lives for `provider scan`/`import` (`~/.pi/agent` by default) |
+| `RLP_PI_MODELS` · `RLP_PI_AUTH` | relocate RLP's two provider files individually |
 | `RLP_HOME` | where run ledgers and project memory live (`~/.rlp`) |
 | `RLP_PI_REPO` · `RLP_PI_REF` | fork source · upstream ref, overriding the pin in `scripts/rlp-fork.base` |
 | `RLP_REBUILD=1` · `RLP_ORCH_FORCE=1` | force a fork rebuild · overwrite the installed ladder |

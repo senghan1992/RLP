@@ -940,6 +940,20 @@ interface HarnessRow {
 }
 
 /**
+ * One row of `rlp provider scan` — pi's own store, read for existence only.
+ * `credential` is "present"/"absent", never a value: the wizard must not be
+ * able to print a key it did not need to see.
+ */
+interface PiProviderRow {
+	provider: string;
+	kind: string; // "custom" (pi's models.json) | "builtin" (only its auth.json)
+	baseUrl?: string;
+	models?: string[];
+	credential: string; // "present" | "absent"
+	in_rlp: boolean;
+}
+
+/**
  * The whole first run, guided, in the order the decisions actually depend on
  * one another: what this host does with a request -> which tools are already
  * here -> which endpoints exist and which has a credential -> which model
@@ -1050,6 +1064,88 @@ async function setupWizard(
 						when: `detected on this host by /setup on ${new Date().toISOString().slice(0, 10)}`,
 					}));
 					await applyOps(ctx, ops, `${ops.length} tool worker(s) added:`, names.join(", "));
+				}
+			}
+		}
+	}
+
+	// 1c. the providers pi is already connected to. RLP is pi's fork: same
+	//     store format, same credential files, same meaning for every entry —
+	//     so a key typed into pi once must not have to be typed into RLP twice.
+	//     Detection comes before the questions, exactly as with tools: pi's
+	//     store is scanned (existence only — a credential's value never enters
+	//     this TUI), anything RLP does not already have is offered as one batch,
+	//     and nothing is copied until the list is confirmed. The copy is a
+	//     verbatim write into RLP's own store; pi's files are never touched.
+	//     Unlike 1b, this runs even in direct-only mode: a session model needs
+	//     an endpoint whatever the gate decides. Invisible when the scan finds
+	//     nothing new, and when `sameDir` says RLP already reads pi's store.
+	{
+		const scan = await withWork(ctx, "rlp: looking for providers pi already has", () =>
+			engineJson(ctx, ["provider", "scan", "--json"], undefined, 30_000),
+		);
+		// A builtin row with no credential could not be imported (there is no
+		// entry anywhere), and an in_rlp row is already here — offer neither.
+		const rows = (((scan?.data.providers ?? []) as unknown) as PiProviderRow[]).filter(
+			(r) => !r.in_rlp && !(r.kind === "builtin" && r.credential !== "present"),
+		);
+		if (scan?.ok && !scan.data.sameDir && rows.length > 0) {
+			const custom = (r: PiProviderRow) =>
+				`${r.baseUrl || "endpoint"} (${(r.models ?? []).length} model(s), ${
+					r.credential === "present" ? "key already in pi" : "no key in pi"
+				})`;
+			const label = (r: PiProviderRow) =>
+				`${r.provider} — ${r.kind === "builtin" ? "pi's own catalogue (logged in)" : custom(r)}`;
+			const picked = await multiSelect(
+				ctx,
+				[
+					"◈ providers pi already has connected. Any of them come over as",
+					"  they are — endpoint, models, credential — so there is nothing",
+					"  to retype here.",
+					"",
+					"  Nothing is written until you confirm the list.",
+				].join("\n"),
+				rows.map(label),
+			);
+			const chosen = rows.filter((r) => picked.includes(label(r)));
+			if (chosen.length > 0) {
+				const names = chosen.map((r) => r.provider);
+				const detail = (r: PiProviderRow) =>
+					r.kind === "builtin"
+						? "pi's catalogue, logged in"
+						: r.credential === "present"
+							? `${(r.models ?? []).length} model(s), credential copied too`
+							: `${(r.models ?? []).length} model(s), credential absent — set its key in step 2`;
+				const accept = await ctx.ui.select(
+					[
+						`Copy ${names.length} provider(s) from pi into RLP?`,
+						"",
+						...chosen.map((r) => `  ${r.provider} — ${detail(r)}`),
+						"",
+						"  This writes RLP's own store; pi's files are never changed.",
+						"  Cancelling here writes nothing.",
+					].join("\n"),
+					[`Copy ${names.length} provider(s)`, "Cancel — write nothing"],
+				);
+				if (accept?.startsWith("Copy")) {
+					const reply = await withWork(ctx, "rlp: copying from pi's store", () =>
+						engineJson(ctx, ["provider", "import", ...names, "--json"], undefined, 60_000),
+					);
+					if (reply) {
+						const imported = ((reply.data.imported ?? []) as unknown as Array<Json>);
+						const failed = ((reply.data.failed ?? []) as unknown as string[]);
+						const lines = [
+							imported.length > 0
+								? `◈ copied into RLP: ${imported.map((i) => String(i.provider)).join(", ")} — step 2 will show them.`
+								: "",
+							...failed.map((f) => `  ✗ ${f}`),
+							imported.length > 0 && failed.length === 0 ? "  pi's files are unchanged." : "",
+							imported.length === 0 && failed.length === 0
+								? `◈ nothing was copied: ${reply.error ?? "the engine gave no report"}`
+								: "",
+						].filter(Boolean);
+						ctx.ui.notify(lines.join("\n"), imported.length > 0 && failed.length === 0 ? "info" : "warning");
+					}
 				}
 			}
 		}

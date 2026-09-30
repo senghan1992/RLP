@@ -15,7 +15,8 @@ security team; there is no bug-bounty programme.
 ### Model credentials
 
 RLP reads and writes two files, in its own agent dir (`~/.rlp/agent` by default —
-never pi's `~/.pi`):
+it never writes to pi's `~/.pi`, though it can *read* pi's store to offer what
+pi already has connected; see the rules below):
 
 | File | Holds | Permissions |
 |---|---|---|
@@ -31,7 +32,10 @@ as a second line of defence.
 On install, an existing pi credential store is **copied** (never moved) into
 `~/.rlp/agent` so an upgrade does not force you to reconnect every provider;
 `RLP_NO_MIGRATE=1` skips that, and deleting the copies afterwards changes
-nothing for pi.
+nothing for pi. The same promise holds at runtime: `rlp provider scan` reads
+pi's live store (`$RLP_PI_AGENT_DIR`, default `~/.pi/agent`) so `/setup` can
+offer it, and `rlp provider import` copies what you choose — but only into
+RLP's own store, never back into pi's.
 
 The rules the code holds to, and where:
 
@@ -48,6 +52,15 @@ The rules the code holds to, and where:
   not parse is refused rather than clobbered.
 - **`auth.json` is `0600`** on creation, on rewrite, and on the backup. A
   world-readable credential store is a leak no later `chmod` undoes.
+- **pi's store is read for existence, never for values.**
+  `providers.pi_providers()` reports `"present"`/`"absent"` per provider from
+  the shape of pi's auth entry; the value itself never enters a scan row, a
+  wizard dialog, an import report or an error message. `providers.import_from_pi()`
+  copies an entry verbatim (as parsed data — no text ever passes through a
+  prompt, and unknown fields survive because the harness is pi's fork and the
+  entry means the same thing there), refuses a provider RLP already has rather
+  than merging over it, and is checked by the offline suite and by
+  `scripts/check-provider.mjs` against a sandboxed fake pi store.
 
 ### What a request can cause
 

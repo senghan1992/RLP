@@ -10,6 +10,24 @@ offline suite fails if they drift.
 
 ### Added
 
+- **pi's own logged-in providers are now a source, not a retype.** RLP is
+  pi's fork, so a key typed into pi once used to have to be typed into RLP
+  again. `/setup` now offers them as one batch before the endpoint questions:
+  `rlp provider scan` reads pi's store (`$RLP_PI_AGENT_DIR`, default
+  `~/.pi/agent`) for *existence only* — a row says `present`/`absent`, and no
+  credential value ever reaches a report, a dialog or an error — and
+  `rlp provider import <id…>` copies the chosen entries verbatim into RLP's
+  own store (validated, backed up, atomic, `0600`; unknown fields and OAuth
+  refresh entries survive because the harness is pi and the entry means the
+  same thing there). The copy is one-way — pi's files are never touched — a
+  provider RLP already has is a refusal rather than a merge, `sameDir` hosts
+  are told there is nothing to import, and the step is invisible when the
+  scan finds nothing new. `scripts/check-provider.mjs` now builds its session
+  from this checkout's extensions (a wizard check watching a stale installed
+  copy cannot see the step under review) against a sandboxed fake pi store,
+  asserting both the cancel path (nothing written) and the accept path
+  (verbatim, 0600, one-way, nothing echoed).
+
 - **A finished wave can now be digested into a handoff.** The honest input to
   a downstream worker is what the previous wave did — and pasting the raw
   report bundle into the prompt is the seed of context rot. `rlp digest

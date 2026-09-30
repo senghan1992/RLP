@@ -2612,6 +2612,7 @@ def main() -> None:
         tests_providers.test_providers_store,
         tests_providers.test_providers_probe,
         tests_providers.test_providers_surface,
+        tests_providers.test_providers_pi_import,
     ):
         print(f"— {test.__name__}")
         test()

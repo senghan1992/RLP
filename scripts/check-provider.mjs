@@ -23,44 +23,90 @@
  *   5. `/direct on` and `/direct off` move the ladder's gate, and `/direct`
  *      reports which mode is in effect and what put it there;
  *   6. `/setup` runs the whole wizard with every dialog cancelled and reaches its
- *      summary — and writes nothing, because nothing was chosen.
+ *      summary — and writes nothing, because nothing was chosen;
+ *   7. `/setup` offers the providers a sandboxed fake pi store has connected:
+ *      cancelling that offer writes nothing, accepting it copies the endpoints
+ *      and credentials into RLP's store verbatim, pi's own files byte-for-byte
+ *      unchanged, and no credential value ever reaches the session.
  *
  * It talks to no model and needs no credential: the endpoint it attaches is
- * `http://127.0.0.1:9` (nothing listens there), and all three pieces of state —
- * models.json, auth.json and the ladder — are redirected into a temporary
- * directory, so a run can never touch the user's real credentials or reset their
- * model choices. The ladder *is* written here, because `/direct` is a write path
- * and asserting on a copy is the only way to prove it without taking somebody's
- * configuration away from them.
+ * `http://127.0.0.1:9` (nothing listens there), and all four pieces of state —
+ * models.json, auth.json, the ladder and pi's own store — are redirected into a
+ * temporary directory, so a run can never touch the user's real credentials or
+ * reset their model choices. The pi store in particular: `provider scan` would
+ * otherwise read the developer's real `~/.pi`, and a check that offers the
+ * user's live credentials on screen is not a check. The ladder *is* written
+ * here, because `/direct` is a write path and asserting on a copy is the only
+ * way to prove it without taking somebody's configuration away from them.
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const binary = process.argv[2] || "rlp";
-// RLP's own agent dir, resolved the same way `paths.py`, `rpi-bin` and the
-// extensions resolve it. Defaulting to pi's `~/.pi/agent` here meant the
-// "cancelling wrote nothing to the ladder" assertion was hashing a file that
-// does not exist — a check that could not fail is not a check.
-const AGENT_DIR =
-	process.env.RLP_CODING_AGENT_DIR || process.env.RPI_CODING_AGENT_DIR || join(homedir(), ".rlp", "agent");
 const STEP_TIMEOUT_MS = 120_000;
 const SANDBOX = mkdtempSync(join(tmpdir(), "rlp-provider-check-"));
+
+// The session must run *this checkout's* extensions, not whatever the last
+// install dropped in ~/.rlp/agent: a wizard check that quietly exercises a
+// stale copy cannot see the step under review — it just watches the old wizard
+// pass. So build a throwaway agent dir from the checkout, exactly as
+// scripts/check-first-ask does, and point the session (and the engine's
+// default paths) at it. `RLP_NO_MIGRATE=1` keeps the developer's real ~/.pi
+// out of the sandbox; the credential stores start empty and stay empty unless
+// a wizard step writes them.
+const REPO = resolve(import.meta.dirname, "..");
+const AGENT = join(SANDBOX, "agent");
+execFileSync("sh", [join(REPO, "scripts/sync-agent-dir"), REPO], {
+	env: { ...process.env, RLP_CODING_AGENT_DIR: AGENT, RLP_NO_MIGRATE: "1", RLP_QUIET: "1" },
+});
+for (const store of ["models.json", "auth.json"]) {
+	writeFileSync(join(AGENT, store), "{}\n");
+	chmodSync(join(AGENT, store), store === "auth.json" ? 0o600 : 0o644);
+}
 const MODELS = join(SANDBOX, "models.json");
 const AUTH = join(SANDBOX, "auth.json");
 // The ladder is copied, not read in place: `/direct` writes it, and a check that
 // exercised a write path against the user's own file would leave them with
 // someone else's mode afterwards. `RLP_ORCHESTRATION` is the engine's own
-// override, so this is the same file every part of the session reads.
+// override, so this is the same file every part of the session reads; failing
+// that, the ladder this checkout ships (synced into the throwaway agent dir
+// above) — the wizard is judged as configured by the source under review, not
+// by whatever the host's install last touched.
 const LADDER = join(SANDBOX, "orchestration.json");
 const REAL_LADDER = process.env.RLP_ORCHESTRATION
 	? resolve(process.env.RLP_ORCHESTRATION)
-	: join(AGENT_DIR, "orchestration.json");
+	: join(AGENT, "orchestration.json");
 copyFileSync(REAL_LADDER, LADDER);
 const PROVIDER = "rlp-check-demo";
 const SECRET = "sk-check-secret-value";
+// pi's own store, faked. `provider scan` reads `$RLP_PI_AGENT_DIR` (else
+// `~/.pi/agent`); pointing it here means the wizard's pi step is exercised
+// against this file, not the developer's live logins. One custom endpoint with
+// a key and one oauth credential for a builtin cover the two row kinds.
+const PI = join(SANDBOX, "pi");
+const PI_CUSTOM = "check-pi-vllm";
+const PI_BUILTIN = "anthropic";
+const PI_SECRET = "sk-pi-store-secret";
+const PI_OAUTH = "pi-oauth-access-token";
+mkdirSync(PI);
+writeFileSync(
+	join(PI, "models.json"),
+	JSON.stringify({
+		providers: {
+			[PI_CUSTOM]: {
+				name: PI_CUSTOM,
+				baseUrl: "http://127.0.0.1:9/v1",
+				api: "openai-completions",
+				models: [{ id: "pi-model-a" }, { id: "pi-model-b" }],
+				piOnlyField: { preserved: true },
+			},
+		},
+	}),
+);
+writeFileSync(join(PI, "auth.json"), JSON.stringify({ [PI_CUSTOM]: { type: "key", key: PI_SECRET }, [PI_BUILTIN]: { type: "oauth", access: PI_OAUTH, refresh: "keep-me" } }));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -71,7 +117,14 @@ function digest(path) {
 
 const child = spawn(binary, ["--mode", "rpc", "--no-session"], {
 	stdio: ["pipe", "pipe", "pipe"],
-	env: { ...process.env, RLP_PI_MODELS: MODELS, RLP_PI_AUTH: AUTH, RLP_ORCHESTRATION: LADDER },
+	env: {
+		...process.env,
+		RLP_CODING_AGENT_DIR: AGENT,
+		RLP_PI_MODELS: MODELS,
+		RLP_PI_AUTH: AUTH,
+		RLP_ORCHESTRATION: LADDER,
+		RLP_PI_AGENT_DIR: PI,
+	},
 });
 let buffer = "";
 let onNotify = null;
@@ -112,7 +165,10 @@ function answer(id, payload) {
 /**
  * Type a slash command and wait for a notify that satisfies `expect`.
  * `dialog` answers every dialog that appears while the step runs; the default
- * is to cancel, which is the path a hesitant user takes.
+ * is to cancel, which is the path a hesitant user takes. It also receives what
+ * the step has seen so far — several wizard steps share one dialog title
+ * ("Select (empty = none)" is every multiSelect), so the notify that preceded
+ * a question is sometimes the only way to know which step is asking.
  */
 async function step(label, prompt, expect, dialog = () => ({ cancelled: true })) {
 	const notifies = [];
@@ -120,7 +176,7 @@ async function step(label, prompt, expect, dialog = () => ({ cancelled: true }))
 	onNotify = (message) => notifies.push(message);
 	onDialog = (request) => {
 		dialogs.push(`${request.method}: ${request.title ?? ""}`);
-		answer(request.id, dialog(request) ?? { cancelled: true });
+		answer(request.id, dialog(request, { dialogs, notifies }) ?? { cancelled: true });
 	};
 	child.stdin.write(`${JSON.stringify({ id: nextId++, type: "prompt", message: prompt })}\n`);
 
@@ -312,6 +368,8 @@ try {
 	// after the mode round trip above, because that round trip is allowed to
 	// write and this one is not.
 	const before = digest(LADDER);
+	const storesBefore = [digest(MODELS), digest(AUTH)];
+	const piBefore = [digest(join(PI, "models.json")), digest(join(PI, "auth.json"))];
 	const setup = await step(
 		"/setup (all dialogs cancelled)",
 		"/setup",
@@ -361,7 +419,79 @@ try {
 		digest(LADDER) === before,
 		"cancelling every step wrote nothing to the ladder",
 	);
+	// The pi step is detection-before-asking, and its input is one of the
+	// dialogs the blanket cancel answers — so what must show here is that it
+	// was *offered* (the multiSelect prints its list as a notify) and that
+	// the cancel wrote nothing to either store.
+	record(
+		asked.includes("providers pi already has connected"),
+		"the wizard offers what pi already has connected, before the endpoint questions",
+	);
+	record(
+		digest(MODELS) === storesBefore[0] && digest(AUTH) === storesBefore[1],
+		"cancelling the pi offer wrote nothing to RLP's stores",
+	);
 	console.log(`  ok  /setup walks all ${setup.dialogs.length} steps and writes nothing when cancelled`);
+
+	// --- 9. the pi offer accepted: the copy. The same wizard, but this
+	// handler answers the pi step's batch with "all" and its confirmation with
+	// the yes option, cancelling everything else. The expected notify is the
+	// import report itself — after it the wizard stalls harmlessly on an
+	// unanswered step (nothing answers it, and the child dies next).
+	let answeredPi = false;
+	const ladderBeforeCopy = digest(LADDER);
+	const accept = await step(
+		"/setup (pi's providers, accepted)",
+		"/setup",
+		(m) => m.includes("copied into RLP"),
+		(request, seen) => {
+			if (request.method === "input" && (request.title ?? "").startsWith("Select (empty")) {
+				// Two wizard steps share this input title (tools, then
+				// providers); only the one preceded by the pi notify is
+				// answered, and only once — a later same-titled input
+				// (the arms step) must not get "all" meant for pi.
+				if (answeredPi || !seen.notifies.some((m) => m.includes("providers pi already has connected"))) {
+					return { cancelled: true };
+				}
+				answeredPi = true;
+				return { value: "all" };
+			}
+			if (request.method === "select" && (request.title ?? "").startsWith("Copy ")) {
+				const yes = (request.options ?? []).find((o) => o.startsWith("Copy"));
+				return yes ? { value: yes } : { cancelled: true };
+			}
+			return { cancelled: true };
+		},
+	);
+	record(
+		accept.matched.includes(PI_CUSTOM) && accept.matched.includes(PI_BUILTIN),
+		`the copy report names both providers: ${accept.matched.split("\n")[0]}`,
+	);
+	const piDoc = JSON.parse(readFileSync(join(PI, "models.json"), "utf8"));
+	const rlpModels = existsSync(MODELS) ? JSON.parse(readFileSync(MODELS, "utf8")) : {};
+	record(
+		JSON.stringify(rlpModels?.providers?.[PI_CUSTOM]) === JSON.stringify(piDoc.providers[PI_CUSTOM]),
+		"the endpoint crossed over verbatim — pi's unknown fields and all",
+	);
+	record(!rlpModels?.providers?.[PI_BUILTIN], "a builtin credential did not fabricate a models.json entry");
+	const rlpAuth = existsSync(AUTH) ? JSON.parse(readFileSync(AUTH, "utf8")) : {};
+	record(rlpAuth?.[PI_CUSTOM]?.key === PI_SECRET, "the custom key crossed into RLP's auth.json");
+	record(
+		rlpAuth?.[PI_BUILTIN]?.access === PI_OAUTH && rlpAuth?.[PI_BUILTIN]?.refresh === "keep-me",
+		"the oauth entry crossed with its refresh fields intact",
+	);
+	record((statSync(AUTH).mode & 0o777) === 0o600, "the copied credential store is 0600");
+	record(
+		digest(join(PI, "models.json")) === piBefore[0] && digest(join(PI, "auth.json")) === piBefore[1],
+		"pi's own files were never touched — the copy is one-way",
+	);
+	record(digest(LADDER) === ladderBeforeCopy, "copying providers wrote nothing to the ladder");
+	const sessionText = [...accept.notifies, ...accept.dialogs].join(" | ");
+	record(
+		!sessionText.includes(PI_SECRET) && !sessionText.includes(PI_OAUTH) && !sessionText.includes("sk-"),
+		"no credential value reached the session",
+	);
+	console.log("  ok  /setup copies pi's providers into RLP verbatim, 0600, one-way, nothing echoed");
 
 	child.kill("SIGTERM");
 } catch (e) {

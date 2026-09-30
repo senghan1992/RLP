@@ -53,19 +53,25 @@ def with_store(fn):
 
     Both stores are redirected to a temporary directory and the transport is
     restored afterwards, so a test here can never touch the developer's real
-    credentials or reach the network.
+    credentials or reach the network. `RLP_PI_AGENT_DIR` — pi's own store,
+    which `provider scan` reads — is pointed at a path that does not exist,
+    for the same reason: no test accidentally reads a real `~/.pi`.
     """
     from . import providers
 
     with tempfile.TemporaryDirectory() as tmp:
         models = Path(tmp) / "models.json"
         auth = Path(tmp) / "auth.json"
-        prev = {k: os.environ.get(k) for k in ("RLP_PI_MODELS", "RLP_PI_AUTH", "RLP_ORCHESTRATION")}
+        prev = {
+            k: os.environ.get(k)
+            for k in ("RLP_PI_MODELS", "RLP_PI_AUTH", "RLP_ORCHESTRATION", "RLP_PI_AGENT_DIR")
+        }
         os.environ["RLP_PI_MODELS"] = str(models)
         os.environ["RLP_PI_AUTH"] = str(auth)
         # No ladder on disk: `list_providers` then reports no ladder arms, which
         # is the honest state for a fresh install and keeps this file hermetic.
         os.environ["RLP_ORCHESTRATION"] = str(Path(tmp) / "absent.json")
+        os.environ["RLP_PI_AGENT_DIR"] = str(Path(tmp) / "pi-none")
         real_http = providers._http
         try:
             return fn(providers, models, auth)
@@ -370,9 +376,206 @@ def test_providers_surface() -> None:
     return with_store(body)
 
 
+def test_providers_pi_import() -> None:
+    """`provider scan`/`import`: pi's own store, read for existence, copied verbatim."""
+    pi_secret = "sk-pi-secret-value"
+    oauth_token = "oauth-access-token-never-printed"
+
+    def body(providers, models, auth):
+        tmp = models.parent
+
+        # --- an absent pi dir is an empty scan, not an error (`with_store`
+        #     points RLP_PI_AGENT_DIR at a path that does not exist)
+        empty = providers.pi_providers()
+        check(empty["sameDir"] is False and empty["providers"] == [], f"absent pi dir scans empty: {empty}")
+
+        pi = tmp / "pi"
+        pi.mkdir()
+        os.environ["RLP_PI_AGENT_DIR"] = str(pi)
+        pi_models = {
+            "providers": {
+                "vllm-local": {
+                    "name": "vllm-local",
+                    "baseUrl": "http://127.0.0.1:8000/v1",
+                    "api": "openai-completions",
+                    "models": [{"id": "llama-3"}, {"id": "qwq", "name": "QwQ"}],
+                    "piOnlyField": {"shape": "this module does not model it"},
+                },
+                "no-key-ep": {
+                    "baseUrl": "http://127.0.0.1:9999/v1",
+                    "api": "openai-completions",
+                    "models": [{"id": "solo"}],
+                },
+                "already": {
+                    "baseUrl": "http://127.0.0.1:1/v1",
+                    "api": "openai-completions",
+                    "models": [{"id": "dup"}],
+                },
+            },
+        }
+        pi_auth = {
+            "vllm-local": {"type": "key", "key": pi_secret},
+            "anthropic": {"type": "oauth", "access": oauth_token, "refresh": "r-keep-me"},
+            "already": {"type": "key", "key": "irrelevant-value"},
+            "mystery": {"type": "none"},
+        }
+        (pi / "models.json").write_text(json.dumps(pi_models))
+        (pi / "auth.json").write_text(json.dumps(pi_auth))
+        # RLP already has `already`: a migrated install must not be offered to
+        # re-migrate itself.
+        providers.add_provider("already", "http://127.0.0.1:1/v1", ["dup"])
+
+        # --- scan: rows, kinds, presence-only credentials, nothing leaked
+        scan = providers.pi_providers()
+        rows = {r["provider"]: r for r in scan["providers"]}
+        check(set(rows) == {"vllm-local", "no-key-ep", "already", "anthropic", "mystery"}, f"scan rows: {sorted(rows)}")
+        check(
+            rows["vllm-local"]["kind"] == "custom"
+            and rows["vllm-local"]["credential"] == "present"
+            and rows["vllm-local"]["models"] == ["llama-3", "qwq"]
+            and rows["vllm-local"]["baseUrl"] == "http://127.0.0.1:8000/v1",
+            f"custom row: {rows['vllm-local']}",
+        )
+        check(rows["no-key-ep"]["credential"] == "absent", "a custom endpoint without an auth entry says absent")
+        check(rows["already"]["in_rlp"] is True, "an installed provider says in_rlp")
+        check(
+            rows["anthropic"]["kind"] == "builtin"
+            and rows["anthropic"]["credential"] == "present"
+            and rows["anthropic"]["models"] == [],
+            f"builtin row: {rows['anthropic']}",
+        )
+        check(rows["mystery"]["credential"] == "absent", "an auth entry with no key and no access is absent")
+        dump = json.dumps(scan)
+        check(pi_secret not in dump and oauth_token not in dump, "scan reports existence, never values")
+
+        # --- import a custom provider: verbatim copy, 0600, backups per the
+        #     module's own rules (models.json exists now, auth.json does not)
+        rec = providers.import_from_pi("vllm-local")
+        check(
+            rec["kind"] == "custom" and rec["models"] == ["llama-3", "qwq"] and rec["credential"] == "copied",
+            f"import result: {rec}",
+        )
+        check(rec["modelsBackup"] is not None, "editing an existing models.json backs it up first")
+        check(rec["authBackup"] is None, "a first auth.json write has no backup to make")
+        written = json.loads(models.read_text())["providers"]["vllm-local"]
+        check(written == pi_models["providers"]["vllm-local"], "the entry is copied verbatim — unknown keys and all")
+        copied_auth = json.loads(auth.read_text())["vllm-local"]
+        check(copied_auth["key"] == pi_secret, "the credential crossed over into RLP's store")
+        check(stat.S_IMODE(auth.stat().st_mode) == 0o600, "the copied store is still 0600")
+        check(pi_secret not in models.read_text(), "no secret lands in models.json")
+
+        # --- import a builtin: the credential crosses (oauth fields and all),
+        #     no models.json entry is fabricated for it
+        rec = providers.import_from_pi("anthropic")
+        check(rec["kind"] == "builtin" and rec["models"] == [] and rec["credential"] == "copied", f"builtin import: {rec}")
+        check("anthropic" not in json.loads(models.read_text()).get("providers", {}), "a builtin adds no endpoint entry")
+        check(json.loads(auth.read_text())["anthropic"] == pi_auth["anthropic"], "refresh fields survive the copy verbatim")
+
+        # --- import a custom with no credential: the endpoint comes, no auth
+        #     entry is invented, and the result says so honestly
+        rec = providers.import_from_pi("no-key-ep")
+        check(rec["credential"] == "absent" and rec["kind"] == "custom", f"keyless import: {rec}")
+        check("no-key-ep" not in json.loads(auth.read_text()), "a credential was not invented")
+
+        # --- refusals: already-present (not a merge), unimportable row, bad id
+        snapshots = (models.read_text(), auth.read_text())
+        for pid, needle in (
+            ("already", "already in RLP"),
+            ("mystery", "no provider"),
+            ("bogus id", "provider id"),
+        ):
+            try:
+                providers.import_from_pi(pid)
+                check(False, f"import of {pid!r} was accepted")
+            except ValueError as e:
+                check(needle in str(e), f"import of {pid!r} says why ({needle}): {e}")
+        check((models.read_text(), auth.read_text()) == snapshots, "refused imports wrote nothing")
+
+        # --- pi's store is never the write target: byte-for-byte unchanged
+        check((pi / "models.json").read_text() == json.dumps(pi_models), "pi's models.json was not touched")
+        check((pi / "auth.json").read_text() == json.dumps(pi_auth), "pi's auth.json was not touched")
+
+        # --- re-scan: everything imported now says in_rlp — a second offer of
+        #     the same store would be the retype this feature exists to avoid
+        rows = {r["provider"]: r for r in providers.pi_providers()["providers"]}
+        check(
+            all(rows[pid]["in_rlp"] for pid in ("vllm-local", "anthropic", "no-key-ep", "already")),
+            f"re-scan after import: {sorted(rows)}",
+        )
+
+        # --- sameDir: when RLP's agent dir *is* pi's dir, there is nothing to
+        #     scan and nothing to import — scan-then-import would copy a file
+        #     onto itself
+        prev_agent = os.environ.get("RLP_CODING_AGENT_DIR")
+        os.environ["RLP_CODING_AGENT_DIR"] = str(pi)
+        try:
+            same = providers.pi_providers()
+            check(same["sameDir"] is True and same["providers"] == [], f"sameDir scan: {same}")
+            try:
+                providers.import_from_pi("vllm-local")
+                check(False, "import ran while the stores were the same directory")
+            except ValueError as e:
+                check("same directory" in str(e), f"sameDir import refuses: {e}")
+        finally:
+            if prev_agent is None:
+                os.environ.pop("RLP_CODING_AGENT_DIR", None)
+            else:
+                os.environ["RLP_CODING_AGENT_DIR"] = prev_agent
+
+        # --- the CLI surface: scan renders badges and the import hint; a batch
+        #     import reports both lists, and a partial batch is not dressed up
+        import contextlib
+        import io
+
+        from . import cli
+
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            code = cli.main(["provider", "scan"])
+        text = sink.getvalue()
+        check(code == 0, f"provider scan exits 0 (got {code})")
+        check("● vllm-local" in text and "○ no-key-ep" in text, f"scan renders badges: {text}")
+        check("(already in RLP)" in text, "scan marks what is already here")
+        check("import: rlp provider import" in text, "scan names the follow-up command")
+        check(pi_secret not in text and oauth_token not in text, "the rendered scan leaks nothing")
+
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            code = cli.main(["provider", "scan", "--json"])
+        payload = json.loads(sink.getvalue())
+        check(code == 0 and payload["ok"] is True and isinstance(payload["result"]["providers"], list),
+              f"scan --json is an envelope: {list(payload)}")
+
+        # a fresh pi row for the partial-batch case
+        doc = json.loads((pi / "models.json").read_text())
+        doc["providers"]["dsg"] = {
+            "baseUrl": "https://api.dsg.example/v1",
+            "api": "openai-completions",
+            "models": [{"id": "dsg1"}],
+        }
+        (pi / "models.json").write_text(json.dumps(doc))
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            code = cli.main(["provider", "import", "dsg", "bogus id", "--json"])
+        payload = json.loads(sink.getvalue())
+        check(code == 1 and payload["ok"] is False, f"a partial batch exits non-zero (got {code})")
+        check(
+            [r["provider"] for r in payload["result"]["imported"]] == ["dsg"] and len(payload["result"]["failed"]) == 1,
+            f"the honest report is both lists: {payload['result']}",
+        )
+
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            code = cli.main(["provider", "import", "already"])
+        check(code == 1 and "✗" in sink.getvalue(), f"an all-failed import exits 1 and says ✗: {sink.getvalue()[:160]}")
+        check(pi_secret not in sink.getvalue(), "even the failure text holds no secret")
+
+    return with_store(body)
+
+
 def main() -> None:
     """Run only this file's tests (the combined runner lives in rlp_svc.tests)."""
-    for test in (test_providers_store, test_providers_probe, test_providers_surface):
+    for test in (test_providers_store, test_providers_probe, test_providers_surface, test_providers_pi_import):
         print(f"— {test.__name__}")
         test()
     print()
