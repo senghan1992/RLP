@@ -332,4 +332,14 @@ def render(report: dict | None = None) -> str:
         lines.append("")
         lines.append("Steps after the next one are not failures — they are simply not reached yet.")
         lines.append("`rlp doctor` explains any capability that is broken rather than unstarted.")
+    # A derived glance at what else this host could work with. Not a milestone:
+    # nothing about the ladder or onboarding *records* it, and a broken or slow
+    # catalog read must never hide the report, so it is wrapped in its absence.
+    try:
+        from . import harnesses
+
+        lines.append("")
+        lines.append(f"  harnesses {harnesses.one_line_summary(harnesses.scan_result(versions=False))}")
+    except Exception:
+        pass
     return "\n".join(lines)

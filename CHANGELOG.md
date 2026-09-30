@@ -10,6 +10,24 @@ offline suite fails if they drift.
 
 ### Added
 
+- **RLP now knows what other coding tools are on this host.** A new catalog
+  (`rlp_svc/harnesses.py`) is the single source for the coding CLIs RLP can run
+  workers in — `omp`, `claude`, `jcode`, `muse` beside the bundled `pi` — with
+  each one's headless invocation as an argv *template*, where its credential
+  lives (paths and env-var *names*, never values), and how to log in. `rlp
+  harness scan` asks the host; `rlp harness list` prints the catalog. The
+  drivers ride route records as data, so the brain extension assembles and
+  spawns without knowing any tool by name — adding the next harness is one
+  entry in one file. Workers still dispatch only to `pi` until the multi-harness
+  stages land; this is the ground truth they will be planned against. `rlp
+  doctor` gains a warn-only harness group (a tool present but not logged in
+  names its own login command; absent tools are not news and get no line, and
+  `bin:tmux` finally says whether workers can be watched), `rlp progress` ends
+  with a one-line glance, and the resident engine answers the `harness` op.
+  `RLP_HARNESS_SCAN=0` turns the whole feature off — CI and offline hosts pay no
+  spawn for a guess — and the offline suite proves the catalog answers correctly
+  on a host where nothing is installed.
+
 - **A fresh install asks.** Starting `rlp` in a terminal on a host with no
   credential and no model arms now runs the guided setup by itself — the mode,
   then the endpoints and their keys, then the model RLP works on, then the

@@ -10,6 +10,7 @@ transport the orchestrator uses).
     rlp doctor --warm
     rlp provider list --json          # endpoints, credentials, ladder arms
     rlp provider probe my-provider    # one real round trip; classifies the failure
+    rlp harness scan     # which coding CLIs can work here, and can they log in?
     rlp serve            # MCP stdio; what config.yaml launches
 
 Contract for scripting: exit 0 on a valid result, 1 when the envelope is
@@ -263,6 +264,21 @@ def _cmd_roster(args: argparse.Namespace) -> int:
         for w in envelope["result"]["excluded_workers"]:
             lines.append(f"  {w['id']}: {w['reason']}")
     return _emit(envelope, False, "\n".join(lines))
+
+
+def _cmd_harness(args: argparse.Namespace) -> int:
+    from . import harnesses
+
+    result = harnesses.list_result() if args.action == "list" else harnesses.scan_result()
+    # Exit 0 either way: "here is what this host can run, and here is what it
+    # found" is an answer, not a failure — the same rule `progress` keeps.
+    if args.json:
+        return _emit({"ok": True, "result": result}, True)
+    lines = [harnesses.render(result)]
+    if not result.get("disabled") and args.action == "scan":
+        lines.append("")
+        lines.append(f"  {harnesses.one_line_summary(result)}")
+    return _emit({"ok": True, "result": result}, False, "\n".join(lines))
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
@@ -821,6 +837,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sub.add_parser("roster", help="print the router roster derived from the ladder").add_argument("--json", action="store_true")
 
+    # `rlp harness` — which coding CLIs this host could run a worker in.
+    # `scan` also asks whether each can log in and what version it is; `list`
+    # prints the catalog and a PATH lookup only, so it is spawn-free. What is
+    # absent is never a failure: "nothing installed" is a complete answer.
+    sp = sub.add_parser("harness", help="the coding CLIs usable as workers here: scan | list")
+    sp.add_argument("action", nargs="?", default="scan", choices=["scan", "list"])
+    sp.add_argument("--json", action="store_true")
+
     sp = sub.add_parser("config", help="edit the ladder: validate, back up, write atomically")
     sp.add_argument("ops", help='a JSON array of ops, e.g. \'[{"op":"set_brain","model":"p/m"}]\'')
     sp.add_argument("--dry-run", action="store_true", help="validate and report, write nothing")
@@ -879,6 +903,7 @@ def main(argv: list[str] | None = None) -> int:
         "ladder": _cmd_ladder,
         "mode": _cmd_mode,
         "roster": _cmd_roster,
+        "harness": _cmd_harness,
         "provider": _cmd_provider,
         "config": _cmd_config,
         "replan": _cmd_replan,

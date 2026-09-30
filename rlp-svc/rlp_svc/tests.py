@@ -326,6 +326,87 @@ def test_plan_degrade_paths() -> None:
             os.environ.pop("RLP_ORCHESTRATION", None)
 
 
+def test_harness_catalog() -> None:
+    """The catalog must answer every question on a host with *none* of the tools.
+
+    CI is that host. The injectable seams — `which`/`env`/`home`/`probe` — are
+    the test surface: no global stubbing, no real PATH, and nothing is ever
+    spawned that the test did not fabricate.
+    """
+    from . import doctor
+    from . import harnesses as h
+
+    on_path = {"claude": "/usr/local/bin/claude", "jcode": "/usr/local/bin/jcode", "tmux": "/usr/bin/tmux"}
+    spawns: list[str] = []
+
+    def which(name: str):
+        return on_path.get(name)
+
+    def probe(binary: str, args: list[str]):
+        spawns.append(binary)
+        return "9.9.9-test"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        rows = {r["harness"]: r for r in h.scan_result(which=which, env={"ANTHROPIC_API_KEY": "x"}, home=home, probe=probe)["harnesses"]}
+        check(rows["claude"]["auth"] == "authenticated", "a named credential env authenticates claude without a file")
+        check(not rows["muse"]["present"], "an uninstalled tool is simply not present")
+        check(rows["pi"]["auth"] == "internal", "pi's credentials are RLP's own; the catalog does not second-guess them")
+        check(sorted(spawns) == sorted(["/usr/local/bin/claude", "/usr/local/bin/jcode", "/usr/bin/tmux"]), "scan probes versions for PATH hits only — pi's rpi-bin is not spawned")
+        spawns.clear()
+        h.scan_result(which=which, env={}, home=home, probe=probe, versions=False)
+        check(not spawns, "versions=False pays no spawn, so a hot path can call scan")
+
+        # The same binaries with no env credential and no marker files: they are
+        # installed, and they cannot log in — the warn case, with a fix attached.
+        rows = {r["harness"]: r for r in h.scan_result(which=which, env={}, home=home, probe=lambda *_a: None)["harnesses"]}
+        check(rows["jcode"]["auth"] == "needs-login" and rows["jcode"]["hint"], "a binary with no marker is needs-login, and names its fix")
+        check(rows["claude"]["auth"] == "needs-login", "…as is one whose only credential was the env var just removed")
+
+        (home / ".jcode").mkdir()
+        (home / ".jcode" / "auth.json").write_text("{}")
+        rows = {r["harness"]: r for r in h.scan_result(which=which, env={}, home=home, probe=lambda *_a: None)["harnesses"]}
+        check(rows["jcode"]["auth"] == "authenticated", "jcode's own auth marker counts as logged in")
+
+        disabled = h.scan_result(which=which, env={"RLP_HARNESS_SCAN": "0"}, home=home, probe=probe)
+        check(disabled["disabled"] and not disabled["harnesses"] and not spawns, "RLP_HARNESS_SCAN=0 probes nothing and claims nothing")
+
+    d = h.driver_for("claude", "sonnet")
+    check(d and d["argv"][0] == "-p" and "--model" in d["argv"], "claude's driver is headless -p with --model")
+    check(d and d["argv"].index("--model") < d["argv"].index("{prompt}"), "flags land before the positional prompt, never after it")
+    check(d and d["promptVia"] == "argv", "claude takes the prompt as an argument")
+    check(h.driver_for("claude", "default") and "--model" not in h.driver_for("claude", "default")["argv"], "<harness>/default drops the model flag entirely")
+    m = h.driver_for("muse", "m1")
+    check(m and m["promptVia"] == "file" and "{prompt_file}" in m["argv"], "muse exec reads the prompt from a file")
+    check(h.driver_for("pi", "anything") is None, "pi keeps its own dispatch path — the catalog does not template it")
+    check(h.driver_for("codex", "x") is None, "a harness with no catalog entry has no driver (the caller says so, with a fix)")
+    check(h.native_model("claude/sonnet", "claude") == "sonnet", "the arm grammar survives the round trip")
+    check(h.native_model("claude/default", "claude") is None, "…and 'default' means no native id")
+    check(h.native_model("anthropic/opus", "claude") is None, "an arm from another vendor is not this harness's model name")
+    rb = h.resolve_binary("pi")
+    check(rb is None or rb.endswith("rpi-bin"), "pi resolves through the checkout's rpi-bin, never PATH")
+    check(h.resolve_binary("claude", which) == "/usr/local/bin/claude", "a template harness resolves on PATH")
+    check(h.resolve_binary("muse", which) is None, "and is honestly absent when it is not there")
+    check(h.resolve_binary("codex", which) is None, "an unknown harness resolves to nothing, not to a guess")
+
+    # The doctor group: warn-only, and every warn actionable — check-first-run's
+    # rule, enforced here where the fixtures live instead of only on fresh hosts.
+    with tempfile.TemporaryDirectory() as empty_home:
+        scan = h.scan_result(which=which, env={}, home=Path(empty_home), probe=lambda *_a: None)
+    lines = doctor._harnesses(scan=scan)
+    names = [c["name"] for c in lines]
+    check(all(c["status"] != "fail" for c in lines), "the harness group never fails the report")
+    check("harness:muse" not in names and "harness:pi" not in names, "absent tools and internal pi get no line at all")
+    check("harness:claude" in names, "a present tool that cannot log in does")
+    check(all(c["hint"] for c in lines if c["status"] == "warn"), "every warn carries a fix")
+    check("bin:tmux" in names and next(c for c in lines if c["name"] == "bin:tmux")["status"] == "ok", "tmux is reported")
+    bare = doctor._harnesses(scan=h.scan_result(which=lambda _n: None, env={}, home=Path(empty_home), probe=lambda *_a: None))
+    check(not [c for c in bare if c["name"].startswith("harness:")], "a host with no CLIs gets no harness lines")
+    check([c for c in bare if c["name"] == "bin:tmux"][0]["status"] == "warn", "…and no tmux is a warn with a fix, not a fail")
+    off = doctor._harnesses(scan={"disabled": True, "harnesses": [], "tmux": {}})
+    check(len(off) == 1 and off[0]["status"] == "ok", "scan off is one honest ok line")
+
+
 def test_availability() -> None:
     from . import orchestration as orch
 
@@ -551,7 +632,7 @@ def test_engine_covers_the_cli() -> None:
     from . import engine
 
     ops = set(engine._ops())
-    for op in ("plan", "triage", "decompose", "ladder", "route", "llm_route", "warm", "config", "replan", "verify", "memory", "remember"):
+    for op in ("plan", "triage", "decompose", "ladder", "route", "llm_route", "warm", "config", "replan", "verify", "memory", "remember", "harness"):
         check(op in ops, f"engine op {op!r} exists (agents call it by name)")
 
     # and the ops the extension maps to a CLI invocation must have one
@@ -563,7 +644,7 @@ def test_cli_surface() -> None:
     from .cli import EXIT_USAGE, build_parser
 
     parser = build_parser()
-    expected = {"triage", "decompose", "route", "llm-route", "ladder", "mode", "roster", "provider", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "progress", "serve", "version"}
+    expected = {"triage", "decompose", "route", "llm-route", "ladder", "mode", "roster", "provider", "config", "replan", "verify", "memory", "remember", "plan", "doctor", "progress", "serve", "version", "harness"}
     actions = [a for a in parser._actions if hasattr(a, "choices") and isinstance(a.choices, dict)]
     check(bool(actions), "the parser declares subcommands")
     if actions:
@@ -1890,6 +1971,7 @@ def main() -> None:
         test_plan_reads_memory,
         test_engine_protocol,
         test_engine_covers_the_cli,
+        test_harness_catalog,
         test_availability,
         test_plan_excludes_unavailable,
         test_cli_surface,

@@ -591,6 +591,57 @@ def _dispatch() -> list[dict]:
     return out
 
 
+def _harnesses(*, scan: dict | None = None) -> list[dict]:
+    """What other coding CLIs could run workers here? Warn-only, never a failure.
+
+    An absent tool is not news — nobody installs `muse` because `rlp doctor`
+    said so — so absent harnesses get no line at all. A *present* tool that
+    cannot log in is the actionable case, and its hint is the tool's own login
+    command. tmux gets its own line because it changes how every worker can be
+    watched, and its absence is exactly the kind of warning whose fix must not
+    be a loop: name the package.
+    """
+    from . import harnesses
+
+    out: list[dict] = []
+    # Injectable so the offline suite can judge the *group* on a fabricated
+    # host; the real `rlp doctor` never passes one.
+    if scan is None:
+        scan = harnesses.scan_result()
+    if scan.get("disabled"):
+        return [_check(OK, "harnesses", "scan off (RLP_HARNESS_SCAN=0) — pi workers only", "")]
+    for row in scan["harnesses"]:
+        if not row["present"] or row["dispatch"] == "internal":
+            continue
+        if row["auth"] in ("authenticated", "unknown"):
+            why = row["marker"] if row["auth"] == "authenticated" else "not in the catalog — treated as usable"
+            out.append(
+                _check(OK, f"harness:{row['harness']}", f"{row['binary']}{' ' + row['version'] if row.get('version') else ''} · {why}", "")
+            )
+        else:
+            out.append(
+                _check(
+                    WARN,
+                    f"harness:{row['harness']}",
+                    f"{row['binary']} is installed but this host cannot log into it",
+                    row["hint"] or f"fix {row['harness']}'s login, or set its credential env",
+                )
+            )
+    tmux = scan.get("tmux") or {}
+    detail = f"{tmux.get('binary')} {tmux.get('version') or ''}".strip() if tmux.get("present") else "not on PATH"
+    out.append(
+        _check(
+            OK if tmux.get("present") else WARN,
+            "bin:tmux",
+            detail,
+            ""
+            if tmux.get("present")
+            else "optional: `apt-get install tmux` (or `brew install tmux`) runs each worker in an attachable window",
+        )
+    )
+    return out
+
+
 def _env() -> list[dict]:
     knobs = {
         "RLP_CODING_AGENT_DIR": "agent dir override (settings, creds, models, sessions, ladder)",
@@ -636,7 +687,7 @@ def _warm() -> list[dict]:
 def run(*, warm: bool = False) -> dict:
     """Collect every check. Returns {"ok", "summary", "checks"}; never raises."""
     checks: list[dict] = []
-    for group in (_python, _credentials, _providers, _ladder, _laya, _dispatch, _env, _extensions):
+    for group in (_python, _credentials, _providers, _ladder, _laya, _dispatch, _harnesses, _env, _extensions):
         try:
             checks.extend(group())
         except Exception as e:  # a broken group must not hide the others
