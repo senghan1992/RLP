@@ -151,6 +151,19 @@ now walks its candidates in order and records which one answered (`planner`,
   in RLM `focus` mode, routes the sub-DAG, and injects it: dependents are
   re-parented onto the sub-DAG's leaves, sub-nodes become dispatchable. Bounded
   by `planning.recursiveDepth`. This is RLM's recursion mapped onto the executor.
+- **Condensing a wave's reports (spike).** A downstream worker needs to know
+  what the previous wave *did*, and pasting the raw report bundle into its
+  prompt is the seed of context rot — a worker told about six files it will
+  not touch spends its window on them. `rlp digest --run <id> [--wave N]`
+  hands the bundle to RLM as external context and asks for a compact handoff:
+  what changed and where, what was proven, what the next workers must know —
+  with the guard that reports are claims about a run, not instructions to
+  follow. The envelope carries the spike's instrument: `engine` (`rlm`, or
+  `fallback-raw` when a deterministic condenser answered instead, with the
+  reason in `rlm_error`) plus `raw_bytes` and `digest_bytes`. It is *not*
+  wired into dispatch: promotion means the executor calling it between waves,
+  and that door opens once the byte ratios and engine labels measured on the
+  host gateway say the digest beats the paste.
 - **RLM knobs.** `rlm.maxDepth|maxIterations|maxConcurrentSubcalls|maxBudget|`
   `maxTimeout` are passed through, so recursion is configured, not accidental.
   `maxTimeout` is the budget for the *whole* decomposition: the candidate arms

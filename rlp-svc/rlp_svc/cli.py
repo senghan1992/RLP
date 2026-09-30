@@ -441,6 +441,23 @@ def _cmd_replan(args: argparse.Namespace) -> int:
     return _emit(envelope, False, "\n".join(lines))
 
 
+def _cmd_digest(args: argparse.Namespace) -> int:
+    from . import digest as mod
+
+    envelope = mod.digest(args.run, args.wave or None)
+    if args.json:
+        return _emit(envelope, True)
+    if not envelope.get("ok"):
+        return _emit(envelope, False, f"digest failed: {envelope.get('error')}")
+    r = envelope["result"]
+    human = (
+        f"engine:     {r['engine']}  run={r['run']}  wave={r['wave']}"
+        f"  {r['raw_bytes']}B raw -> {r['digest_bytes']}B digest  ({', '.join(r['nodes'])})\n\n"
+        f"{r['digest']}"
+    )
+    return _emit(envelope, False, human)
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     from . import verify as mod
 
@@ -749,6 +766,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--context", default="")
     sp.add_argument("--json", action="store_true")
 
+    sp = sub.add_parser("digest", help="condense a finished wave's reports into a handoff (RLM over reports)")
+    sp.add_argument("--run", default="", help="run id (default: the newest ledger)")
+    sp.add_argument("--wave", type=int, default=0, help="which finished wave (default: the last one)")
+    sp.add_argument("--json", action="store_true")
+
     sp = sub.add_parser("verify", help="independent cross-vendor best-of-N verdict on a node's acceptance")
     sp.add_argument("--title", default="")
     sp.add_argument("--acceptance", required=True, help="the pass/fail contract sentence")
@@ -911,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
         "provider": _cmd_provider,
         "config": _cmd_config,
         "replan": _cmd_replan,
+        "digest": _cmd_digest,
         "verify": _cmd_verify,
         "memory": _cmd_memory,
         "remember": _cmd_remember,

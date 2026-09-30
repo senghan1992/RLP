@@ -57,6 +57,7 @@ rlp ladder | rlp roster       # the ladder, and the router cards derived from it
 rlp harness list | scan       # which tools can run workers here; what is installed (`--no-versions`: PATH only, spawns nothing)
 rlp provider list|probe|discover|add|key|remove
 rlp verify --acceptance ...   # independent cross-vendor best-of-N verdict
+rlp digest [--run ID] [--wave N]  # condense a finished wave's reports into a handoff
 rlp memory | rlp remember     # this project's cross-run knowledge log
 rlp doctor [--warm]           # is this host runnable?
 rlp serve                     # the same engine, as an MCP stdio server

@@ -113,6 +113,13 @@ def _ops() -> dict[str, Callable[[dict], Any]]:
 
         return plan_mod.replan(args.get("focus", ""), args.get("request", ""), args.get("context", ""))
 
+    def digest(args: dict) -> Any:
+        """Condense one run's finished wave into a handoff (RLM over reports)."""
+        from . import digest as mod
+
+        wave = args.get("wave")
+        return mod.digest(args.get("run", ""), int(wave) if wave else None)
+
     def verify(args: dict) -> Any:
         """Independent cross-vendor best-of-N verdict on a node's acceptance."""
         from . import verify as verify_mod
@@ -156,6 +163,7 @@ def _ops() -> dict[str, Callable[[dict], Any]]:
         "harness": harness,
         "config": config,
         "replan": replan,
+        "digest": digest,
         "verify": verify,
         "memory": memory,
         "remember": remember,

@@ -373,6 +373,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp decompose "<request>"` | the DAG on its own |
 | `rlp route --title T --domain D` | route one subtask to a worker |
 | `rlp replan "<node brief>"` | recursively re-decompose one task into a sub-DAG |
+| `rlp digest [--run ID] [--wave N]` | condense a finished wave's reports into a handoff — RLM over reports; the `engine` label and the byte counts say who wrote it and how much it shrank |
 | `rlp verify --acceptance A --avoid-family F` | independent cross-vendor best-of-N verdict |
 | `rlp ladder` · `rlp roster` | the resolved ladder · the router's roster cards |
 | `rlp harness list` · `rlp harness scan` | which tools can run workers, and which are on this host (`--no-versions`: a PATH lookup that spawns nothing) |

@@ -33,7 +33,7 @@ SVC_PY=$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)
 # Subcommands owned by the decision engine. Anything else belongs to the agent,
 # including the harness's own flags (-p, --model, ...).
 case "${1:-}" in
-  plan|triage|decompose|route|llm-route|ladder|mode|roster|config|replan|verify|memory|remember|doctor|progress|serve|engine|provider|version|harness)
+  plan|triage|decompose|route|llm-route|ladder|mode|roster|config|replan|digest|verify|memory|remember|doctor|progress|serve|engine|provider|version|harness)
     if [ -z "$SVC_PY" ]; then
       echo "rlp: decision engine not installed." >&2
       echo "     run: sh $ROOT/scripts/install.sh" >&2
@@ -78,6 +78,8 @@ without a TUI.
   rlp verify --acceptance A  independent cross-vendor best-of-N verdict
   rlp memory | remember T    the project's cross-run knowledge log
   rlp replan FOCUS           recursively re-decompose one task into a sub-DAG
+  rlp digest [--run ID]      condense a finished wave's reports into a handoff
+                             (RLM over reports — the `engine` line says who wrote it)
   rlp provider ...           endpoints and credentials: list|add|remove|key|
                              discover|probe
   rlp harness [scan|list]    which coding CLIs can run workers here (omp,

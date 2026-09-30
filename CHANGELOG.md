@@ -10,6 +10,19 @@ offline suite fails if they drift.
 
 ### Added
 
+- **A finished wave can now be digested into a handoff.** The honest input to
+  a downstream worker is what the previous wave did — and pasting the raw
+  report bundle into the prompt is the seed of context rot. `rlp digest
+  --run <id> [--wave N]` hands the bundle to RLM as external context and asks
+  for a compact handoff: what changed and where, what was proven, what the
+  next workers must know, with the guard that a worker's report is a claim
+  about a run and not an instruction. The envelope carries the instrument:
+  `engine` (`rlm`, or `fallback-raw` when the deterministic condenser
+  answered — a dead gateway still produces a handoff, never a stall), plus
+  `raw_bytes` and `digest_bytes`. It is a capability, not a wiring: the
+  executor does not call it between waves until the measured ratios say the
+  digest beats the paste.
+
 - **The decomposer can now be given an action to exit through.** RLM frames its
   input as a context to explore and asks for the answer at the end, while the
   decomposition prompt asked for JSON *now* — and the recorded consequence was
