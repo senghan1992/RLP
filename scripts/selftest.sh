@@ -144,7 +144,15 @@ sh "$ROOT/scripts/check-first-ask" "$ROOT/scripts/rlp" || {
 
 echo
 echo "== first-run report =="
-RLP_FIRST_RUN_EXPECT_MODELS=1 sh "$ROOT/scripts/check-first-run" "$ROOT/scripts/rlp" || {
+# The check asserts that the provider failures are PRESENT — which they are
+# only on a host nobody has configured yet. So the host it judges is built
+# from this checkout: the bundled extensions, skills and ladder, and by
+# construction no credentials. A configured ~/.rlp neither passes the check
+# by accident nor fails it on purpose.
+FRESH=$(mktemp -d)
+trap 'rm -rf "$FRESH"' EXIT
+cp -r "$ROOT/agent/rlp/extensions" "$ROOT/agent/rlp/skills" "$ROOT/agent/rlp/orchestration.json" "$FRESH"/
+RLP_CODING_AGENT_DIR="$FRESH" RLP_FIRST_RUN_EXPECT_MODELS=1 sh "$ROOT/scripts/check-first-run" "$ROOT/scripts/rlp" || {
   echo "selftest: first-run check FAILED" >&2
   exit 1
 }
