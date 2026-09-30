@@ -18,8 +18,17 @@
 #   RLP_FIRST_RUN_EXPECT_MODELS=1   the model stack is installed, so the
 #                                   laya/rlm/checkpoint lines must NOT fail
 #
-# Point it at a host that is really fresh by setting RLP_CODING_AGENT_DIR to an
-# empty agent dir; on a configured host `providers` legitimately passes and this
+# Point it at a host that is really fresh by setting RLP_CODING_AGENT_DIR to a
+# directory that looks like `install.sh` just ran in it — extensions, skills and
+# the bundled ladder, no credentials:
+#
+#   FRESH=$(mktemp -d)
+#   cp -r ~/.rlp/agent/extensions ~/.rlp/agent/skills ~/.rlp/agent/orchestration.json "$FRESH"/
+#   rm -f "$FRESH"/auth.json "$FRESH"/models.json
+#   RLP_CODING_AGENT_DIR="$FRESH" sh scripts/check-first-run
+#
+# A purely *empty* dir also fails `rlp-extensions`/`rlp-skills`, which a fresh
+# install passes; on a configured host `providers` legitimately passes and this
 # check would (correctly) complain that the failures it expects are missing.
 set -eu
 

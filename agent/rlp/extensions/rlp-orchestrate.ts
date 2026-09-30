@@ -30,6 +30,10 @@
  *   rlp_state     the ledger: every node, its model, worktree, branch and status
  *   rlp_cancel    stop running workers for the run
  *
+ * Registered commands (the person types these; both are brain-only, like the tools):
+ *   /rlp-run      put a request into the session so the contract runs it
+ *   /rlp-state    read the ledger without going through the model
+ *
  * Plus a per-turn system-prompt section, because the orchestration contract is
  * what makes the model use these tools correctly — and the laya gate decides
  * whether to use them at all.
@@ -99,11 +103,61 @@ function findRpi(cwd: string): string | undefined {
 	return undefined;
 }
 
-/** The decision engine's interpreter: the same one `rlp plan` uses. */
+/**
+ * The decision engine's interpreter: the same walk `scripts/svc-py` follows.
+ *
+ * A venv-less install — which is the default — creates no `.venv` at all, so
+ * stopping at that probe reported "the decision engine is not installed" on a
+ * host where `rlp plan` worked from the shell. The install marker records the
+ * interpreter actually used; a PATH python that can import rlp_svc is the last
+ * resort. This walk is kept in step with rlp-provider.ts and rlp-commands.ts by
+ * hand: the loader makes every extension file independent, so triplicating the
+ * helper is cheaper than inventing a shared module nobody can import.
+ */
 function findPython(cwd: string): string | undefined {
 	for (const root of candidateRoots(cwd)) {
 		const candidate = join(root, "rlp-svc", ".venv", "bin", "python");
 		if (existsSync(candidate)) return candidate;
+	}
+	for (const dir of [process.env.RLP_CODING_AGENT_DIR, process.env.RPI_CODING_AGENT_DIR, join(homedir(), ".rlp", "agent")]) {
+		if (!dir) continue;
+		try {
+			const python = (JSON.parse(readFileSync(join(dir, "rlp-location.json"), "utf8")) as { python?: string }).python;
+			if (python && existsSync(python)) return resolve(python);
+		} catch {
+			/* no marker, or no python recorded */
+		}
+	}
+	return pathPython();
+}
+
+let probedPython: string | undefined;
+
+/**
+ * A PATH python that can actually import the engine, resolved once.
+ *
+ * The probe prints `sys.executable`, so the answer is the absolute interpreter
+ * and not whatever `python3` means in this shell — the same rule svc-py follows.
+ */
+function pathPython(): string | undefined {
+	if (probedPython !== undefined) return probedPython;
+	probedPython = null as unknown as undefined;
+	for (const candidate of ["python3", "python"]) {
+		try {
+			const probe = spawnSync(candidate, ["-c", "import rlp_svc, sys; print(sys.executable)"], {
+				encoding: "utf8",
+				timeout: 20_000,
+			});
+			if (probe.status === 0) {
+				const resolved = (probe.stdout || "").trim().split("\n").pop();
+				if (resolved && existsSync(resolved)) {
+					probedPython = resolved;
+					return probedPython;
+				}
+			}
+		} catch {
+			/* not on PATH, or broken: try the next name */
+		}
 	}
 	return undefined;
 }
@@ -369,6 +423,33 @@ function latestRun(): RunLedger | null {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The ledger rendered to lines — one renderer for the `rlp_state` tool and for
+ * the `/rlp-state` command, because a second writer of the same view is a
+ * second thing that can disagree with the first.
+ */
+function renderLedger(run: RunLedger): string {
+	const lines = [
+		`Run ${run.runId}  (${run.cwd})`,
+		`Request: ${run.request}`,
+		`Dispatch budget this turn: ${run.dispatchBudgetUsed}/${run.maxDispatchesPerTurn}`,
+		``,
+		`Waves: ${run.waves.map((w, i) => `${i + 1}) ${w.join(" ")}`).join("   ")}`,
+		``,
+	];
+	for (const node of Object.values(run.nodes)) {
+		lines.push(`${node.id}  ${node.status.toUpperCase().padEnd(9)} ${node.title}`);
+		lines.push(`      arm      ${node.arm}  (${node.purpose}, ${node.modelFamily || "n/a"})`);
+		lines.push(`      harness  ${node.harness ?? "pi"}  credential=${node.credential ?? "unknown"}`);
+		lines.push(`      deps     ${node.dependsOn.join(", ") || "-"}`);
+		if (node.worktree) lines.push(`      worktree ${node.worktree}`);
+		if (node.branch) lines.push(`      branch   ${node.branch}`);
+		if (node.verdict) lines.push(`      verdict  ${node.verdict}`);
+		if (node.error) lines.push(`      error    ${node.error}`);
+	}
+	return lines.join("\n");
 }
 
 /**
@@ -1299,27 +1380,7 @@ export default function rlpOrchestrate(pi: ExtensionAPI): void {
 			const run = currentRun ?? latestRun();
 			if (!run) return ok("No run yet. Call rlp_plan, then rlp_dispatch.");
 			currentRun = run;
-			const lines = [
-				`Run ${run.runId}  (${run.cwd})`,
-				`Request: ${run.request}`,
-				`Dispatch budget this turn: ${run.dispatchBudgetUsed}/${run.maxDispatchesPerTurn}`,
-				``,
-				`Waves: ${run.waves.map((w, i) => `${i + 1}) ${w.join(" ")}`).join("   ")}`,
-				``,
-			];
-			for (const node of Object.values(run.nodes)) {
-				lines.push(
-					`${node.id}  ${node.status.toUpperCase().padEnd(9)} ${node.title}`,
-				);
-				lines.push(`      arm      ${node.arm}  (${node.purpose}, ${node.modelFamily || "n/a"})`);
-				lines.push(`      harness  ${node.harness ?? "pi"}  credential=${node.credential ?? "unknown"}`);
-				lines.push(`      deps     ${node.dependsOn.join(", ") || "-"}`);
-				if (node.worktree) lines.push(`      worktree ${node.worktree}`);
-				if (node.branch) lines.push(`      branch   ${node.branch}`);
-				if (node.verdict) lines.push(`      verdict  ${node.verdict}`);
-				if (node.error) lines.push(`      error    ${node.error}`);
-			}
-			return ok(lines.join("\n"));
+			return ok(renderLedger(run));
 		},
 	});
 
@@ -1762,4 +1823,22 @@ waiting on \`rlp_collect\`, or when the deliverable is done.
 			ctx.ui.pasteToEditor(request);
 		},
 	});
+
+	// --- /rlp-state: the ledger a person can read --------------------------------------
+	// The brain tool `rlp_state` renders this for the model; onboarding copy and
+	// `rlp skills` have been pointing at `/rlp-state` for a run the user never
+	// started yet. A read-only view costs nothing to exist, and it belongs in this
+	// file because the ledger loader and the renderer are already here — moving it
+	// to rlp-commands.ts would mean shipping a second copy of both. Same IS_BRAIN
+	// gate as the tool, so the bare harness stays surface-free.
+	if (IS_BRAIN)
+		pi.registerCommand("rlp-state", {
+			description: "Show the run ledger: every node, its arm, worktree, branch and status (read-only)",
+			handler: async (_args, ctx: ExtensionCommandContext) => {
+				const run = currentRun ?? latestRun();
+				ctx.ui.notify(
+					run ? renderLedger(run) : "No run yet. /rlp-run <request> plans one, and rlp_dispatch fills the ledger.",
+				);
+			},
+		});
 }

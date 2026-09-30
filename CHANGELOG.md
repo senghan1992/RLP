@@ -60,6 +60,23 @@ offline suite fails if they drift.
   recorded in `rlp-location.json`, and the extensions fall back to a PATH python
   that can `import rlp_svc`, following `scripts/svc-py`'s order instead of
   inventing a fourth one.
+- **The interpreter walk stopped at `/provider`.** The entry above says *the
+  extensions* fall back now; when it was written only `rlp-provider.ts` did.
+  `rlp-orchestrate.ts` and `rlp-commands.ts` still probed `.venv` and nothing
+  else — so `/rlp-plan`, the resident engine, and the whole brain's toolset
+  still reported "the decision engine is not installed" on the default
+  venv-less install, one file away from a `/provider` that worked. All three
+  now run the identical walk (`svc-py`'s order: `.venv`, the recorded marker
+  `python`, a PATH python that can `import rlp_svc`), duplicated per file on
+  purpose because the loader makes every extension independent. A comment in
+  each names the other two as the files to keep in step.
+- **`/rlp-state` existed in four places and nowhere.** The onboarding copy, the
+  skill, and the launcher all pointed at it; no extension ever registered it,
+  so the one read-only view of a run was the command that could not be typed.
+  It is registered now — in `rlp-orchestrate.ts`, beside `/rlp-run`, behind the
+  same `IS_BRAIN` gate as the `rlp_state` tool it shares a renderer with, so
+  the model's view and the person's view of the ledger cannot drift.
+
 - **A first run said "connect a provider" to a host that had one.** In
   direct-only mode the ladder check still failed with the fix "run /setup", and
   the endpoint check kept pointing at a step that was already done. Each line

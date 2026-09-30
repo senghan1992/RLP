@@ -14,7 +14,8 @@
  *   /rlp-triage     <request>   the gate verdict alone, one forward pass
  *   /rlp-doctor                 is this host runnable, with a fix per failure
  *   /rlp-ladder                the resolved model ladder and the router roster
- *   /rlp-run is registered by rlp-orchestrate.ts, which actually runs it.
+ *   /rlp-run and /rlp-state are registered by rlp-orchestrate.ts, which owns
+ *   the run and the ledger.
  *   /provider and /setup are registered by rlp-provider.ts, which owns the
  *   endpoint/credential conversation.
  *
@@ -26,8 +27,9 @@
  *     still presses enter, and the write itself belongs to the extension that
  *     owns that config path.
  */
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
@@ -43,29 +45,102 @@ interface RunResult {
 type Handler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
 /**
- * Locate the RLP checkout by walking up from the session cwd, so the commands
- * work in any project directory and survive a relocated checkout. `$RLP_ROOT`
- * wins, and the PATH-installed `rlp-svc` is the last resort.
+ * Where this RLP checkout is, when the session cwd is somewhere else entirely.
+ *
+ * install.sh records the checkout next to the installed extensions, and a
+ * project directory contains no checkout at all — the marker is how `/rlp-plan`
+ * works from anywhere. `$RLP_ROOT` still wins for a relocated setup.
  */
-function findPython(cwd: string): string | null {
-	const candidates: string[] = [];
-	const push = (dir: string | null | undefined) => {
-		if (dir) candidates.push(join(resolve(dir), "rlp-svc", ".venv", "bin", "python"));
-	};
-	push(process.env.RLP_ROOT);
+function installedRoot(): string | undefined {
+	for (const dir of [process.env.RLP_CODING_AGENT_DIR, process.env.RPI_CODING_AGENT_DIR, join(homedir(), ".rlp", "agent")]) {
+		if (!dir) continue;
+		try {
+			const marker = readFileSync(join(dir, "rlp-location.json"), "utf8");
+			const root = (JSON.parse(marker) as { root?: string }).root;
+			if (root && existsSync(root)) return resolve(root);
+		} catch {
+			/* no marker, or an unreadable one */
+		}
+	}
+	return undefined;
+}
 
+/** Candidate checkouts: env, the install marker, then a walk up from cwd. */
+function candidateRoots(cwd: string): string[] {
+	const roots: string[] = [];
+	if (process.env.RLP_ROOT) roots.push(resolve(process.env.RLP_ROOT));
+	const marker = installedRoot();
+	if (marker) roots.push(marker);
 	let dir = resolve(cwd);
 	for (let i = 0; i < 8; i++) {
-		push(dir);
+		roots.push(dir);
 		const parent = dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
 	}
+	return roots;
+}
 
-	for (const candidate of candidates) {
+/**
+ * The decision engine's interpreter: the same walk `scripts/svc-py` follows.
+ *
+ * A venv-less install — which is the default — creates no `.venv` at all, so
+ * stopping at that probe reported "the decision engine is not installed" here
+ * on a host where `rlp plan` worked from the shell. The install marker records
+ * the interpreter actually used; a PATH python that can import rlp_svc is the
+ * last resort. This walk is kept in step with rlp-provider.ts and
+ * rlp-orchestrate.ts by hand: the loader makes every extension file
+ * independent, so triplicating the helper is cheaper than inventing a shared
+ * module nobody can import.
+ */
+function findPython(cwd: string): string | null {
+	for (const root of candidateRoots(cwd)) {
+		const candidate = join(root, "rlp-svc", ".venv", "bin", "python");
 		if (existsSync(candidate)) return candidate;
 	}
-	return null;
+	for (const dir of [process.env.RLP_CODING_AGENT_DIR, process.env.RPI_CODING_AGENT_DIR, join(homedir(), ".rlp", "agent")]) {
+		if (!dir) continue;
+		try {
+			const python = (JSON.parse(readFileSync(join(dir, "rlp-location.json"), "utf8")) as { python?: string }).python;
+			if (python && existsSync(python)) return resolve(python);
+		} catch {
+			/* no marker, or no python recorded */
+		}
+	}
+	return pathPython() ?? null;
+}
+
+let probedPython: string | undefined;
+
+/**
+ * A PATH python that can actually import the engine, resolved once.
+ *
+ * The probe prints `sys.executable`, so the answer is the absolute interpreter
+ * and not whatever `python3` means in this shell — the same rule svc-py follows.
+ */
+function pathPython(): string | undefined {
+	if (probedPython !== undefined) return probedPython;
+	// Negative results cache too: a host with no engine on PATH should pay the
+	// 20 s probe once per session, not once per command.
+	probedPython = null as unknown as undefined;
+	for (const candidate of ["python3", "python"]) {
+		try {
+			const probe = spawnSync(candidate, ["-c", "import rlp_svc, sys; print(sys.executable)"], {
+				encoding: "utf8",
+				timeout: 20_000,
+			});
+			if (probe.status === 0) {
+				const resolved = (probe.stdout || "").trim().split("\n").pop();
+				if (resolved && existsSync(resolved)) {
+					probedPython = resolved;
+					return probedPython;
+				}
+			}
+		} catch {
+			/* not on PATH, or broken: try the next name */
+		}
+	}
+	return undefined;
 }
 
 function run(python: string, args: string[], cwd: string): Promise<RunResult> {
@@ -116,7 +191,9 @@ function missingEngine(ctx: ExtensionCommandContext): void {
 		[
 			"rlp: the decision engine is not installed.",
 			"",
-			"Could not find rlp-svc/.venv/bin/python from this directory.",
+			"Could not find an engine interpreter: no rlp-svc/.venv/bin/python above this",
+			"directory, no install marker recording one, and no PATH python that can",
+			"`import rlp_svc`.",
 			"Install or repair it with:",
 			"",
 			"    sh <RLP>/scripts/install.sh",
@@ -326,6 +403,7 @@ const status: Handler = async (args, ctx) => {
 	lines.push("  /rlp-ladder            the model ladder in full");
 	lines.push("  /rlp-config            show or edit the ladder (brain, arms, gate, mode)");
 	lines.push("  /rlp-run <request>     run a request through the whole pipeline");
+	lines.push("  /rlp-state             read the ledger of the run in this session");
 	report(ctx, lines.join("\n"), health.code === 0 ? "info" : "warning");
 
 	if (!ctx.hasUI) return;
