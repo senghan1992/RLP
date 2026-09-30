@@ -159,6 +159,13 @@ jobs:
         # writes no configuration at all, and RLP_NO_SETUP=1 really is silent.
         run: sh scripts/check-first-ask ./scripts/rlp
 
+      - name: a host that already has coding CLIs is offered them
+        # Detection-first onboarding: put fake claude/jcode on PATH with a login
+        # marker, and the wizard must show the tool-detection step — then cancel
+        # it with escapes and write no worker, the same guarantee as above on the
+        # one scenario where a stray write is most likely.
+        run: sh scripts/check-first-ask --detected ./scripts/rlp
+
       - name: a fresh install reports what is missing, and only that
         # The first-run report is a deliverable: every non-ok line must name a
         # fix this host can act on, and the failure *set* is pinned so a new

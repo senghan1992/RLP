@@ -10,6 +10,26 @@ offline suite fails if they drift.
 
 ### Added
 
+- **`/setup` now looks before it asks.** The guided first run had grown a
+  question for every external tool — *what is its name, what is its model* —
+  on a host where RLP can simply see. Detection comes first: between the mode
+  question and the endpoints question, `/setup` runs `rlp harness scan
+  --no-versions` (PATH and login markers only, never a spawn, so a hung
+  `--version` cannot stall a dialog), and any catalogued tool that is present
+  but not yet on the ladder is offered as one batched multi-select —
+  `claude — Claude Code (logged in)`, `jcode — jcode (needs login)`, and so on.
+  Accepting adds each as a ladder worker carrying a single `<harness>/default`
+  arm (the tool picks its own model); the whole batch is written only at the
+  final confirm, so escape-everything still leaves the ladder byte-identical —
+  the same promise the wizard has always made, now proven on the one scenario
+  where a stray write is most likely (`check-first-ask --detected`). The step is
+  un-numbered and skipped whole in direct-only mode, under `RLP_HARNESS_SCAN=0`,
+  or when the scan finds nothing new, so the five core needles hold on a bare CI
+  host and a tool-rich one alike. `rlp progress` reflects the result without
+  recording it: the `ladder` milestone now names the catalogued external tools
+  the ladder carries workers in, derived from the config each time — a pi-only
+  ladder reads exactly as it did before.
+
 - **The planner now reads the host, not just the ladder.** Two guards, both
   answering the same question — *is this worker real here?* First: an external
   harness whose binary is not on PATH marks its workers unavailable in memory,

@@ -85,12 +85,16 @@ def _ops() -> dict[str, Callable[[dict], Any]]:
         return mod.llm_route(args.get("title", ""), args.get("brief", ""), args.get("domain", "code"), roster)
 
     def harness(args: dict) -> Any:
-        """Which coding CLIs can run workers on this host, and can they log in?"""
+        """Which coding CLIs can run workers on this host, and can they log in?
+
+        `versions: false` (the CLI's `--no-versions`) keeps the scan spawn-free —
+        a dialog flow must not hang on somebody's `--version`.
+        """
         from . import harnesses as harness_mod
 
         if args.get("action") == "list":
             return harness_mod.list_result()
-        return harness_mod.scan_result()
+        return harness_mod.scan_result(versions=args.get("versions", True))
 
     def warm(_args: dict) -> Any:
         """Pay the model load now, so the next real call is milliseconds."""

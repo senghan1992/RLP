@@ -101,7 +101,18 @@ def _ladder() -> tuple[bool, str, str]:
         return True, f"direct-only mode (from {direct['source']}) — every request handled inline", ""
     if not config["configured"]:
         return False, "the ladder has no model arms", "/setup"
-    return True, f"brain={config['brain']}, {config['arm_count']} arm(s)", ""
+    # Derived, never recorded: which *other* coding tools the ladder already
+    # carries dispatchable workers in. `/setup` fills these from a host scan, and
+    # a hand-written ladder shows the same way. Only catalogued external harnesses
+    # count (pi is the default, an unlisted name is a warning the route already
+    # carries, not a tool), so a pi-only ladder reads exactly as it did before.
+    from . import harnesses as hmod
+
+    external = sorted({
+        w.get("harness") for w in config["workers"] if hmod.vendor_of(w.get("harness") or "") is not None
+    })
+    note = f", tools: {', '.join(external)}" if external else ""
+    return True, f"brain={config['brain']}, {config['arm_count']} arm(s){note}", ""
 
 
 def _plan() -> tuple[bool, str, str]:

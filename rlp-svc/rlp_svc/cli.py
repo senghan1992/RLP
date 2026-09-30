@@ -270,7 +270,7 @@ def _cmd_roster(args: argparse.Namespace) -> int:
 def _cmd_harness(args: argparse.Namespace) -> int:
     from . import harnesses
 
-    result = harnesses.list_result() if args.action == "list" else harnesses.scan_result()
+    result = harnesses.list_result() if args.action == "list" else harnesses.scan_result(versions=not args.no_versions)
     # Exit 0 either way: "here is what this host can run, and here is what it
     # found" is an answer, not a failure — the same rule `progress` keeps.
     if args.json:
@@ -842,8 +842,11 @@ def build_parser() -> argparse.ArgumentParser:
     # `scan` also asks whether each can log in and what version it is; `list`
     # prints the catalog and a PATH lookup only, so it is spawn-free. What is
     # absent is never a failure: "nothing installed" is a complete answer.
+    # `--no-versions` keeps a scan spawn-free too — PATH and auth are file
+    # reads, and a dialog flow (/setup) must not hang on somebody's `--version`.
     sp = sub.add_parser("harness", help="the coding CLIs usable as workers here: scan | list")
     sp.add_argument("action", nargs="?", default="scan", choices=["scan", "list"])
+    sp.add_argument("--no-versions", action="store_true", help="scan without running any binary")
     sp.add_argument("--json", action="store_true")
 
     sp = sub.add_parser("config", help="edit the ladder: validate, back up, write atomically")

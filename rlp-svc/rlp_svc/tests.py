@@ -2258,6 +2258,63 @@ def test_onboarding() -> None:
                 os.environ[k] = v
 
 
+def test_onboarding_names_external_tools() -> None:
+    import os
+
+    from . import onboarding
+
+    env = {k: os.environ.get(k) for k in ("RLP_ORCHESTRATION",)}
+    tmp = Path(tempfile.mkdtemp(prefix="rlp-onboard-tools-"))
+    try:
+        # A pi-only ladder reads exactly as it did before this clause existed:
+        # the milestone names other tools only when the ladder actually carries
+        # workers in them. The whole point is that it stays derived — /setup's
+        # scan adds a worker and the report reflects it, with nothing recorded.
+        pi_only = {
+            **LADDER,
+            "workers": [
+                {"id": "pi", "harness": "pi", "models": [{"model": "alpha/alpha-large", "roles": ["code"], "when": "the only arm"}]}
+            ],
+        }
+        (tmp / "pi.json").write_text(json.dumps(pi_only))
+        os.environ["RLP_ORCHESTRATION"] = str(tmp / "pi.json")
+        step = next(s for s in onboarding.progress()["steps"] if s["id"] == "ladder")
+        check("tools" not in step["detail"], f"a pi-only ladder names no tools: {step['detail']}")
+
+        # A detected external tool joins the milestone...
+        with_tool = {
+            **LADDER,
+            "workers": [
+                {"id": "pi", "harness": "pi", "models": [{"model": "alpha/alpha-large", "roles": ["code"], "when": "the default worker"}]},
+                {
+                    "id": "claude",
+                    "harness": "claude",
+                    "models": [{"model": "claude/default", "roles": ["code", "review"], "when": "detected by /setup"}],
+                },
+                # ...but an unlisted harness does not: it is a tolerated-but-
+                # unknown name (the route's warning owns it), not a tool this
+                # host has, so counting it as one would be a different lie.
+                {
+                    "id": "solo",
+                    "harness": "claude-native",
+                    "models": [{"model": "gamma/gamma-opus", "roles": ["code"], "when": "an unknown tool name"}],
+                },
+            ],
+        }
+        (tmp / "tool.json").write_text(json.dumps(with_tool))
+        os.environ["RLP_ORCHESTRATION"] = str(tmp / "tool.json")
+        step = next(s for s in onboarding.progress()["steps"] if s["id"] == "ladder")
+        check(step["done"], "a ladder with a brain and an arm is configured")
+        check("tools: claude" in step["detail"], f"the catalogued tool the ladder carries is named: {step['detail']}")
+        check("claude-native" not in step["detail"], f"an unlisted harness is not named as a tool: {step['detail']}")
+    finally:
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> None:
     # The provider store has its own file (it is long and hermetic on its own);
     # it shares this runner's `check` contract via its own module-level list.
@@ -2300,6 +2357,7 @@ def main() -> None:
         test_version_consistency,
         test_chat_contract,
         test_onboarding,
+        test_onboarding_names_external_tools,
         test_planner_fallbacks,
         test_decompose_budget,
         test_paths,

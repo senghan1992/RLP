@@ -929,11 +929,22 @@ async function doctorSummary(ctx: ExtensionContext): Promise<{ ok: boolean; prob
 	};
 }
 
+/** One catalog row from `rlp harness scan --no-versions --json`. */
+interface HarnessRow {
+	harness: string;
+	title: string;
+	vendor?: string;
+	dispatch?: string;
+	present?: boolean;
+	auth?: string;
+}
+
 /**
  * The whole first run, guided, in the order the decisions actually depend on
- * one another: what this host does with a request -> which endpoints exist and
- * which has a credential -> which model drives the session -> which models may
- * work -> which model covers each role -> re-check.
+ * one another: what this host does with a request -> which tools are already
+ * here -> which endpoints exist and which has a credential -> which model
+ * drives the session -> which models may work -> which model covers each role
+ * -> re-check.
  *
  * Every step is skippable and each one reports what it changed. The point is
  * that the *decisions* are asked for, in order, with the defaults stated —
@@ -951,7 +962,7 @@ async function setupWizard(
 		`  doctor  ${health.ok ? "runnable" : "problems found"} (${health.text})`,
 		...(health.problems.length > 0 ? ["", ...health.problems.map((p) => `  ${p}`)] : []),
 		"",
-		`  ${opts.firstRun ? "A few questions, then RLP works on this host." : "Five questions, each one skippable."}`,
+		`  ${opts.firstRun ? "A few questions, then RLP works on this host." : "A few questions, each one skippable."}`,
 		"  Cancelling a step leaves it exactly as it was; nothing is written twice.",
 	];
 	ctx.ui.notify(banner.join("\n"), health.ok ? "info" : "warning");
@@ -982,6 +993,66 @@ async function setupWizard(
 	const wantsDirect = Boolean(modeChoice?.startsWith("Direct"));
 	if (modeChoice?.startsWith("Direct") || modeChoice?.startsWith("Full")) {
 		directOnly = (await setMode(ctx, wantsDirect ? "direct" : "full")).direct;
+	}
+
+	// 1b. the tools this host already has. Detection comes before the questions:
+	//     RLP can already see which coding CLIs are installed and logged into,
+	//     and asking a person to type those names into a ladder would be asking
+	//     them to tell RLP what RLP can already tell. So the host is scanned,
+	//     any fresh tool is offered as one batch, and nothing is written until
+	//     the list is confirmed. Skipped in direct-only mode (no dispatcher to
+	//     feed) and skipped entirely when RLP_HARNESS_SCAN=0 or the scan finds
+	//     no new tool — a pi-only host answers none of these questions.
+	if (!directOnly && ladder) {
+		const scan = await withWork(ctx, "rlp: looking for coding tools on this host", () =>
+			engineJson(ctx, ["harness", "scan", "--no-versions", "--json"], undefined, 30_000),
+		);
+		const mounted = new Set(ladder.workers.map((w) => w.harness ?? "pi"));
+		const fresh = (((scan?.data.harnesses ?? []) as unknown) as HarnessRow[]).filter(
+			(r) => r.dispatch === "template" && r.present && !mounted.has(r.harness),
+		);
+		if (scan?.ok && !scan.data.disabled && fresh.length > 0) {
+			const login = (auth?: string) =>
+				auth === "authenticated" ? "logged in" : auth === "needs-login" ? "needs login" : "login unknown";
+			const label = (r: HarnessRow) => `${r.harness} — ${r.title} (${login(r.auth)})`;
+			const picked = await multiSelect(
+				ctx,
+				[
+					"◈ tools this host already has. Any of them can run workers —",
+					"  each becomes a ladder worker on its own tool, carrying one arm",
+					"  (`<harness>/default`: the tool picks its own model).",
+					"",
+					"  Nothing is written until you confirm the list.",
+				].join("\n"),
+				fresh.map(label),
+			);
+			const chosen = fresh.filter((r) => picked.includes(label(r)));
+			if (chosen.length > 0) {
+				const names = chosen.map((r) => r.harness);
+				const accept = await ctx.ui.select(
+					[
+						`Add ${names.length} tool worker(s) to the ladder?`,
+						"",
+						...names.map((h) => `  ${h} — one arm: ${h}/default`),
+						"",
+						"  Cancelling here writes nothing.",
+					].join("\n"),
+					[`Add ${names.length} worker(s)`, "Cancel — write nothing"],
+				);
+				if (accept?.startsWith("Add")) {
+					const taken = new Set(ladder.workers.map((w) => w.id));
+					const ops = chosen.map((r) => ({
+						op: "add_worker",
+						worker: taken.has(r.harness) ? `${r.harness}-tool` : r.harness,
+						harness: r.harness,
+						model: `${r.harness}/default`,
+						roles: ["code", "review", "docs"],
+						when: `detected on this host by /setup on ${new Date().toISOString().slice(0, 10)}`,
+					}));
+					await applyOps(ctx, ops, `${ops.length} tool worker(s) added:`, names.join(", "));
+				}
+			}
+		}
 	}
 
 	// 2. endpoints and credentials
