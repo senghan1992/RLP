@@ -6,13 +6,19 @@
 # What it does:
 #   1. clones + builds the pi fork that RLP runs on (the harness `rpi`), applying
 #      the RLP patch set
-#   2. creates rlp-svc/.venv and installs the decision engine + laya checkpoint
+#   2. installs the decision engine into a python of your choosing (no venv by
+#      default) + downloads the laya checkpoint
 #   3. installs RLP's dropped-in slash extensions, skills and the ladder
 #
-# Requirements: git, node >= 18 and npm, python >= 3.10.
-#   `uv` is used when present; otherwise a stdlib venv + pip.
+# Requirements: git, node >= 18 and npm, python >= 3.10 with pip.
+#   `uv` is used when present; otherwise plain pip.
 #
 # Env:
+#   RLP_ENGINE      where the engine's python lives:
+#                 system (default) — no venv, pip into a PATH python, like any
+#                                    other package
+#                 venv           — self-contained rlp-svc/.venv, isolated from
+#                                    the system python (the old default)
 #   RLP_PI_REPO   git URL of the pi fork source   (default: upstream pi)
 #   RLP_PI_REF    branch/tag to check out         (default: the pinned commit in
 #                 scripts/rlp-fork.base — an install is reproducible, and moving
@@ -31,8 +37,6 @@ RPI_BIN="$ROOT/scripts/rpi-bin"
 RLP_BIN="$ROOT/scripts/rlp"
 FORK="$ROOT/fork/pi"
 PATCH="$ROOT/scripts/rlp-fork.patch"
-VENV="$ROOT/rlp-svc/.venv"
-PY="$VENV/bin/python"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -174,17 +178,46 @@ ln -sf "$RLP_BIN" "$HOME/.local/bin/rlp"
 echo "[rlp] installed: $("$RPI_BIN" --version 2>/dev/null || echo 'rpi built')"
 
 # --- 2. rlp-svc (the decision engine) ----------------------------------------
+# Where the engine's python lives is the installer's choice, and the user's:
+#   RLP_ENGINE=system (default)  no venv — `pip install -e .` into a PATH
+#                                python, exactly like any other package
+#   RLP_ENGINE=venv             self-contained: create rlp-svc/.venv and install
+#                                there (isolated, does not touch the system
+#                                python; the old default, still fully supported)
+# Both are honored at runtime by scripts/svc-py, so an install and a run never
+# diverge.
 cd "$ROOT/rlp-svc"
-if [ ! -d "$VENV" ]; then
-  if have uv; then
-    uv venv --python 3.12 .venv
-  else
-    "${PYTHON:-python3}" -m venv .venv
-  fi
-fi
+ENGINE="${RLP_ENGINE:-system}"
+case "$ENGINE" in
+  venv)
+    if [ ! -d .venv ]; then
+      echo "[rlp] RLP_ENGINE=venv — creating rlp-svc/.venv (isolated install)"
+      if have uv; then
+        uv venv --python 3.12 .venv
+      else
+        "${PYTHON:-python3}" -m venv .venv
+      fi
+    fi
+    PY="$ROOT/rlp-svc/.venv/bin/python"
+    echo "[rlp] installing the engine into .venv (isolated from the system python)"
+    ;;
+  system)
+    PY="$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)"
+    if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+      PY="${PYTHON:-python3}"
+    fi
+    echo "[rlp] installing the engine into $PY (system/user python, no venv)"
+    ;;
+  *)
+    echo "[rlp] RLP_ENGINE must be 'system' (default) or 'venv', got: $ENGINE" >&2
+    exit 2
+    ;;
+esac
 # mcp is pinned <2: `rlp serve` builds on FastMCP's 1.x API surface.
 TORCH_INDEX="https://download.pytorch.org/whl/cpu"   # CPU-only torch; the default index pulls multi-GB CUDA
 #
+# PY is the interpreter we install into. It is the same interpreter the
+# launcher scripts will use later, so an install and a run can never diverge.
 # RLP_SKIP_MODELS=1 installs everything except the model stack: no torch, no
 # laya, no rlm, no 400 MB checkpoint. What still works is every part that does
 # not run a model — the harness, the extensions, `rlp provider`, `rlp ladder`,

@@ -114,7 +114,12 @@ never type it).
   `/provider connect`), which is the guided path; a hand-edited file works too,
   and `rlp provider` is the scriptable equivalent.
 The installer uses [`uv`](https://github.com/astral-sh/uv) when it is present and
-falls back to a stdlib `venv` + `pip` otherwise.
+plain `pip` otherwise. By default there is **no venv**: the engine is pip-installed into your existing python (≥ 3.10), like any other package. Pass `RLP_ENGINE=venv` to install it in a self-contained `rlp-svc/.venv` instead (isolated from the system python; the old default, still fully supported):
+
+```bash
+sh scripts/install.sh                # RLP_ENGINE=system (default): no venv
+RLP_ENGINE=venv sh scripts/install.sh # isolated .venv, system python untouched
+```
 
 ### First run
 
@@ -408,6 +413,7 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | `RLP_HOME` | where run ledgers and project memory live (`~/.rlp`) |
 | `RLP_PI_REPO` · `RLP_PI_REF` | fork source · upstream ref, overriding the pin in `scripts/rlp-fork.base` |
 | `RLP_REBUILD=1` · `RLP_ORCH_FORCE=1` | force a fork rebuild · overwrite the installed ladder |
+| `RLP_ENGINE=system` (default) / `RLP_ENGINE=venv` | where the engine's python lives: no venv (pip into a PATH python) vs. a self-contained `rlp-svc/.venv` |
 | `RLP_SKIP_MODELS=1` | install without torch/laya/rlm and the checkpoint — everything that does not run a model still works |
 | `SSL_CERT_FILE` | CA bundle (needed behind a TLS-inspecting proxy) |
 
@@ -447,7 +453,8 @@ sh scripts/check-first-run      # every non-ok doctor line names an actionable f
 ```
 
 The offline suite stubs every model layer (including the provider transport) and
-runs in milliseconds: `rlp-svc/.venv/bin/python -m rlp_svc.tests`.
+runs in milliseconds: `python3 -m rlp_svc.tests` (venv-less: any python with
+the engine installed; `sh scripts/svc-py` resolves which one).
 
 **CI runs the live-session checks too**, on every push. It builds the real
 harness, drops in the real extensions, and types slash commands into a real

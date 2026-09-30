@@ -17,10 +17,9 @@
 # Pass --fast to stop after the offline suite.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-PY="$ROOT/rlp-svc/.venv/bin/python"
-
-if [ ! -x "$PY" ]; then
-  echo "selftest: no venv at $PY — run sh $ROOT/scripts/install.sh" >&2
+PY="$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "selftest: decision engine not installed (no python with rlp_svc on PATH) — run sh $ROOT/scripts/install.sh" >&2
   exit 1
 fi
 

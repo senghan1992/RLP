@@ -1,0 +1,53 @@
+#!/bin/sh
+# Find the python that runs the decision engine.
+#
+#   PY=$(sh scripts/svc-py)
+#
+# The engine resolves, in order:
+#   1. $ROOT/rlp-svc/.venv/bin/python   — a venv install (RLP_ENGINE=venv),
+#                                         still honored after it was created
+#   2. any python on PATH with the rlp_svc package importable — the default
+#     venv-less install (a plain pip install, like any other package)
+#
+# Resolves to an interpreter path on stdout, or exits non-zero with a hint on
+# stderr.
+set -eu
+
+ROOT=""
+if [ -n "${RLP_ROOT:-}" ]; then
+  ROOT="$RLP_ROOT"
+else
+  SELF="$0"
+  while [ -L "$SELF" ]; do
+    LINK=$(readlink "$SELF")
+    case "$LINK" in
+      /*) SELF="$LINK" ;;
+      *)  SELF="$(dirname -- "$SELF")/$LINK" ;;
+    esac
+  done
+  ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+fi
+
+# 1. a venv install (created by `RLP_ENGINE=venv sh scripts/install.sh`), or a
+#    legacy .venv pre-dating the venv-less layout.
+VENV_PY="$ROOT/rlp-svc/.venv/bin/python"
+if [ -x "$VENV_PY" ]; then
+  printf '%s\n' "$VENV_PY"
+  exit 0
+fi
+
+# 2. the venv-less default: any PATH python that can import the engine
+found=""
+for cand in python3 python; do
+  command -v "$cand" >/dev/null 2>&1 || continue
+  if "$cand" -c "import rlp_svc" >/dev/null 2>&1; then
+    found=$(command -v "$cand")
+    break
+  fi
+done
+if [ -z "$found" ]; then
+  echo "svc-py: decision engine not installed (no python on PATH can import rlp_svc)." >&2
+  echo "       run: sh $ROOT/scripts/install.sh   (or RLP_ENGINE=venv sh $ROOT/scripts/install.sh)" >&2
+  exit 1
+fi
+printf '%s\n' "$found"

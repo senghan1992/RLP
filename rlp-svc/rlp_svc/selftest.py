@@ -1,6 +1,6 @@
 """Offline selftest: decompose + route + orchestration ladder (no MCP transport).
 
-Run: rlp-svc/.venv/bin/python -m rlp_svc.selftest
+Run: python3 -m rlp_svc.selftest   # venv-less: any python that can import rlp_svc
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ Split out of `rlp_svc.tests` only to keep one file readable; the same runner
 calls both. Everything here is hermetic: the transport is stubbed, and the two
 files live in a temporary directory.
 
-    rlp-svc/.venv/bin/python -m rlp_svc.tests
+    python3 -m rlp_svc.tests   # venv-less: any python that can import rlp_svc
 """
 from __future__ import annotations
 

@@ -44,7 +44,7 @@ def _check(status: str, name: str, detail: str = "", hint: str = "") -> dict:
 def _python() -> list[dict]:
     out = [_check(OK, "python", sys.version.split()[0], "")]
     if sys.version_info < (3, 10):
-        out.append(_check(FAIL, "python-version", "needs >= 3.10", "recreate the venv with 3.12"))
+        out.append(_check(FAIL, "python-version", "needs >= 3.10", "install the engine with a python >= 3.10: sh scripts/install.sh"))
     for mod in HASSES:
         if importlib.util.find_spec(mod) is None:
             out.append(_check(FAIL, f"dep:{mod}", "not importable", "sh scripts/install.sh"))

@@ -4,7 +4,7 @@ These run in milliseconds with the model layers stubbed, so they are the ones
 to run on every change. The engines' own accuracy is a different question and
 belongs to `selftest.sh`, which pays for the real laya load.
 
-    rlp-svc/.venv/bin/python -m rlp_svc.tests
+    python3 -m rlp_svc.tests   # venv-less: any python that can import rlp_svc
 """
 from __future__ import annotations
 

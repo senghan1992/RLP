@@ -21,10 +21,10 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 RLP="${1:-$ROOT/scripts/rlp}"
-PY="$ROOT/rlp-svc/.venv/bin/python"
+PY="$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)"
 
 [ -x "$RLP" ] || { echo "check-first-run: no rlp binary at $RLP" >&2; exit 2; }
-[ -x "$PY" ] || { echo "check-first-run: no engine venv at $PY" >&2; exit 2; }
+[ -n "$PY" ] && [ -x "$PY" ] || { echo "check-first-run: decision engine not installed — run sh $ROOT/scripts/install.sh" >&2; exit 2; }
 
 TMP="${TMPDIR:-/tmp}/rlp-first-run.$$"
 trap 'rm -f "$TMP"' EXIT

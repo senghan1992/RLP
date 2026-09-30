@@ -34,7 +34,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 FORK="$ROOT/fork/pi"
-PY="$ROOT/rlp-svc/.venv/bin/python"
+PY="$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)"
 
 CHECK=0
 DO_BUILD=1

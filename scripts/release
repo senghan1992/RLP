@@ -22,7 +22,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 INIT="$ROOT/rlp-svc/rlp_svc/__init__.py"
 CHANGELOG="$ROOT/CHANGELOG.md"
-PY="$ROOT/rlp-svc/.venv/bin/python"
+PY="$(sh "$ROOT/scripts/svc-py" 2>/dev/null || true)"
 
 CHECK=0
 NEW=""
@@ -116,7 +116,7 @@ if [ -x "$PY" ]; then
     die "the offline suite fails — fix it before tagging"
   fi
 else
-  die "no venv at $PY — run sh scripts/install.sh, so the suite actually runs before a tag"
+  die "decision engine not installed — run sh scripts/install.sh, so the suite actually runs before a tag"
 fi
 
 # --- 5. bump, close, tag --------------------------------------------------
