@@ -13,9 +13,9 @@
 # surface survived, then rebuilds.
 #
 # Guarantees, in priority order:
-#   1. Never lose work. A dirty tree is refused — in either repository — and
-#      the pre-update commit is printed so a rollback is one
-#      `git reset --hard <sha>` away.
+#   1. Never lose work. A dirty tree is refused — in either repository — the
+#      pre-update commit is printed so a rollback is one `git reset --hard <sha>`
+#      away, and a checkout ahead of origin is kept: never moved backward.
 #   2. Never leave half an update. A conflicted merge is aborted, not left
 #      pending for the next command to trip over, and the agent dir is
 #      re-synced so the installed extensions match the engine.
@@ -98,6 +98,15 @@ self_update() {
       say "  no release tag yet — tracking $REF"
     fi
   fi
+  # A local branch stays a branch when it moves: detaching to origin/$REF is
+  # how a checkout ends up "HEAD detached at …" with the user's branch left
+  # behind — the exact confusion this script exists to prevent. A tag (or a
+  # bare sha) still detaches: following a release means leaving the branch.
+  if git -C "$ROOT" show-ref --verify --quiet "refs/heads/$REF"; then
+    REF_KIND=branch
+  else
+    REF_KIND=detached
+  fi
 
   HERE=$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo "?")
   git -C "$ROOT" fetch --quiet origin "$REF" 2>/dev/null ||
@@ -109,18 +118,65 @@ self_update() {
   # detach, every time. `scripts/release` writes annotated tags, so this was not
   # an edge case: it was the only case.
   WANT=$(git -C "$ROOT" rev-parse "FETCH_HEAD^{commit}")
-  HAVE=$(git -C "$ROOT" rev-parse "HEAD^{commit}")
+  if [ "$REF_KIND" = branch ] &&
+     [ "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)" != "$REF" ]; then
+    # Detached HEAD (or parked on another branch): get back onto the tracked
+    # branch before deciding anything — the branch tip, not wherever the
+    # detached HEAD sits, is "where this checkout is". The tree is known clean
+    # (guarded above), so the switch cannot lose work.
+    if [ "$CHECK" = 1 ]; then
+      say "  --check: would run: git -C $ROOT checkout $REF"
+      HAVE=$(git -C "$ROOT" rev-parse "$REF^{commit}")
+    else
+      git -C "$ROOT" checkout -q "$REF" || die "could not check out $REF"
+      say "  was off the $REF branch — back on $REF"
+      HAVE=$(git -C "$ROOT" rev-parse "HEAD^{commit}")
+    fi
+  else
+    HAVE=$(git -C "$ROOT" rev-parse "HEAD^{commit}")
+  fi
   if [ "$WANT" = "$HAVE" ]; then
     say "  RLP is already at $REF ($HERE)"
     return 0
   fi
-  say "  RLP  $HERE  ->  $REF"
+  if [ -z "$SELF_REF" ]; then
+    # Implicit tracking never moves the checkout to an older commit. A local
+    # branch ahead of origin used to be "updated" backward to origin's older
+    # state — and the re-exec below then synced the agent dir from there, so
+    # the regression reached the installed extensions too. An explicit
+    # --self-ref is a deliberate move and skips both guards.
+    if git -C "$ROOT" merge-base --is-ancestor "$WANT" "$HAVE" 2>/dev/null; then
+      AHEAD_N=$(git -C "$ROOT" rev-list --count "$WANT..$HAVE" 2>/dev/null || echo "?")
+      say "  this checkout is $AHEAD_N commit(s) ahead of origin/$REF — keeping it."
+      say "  (an update never moves a checkout backward; git push publishes the"
+      say "   local work, or rlp update --self-ref $REF forces the move anyway)"
+      return 0
+    fi
+    if ! git -C "$ROOT" merge-base --is-ancestor "$HAVE" "$WANT" 2>/dev/null; then
+      AHEAD_N=$(git -C "$ROOT" rev-list --count "$WANT..$HAVE" 2>/dev/null || echo "?")
+      BEHIND_N=$(git -C "$ROOT" rev-list --count "$HAVE..$WANT" 2>/dev/null || echo "?")
+      say "  this checkout has diverged from origin/$REF ($AHEAD_N local, $BEHIND_N remote) — not moving."
+      say "  resolve it by hand, or name the target: rlp update --self-ref <ref>"
+      return 0
+    fi
+  fi
+  BEHIND_N=$(git -C "$ROOT" rev-list --count "$HAVE..$WANT" 2>/dev/null || echo "?")
+  say "  RLP  $HERE  ->  $REF ($BEHIND_N commit(s) behind)"
   if [ "$CHECK" = 1 ]; then
-    say "  --check: would run: git -C $ROOT checkout --detach $WANT"
+    if [ "$REF_KIND" = branch ] && [ -z "$SELF_REF" ]; then
+      say "  --check: would run: git -C $ROOT merge --ff-only $WANT"
+    else
+      say "  --check: would run: git -C $ROOT checkout --detach $WANT"
+    fi
     return 0
   fi
   say "  rollback    git -C $ROOT checkout --detach $HAVE"
-  git -C "$ROOT" checkout -q --detach "$WANT" || die "could not check out $REF"
+  if [ "$REF_KIND" = branch ] && [ -z "$SELF_REF" ]; then
+    # Fast-forward the branch itself: HEAD stays on $REF, never detached.
+    git -C "$ROOT" merge -q --ff-only "$WANT" || die "could not fast-forward $REF to origin/$REF"
+  else
+    git -C "$ROOT" checkout -q --detach "$WANT" || die "could not check out $REF"
+  fi
   # Extensions, skills and the ladder belong to the version, so they move with
   # it. Without this the new engine would run against the old extensions and
   # nothing would report the mismatch.

@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index c6c7a9d..78ae054 100644
+index 22b6fdcb4..206f9744f 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -4,7 +4,8 @@
@@ -13,10 +13,10 @@ index c6c7a9d..78ae054 100644
  	"bin": {
  		"pi": "dist/bundle/cli.js"
 diff --git a/packages/coding-agent/src/core/package-manager.ts b/packages/coding-agent/src/core/package-manager.ts
-index be42365..e461e6e 100644
+index b5bb19d74..1a576788c 100644
 --- a/packages/coding-agent/src/core/package-manager.ts
 +++ b/packages/coding-agent/src/core/package-manager.ts
-@@ -2516,19 +2516,21 @@ export class DefaultPackageManager implements PackageManager {
+@@ -2546,19 +2546,21 @@ export class DefaultPackageManager implements PackageManager {
  			globalBaseDir,
  		);
  
@@ -53,10 +53,10 @@ index be42365..e461e6e 100644
  			"prompts",
 diff --git a/packages/coding-agent/src/core/rlp-orchestration.ts b/packages/coding-agent/src/core/rlp-orchestration.ts
 new file mode 100644
-index 0000000..d493b2a
+index 000000000..a0f6d2c4f
 --- /dev/null
 +++ b/packages/coding-agent/src/core/rlp-orchestration.ts
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,342 @@
 +/**
 + * RLP orchestration config — the model ladder the orchestrator plans and
 + * dispatches against.
@@ -187,9 +187,14 @@ index 0000000..d493b2a
 +			throw new Error(`${source}: ${where}.availabilityNote must be a string`);
 +		}
 +
-+		if (!Array.isArray(worker.models) || worker.models.length === 0) {
-+			throw new Error(`${source}: worker ${JSON.stringify(id)} needs a non-empty 'models' array`);
++		if (!Array.isArray(worker.models)) {
++			throw new Error(`${source}: worker ${JSON.stringify(id)} must have a 'models' array`);
 +		}
++		// An empty `models` array is the shipped default: RLP carries no arms on
++		// purpose (`"brain": null` + every worker empty), so `/setup` writes them
++		// from the connected providers rather than guessing. A worker with no
++		// arms parses fine and simply renders no ladder lines; only a missing or
++		// wrong-typed `models` key is a real shape error.
 +		const models: OrchestrationModel[] = [];
 +		for (const [j, rawModel] of worker.models.entries()) {
 +			const modelWhere = `${source}: worker ${JSON.stringify(id)} models[${j}]`;
@@ -218,8 +223,18 @@ index 0000000..d493b2a
 + * Parse and validate the config. Throws on malformed JSON or a shape that
 + * cannot render — a broken ladder is a setup error worth surfacing loudly, not
 + * something to silently drop from the prompt.
++ *
++ * One deliberate exception: the shipped default is a policy-only ladder —
++ * `"brain": null` and every worker carrying an empty `models` array. RLP ships
++ * no arms on purpose: a model ref only means something on a host that has that
++ * provider, so `/setup` writes them from the endpoints it connected rather
++ * than guessing and failing at the worker. That state is not an error, it is
++ * the starting point, so a parser that threw on it made the bare `rlp` boot
++ * crash with "'brain' must be a non-empty string" before the user could run
++ * `/setup` at all. Such a ladder parses to a config that renders to nothing
++ * (see `renderOrchestration`) instead of throwing.
 + */
-+export function parseOrchestration(raw: string, source: string): OrchestrationConfig {
++export function parseOrchestration(raw: string, source: string): OrchestrationConfig | undefined {
 +	let parsed: unknown;
 +	try {
 +		parsed = JSON.parse(raw);
@@ -267,6 +282,22 @@ index 0000000..d493b2a
 +		}
 +	}
 +
++	// A ladder with no brain and no arms is the shipped default, not a broken
++	// one: `brain` null plus every worker's `models` empty means "/setup has
++	// not run yet" and must parse to a config that renders to nothing rather
++	// than throw and block the first launch.
++	const isUnconfigured =
++		(config.brain === null || config.brain === undefined) &&
++		parseWorkers(config.workers, source).every((worker) => worker.models.length === 0);
++	if (isUnconfigured) {
++		return {
++			brain: undefined as unknown as string, // no brain yet; see `renderOrchestration`
++			workers: parseWorkers(config.workers, source),
++			routing: { escalateBelow, maxDispatchesPerTurn },
++			review: { crossVendor },
++		};
++	}
++
 +	return {
 +		brain: modelRef(config.brain, `${source}: 'brain'`),
 +		workers: parseWorkers(config.workers, source),
@@ -275,12 +306,13 @@ index 0000000..d493b2a
 +	};
 +}
 +
-+let cached: { path: string; mtimeMs: number; config: OrchestrationConfig } | undefined;
++let cached: { path: string; mtimeMs: number; config: OrchestrationConfig | undefined } | undefined;
 +
 +/**
 + * The orchestration config for this process, or undefined when none is
-+ * configured. Cached against the file's mtime so a long-lived session picks up
-+ * an edit on the next prompt rebuild without re-reading every turn.
++ * configured — including the shipped policy-only default (no brain, no arms).
++ * Cached against the file's mtime so a long-lived session picks up an edit on
++ * the next prompt rebuild without re-reading every turn.
 + */
 +export function loadOrchestration(): OrchestrationConfig | undefined {
 +	const path = orchestrationConfigPath();
@@ -304,7 +336,13 @@ index 0000000..d493b2a
 + * Render the ladder as prompt text. Deterministic for a given config so the
 + * section stays stable across turns and the transcript's section diff is quiet.
 + */
-+export function renderOrchestration(config: OrchestrationConfig): string {
++export function renderOrchestration(config: OrchestrationConfig): string | undefined {
++	// The unconfigured default (no brain, no arms) renders to nothing: an empty
++	// section would read as a broken ladder and tell the brain it has no models
++	// to spend. Omitting the section entirely is the honest state — plain pi,
++	// until /setup writes the arms.
++	if (config.brain === undefined) return undefined;
++
 +	const lines: string[] = [`Orchestrator model (yours): ${config.brain}`, ""];
 +	lines.push(
 +		"Worker ladder — arms are priority-ordered (first = the default arm, spend the bulk there); pick the arm per dispatch with `args.model`:",
@@ -346,7 +384,9 @@ index 0000000..d493b2a
 + * providers (e.g. "is this arm actually reachable on this host?").
 + */
 +export function orchestrationModels(config: OrchestrationConfig): string[] {
-+	const models = [config.brain];
++	// `brain` is `undefined` only for the unconfigured default (no brain, no
++	// arms), which carries no model refs at all.
++	const models = config.brain === undefined ? [] : [config.brain];
 +	for (const worker of config.workers) {
 +		for (const entry of worker.models) models.push(entry.model);
 +	}
@@ -360,11 +400,11 @@ index 0000000..d493b2a
 +	return { provider: ref.slice(0, slash), id: ref.slice(slash + 1) };
 +}
 diff --git a/packages/coding-agent/src/core/settings-manager.ts b/packages/coding-agent/src/core/settings-manager.ts
-index c7bb2af..7ea7101 100644
+index aa3eae323..19bf2a172 100644
 --- a/packages/coding-agent/src/core/settings-manager.ts
 +++ b/packages/coding-agent/src/core/settings-manager.ts
-@@ -162,6 +162,47 @@ export interface Settings {
- 	fullscreenCopyOnSelect?: boolean; // default: true; no effect in regular TUI mode
+@@ -186,6 +186,47 @@ export interface Settings {
+ 	fullscreenWheelScrollLines?: WheelScrollLines; // default: "auto"; lines per wheel event, 1-100
  }
  
 +/**
@@ -411,7 +451,7 @@ index c7bb2af..7ea7101 100644
  function isMergeableObject(value: unknown): value is Record<string, unknown> {
  	return typeof value === "object" && value !== null && !Array.isArray(value);
  }
-@@ -731,12 +772,34 @@ export class SettingsManager {
+@@ -797,12 +838,34 @@ export class SettingsManager {
  		return sessionDir ? normalizePath(sessionDir) : sessionDir;
  	}
  
@@ -449,7 +489,7 @@ index c7bb2af..7ea7101 100644
  
  	setDefaultProvider(provider: string): void {
 diff --git a/packages/coding-agent/src/core/slash-commands.ts b/packages/coding-agent/src/core/slash-commands.ts
-index 934de40..4f8e097 100644
+index 934de40a6..4f8e097e6 100644
 --- a/packages/coding-agent/src/core/slash-commands.ts
 +++ b/packages/coding-agent/src/core/slash-commands.ts
 @@ -22,6 +22,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
@@ -461,7 +501,7 @@ index 934de40..4f8e097 100644
  	{ name: "import", description: "Import and resume a session from a JSONL file" },
  	{ name: "share", description: "Share session as a secret GitHub gist" },
 diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
-index b69488e..7f268ee 100644
+index 4970fd4ad..73d25611d 100644
 --- a/packages/coding-agent/src/core/system-prompt.ts
 +++ b/packages/coding-agent/src/core/system-prompt.ts
 @@ -4,6 +4,7 @@
@@ -485,7 +525,7 @@ index b69488e..7f268ee 100644
  	/** Working directory. */
  	cwd: string;
  	/** Pre-loaded context files. */
-@@ -161,6 +168,12 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
+@@ -161,6 +168,17 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
  	}
  
  	if (appendSystemPrompt) promptSections.addendum = appendSystemPrompt;
@@ -493,13 +533,18 @@ index b69488e..7f268ee 100644
 +	// tagged section the model can treat as authoritative for routing.
 +	if (options.orchestration !== null) {
 +		const orchestration = options.orchestration ?? loadOrchestration();
-+		if (orchestration) promptSections.rlp_orchestration = renderOrchestration(orchestration);
++		if (orchestration) {
++			const section = renderOrchestration(orchestration);
++			// An unconfigured ladder (no brain, no arms) renders to nothing: omit the
++			// section rather than advertise an empty ladder the model cannot spend.
++			if (section) promptSections.rlp_orchestration = section;
++		}
 +	}
  	if (contextFiles.length > 0) promptSections.project_context = renderProjectContext(contextFiles);
  	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
  	if (skillFileReadTool && skills.length > 0) {
 diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
-index 92e9b26..c4a50f8 100644
+index 9b9f273f2..be345cc95 100644
 --- a/packages/coding-agent/src/index.ts
 +++ b/packages/coding-agent/src/index.ts
 @@ -24,6 +24,14 @@ export {
@@ -518,7 +563,7 @@ index 92e9b26..c4a50f8 100644
  // Compaction
  export {
 diff --git a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
-index 9d345b4..976c875 100644
+index 9d345b4e9..976c87535 100644
 --- a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
 @@ -1,5 +1,6 @@
@@ -560,18 +605,18 @@ index 9d345b4..976c875 100644
  		const overflowLabel = hiddenLineCount > 0 ? ` ↑ ${hiddenLineCount} more ` : undefined;
  		const overflowLabelWidth = overflowLabel ? visibleWidth(overflowLabel) : 0;
 diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
-index 51356a0..f04ea87 100644
+index 8bb7b353e..25692a8d4 100644
 --- a/packages/coding-agent/src/modes/interactive/components/footer.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
-@@ -5,6 +5,7 @@ import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
+@@ -6,6 +6,7 @@ import type { ContextUsage } from "../../../core/extensions/types.ts";
  import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
- import { addUsageToTotals, createUsageTotals } from "../../../core/usage-totals.ts";
+ import { addUsageToTotals, createUsageTotals, type UsageTotals } from "../../../core/usage-totals.ts";
  import { theme } from "../theme/theme.ts";
 +import { brandGlyph } from "./pi-logo.ts";
  
  /**
   * Sanitize text for display in a single-line status.
-@@ -234,7 +235,13 @@ export class FooterComponent implements Component {
+@@ -283,7 +284,13 @@ export class FooterComponent implements Component {
  		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
  		const dimRemainder = theme.fg("dim", remainder);
  
@@ -587,7 +632,7 @@ index 51356a0..f04ea87 100644
  
  		// Add extension statuses on a single line, sorted by key alphabetically
 diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
-index 57381d9..1b0b3a7 100644
+index 57381d9aa..1b0b3a732 100644
 --- a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 @@ -4,23 +4,75 @@ import { theme } from "../theme/theme.ts";
@@ -676,7 +721,7 @@ index 57381d9..1b0b3a7 100644
 +	return identity() === "rlp" ? rlpLogoLines() : piLogoLines();
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index e5ff3a6..de98ea7 100644
+index b7eb92054..23ccebcb0 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -101,6 +101,14 @@ import {
@@ -703,7 +748,7 @@ index e5ff3a6..de98ea7 100644
  import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
  import { SessionSelectorComponent } from "./components/session-selector.ts";
  import { SettingsSelectorComponent } from "./components/settings-selector.ts";
-@@ -966,12 +974,32 @@ export class InteractiveMode {
+@@ -969,12 +977,32 @@ export class InteractiveMode {
  
  		// Add header with keybindings from config (unless silenced)
  		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
@@ -741,7 +786,7 @@ index e5ff3a6..de98ea7 100644
  
  			// Build startup instructions using keybinding hint helpers
  			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-@@ -1011,11 +1039,22 @@ export class InteractiveMode {
+@@ -1014,11 +1042,22 @@ export class InteractiveMode {
  				].join(theme.fg("muted", " · "));
  			const compactOnboarding = () =>
  				theme.fg("dim", `Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`);
@@ -767,7 +812,7 @@ index e5ff3a6..de98ea7 100644
  				this.getStartupExpansionState(),
  				1,
  				0,
-@@ -3158,6 +3197,11 @@ export class InteractiveMode {
+@@ -3162,6 +3201,11 @@ export class InteractiveMode {
  				this.editor.setText("");
  				return;
  			}
@@ -779,7 +824,7 @@ index e5ff3a6..de98ea7 100644
  			if (text === "/hotkeys") {
  				this.handleHotkeysCommand();
  				this.editor.setText("");
-@@ -6539,6 +6583,110 @@ export class InteractiveMode {
+@@ -6555,6 +6599,112 @@ export class InteractiveMode {
  		this.ui.requestRender();
  	}
  
@@ -809,6 +854,8 @@ index e5ff3a6..de98ea7 100644
 +			markdown = `${theme.fg("error", "invalid config")}\n\n\`${configPath}\`\n\n\`\`\`\n${error}\n\`\`\``;
 +		} else if (!config) {
 +			markdown = `${theme.fg("muted", "none configured")} — plain pi behaviour.\n\nExpected at \`${configPath}\` or \`$RLP_ORCHESTRATION\`.`;
++		} else if (config.brain === undefined) {
++			markdown = `${theme.fg("muted", "policy configured, no model arms yet")} — run /setup to fill them from your connected providers.\n\nExpected at \`${configPath}\` or \`$RLP_ORCHESTRATION\`.`;
 +		} else {
 +			const runtime = this.session.modelRuntime;
 +			const rows = orchestrationModels(config).map((ref) => {
