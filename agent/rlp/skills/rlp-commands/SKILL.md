@@ -24,7 +24,7 @@ differs is that only `rlp` can orchestrate.
 
 | Command | What it does |
 |---|---|
-| `/setup` | the guided first run: mode → (coding tools already on this host) → (providers pi already has connected) → endpoints → model → worker arms → per-role models (it starts by itself on a host that cannot work yet) |
+| `/setup` | the guided first run: mode → (coding tools already on this host) → (providers pi already has connected) → endpoints → the model RLP runs on → which models RLP may send work to → per-role models (it starts by itself on a host that cannot work yet) |
 | `/direct on\|off\|status` | direct-only mode: every request inline, never orchestrate |
 | `/provider` | endpoints, credential state, a live round trip, the arms that cannot run |
 | `/provider connect\|add\|test\|models\|key\|remove` | guided attach · scriptable attach · one real round trip · discovery · credentials · removal |
@@ -34,7 +34,7 @@ differs is that only `rlp` can orchestrate.
 | `/rlp-watch` | the run's live worker windows and the attach command for each (tmux lens, read-only — RLP never attaches for you) |
 | `/rlp-doctor` | host health, one fix per failure line |
 | `/rlp-ladder` | what the orchestrator will actually do: brain, arms, roles, budgets |
-| `/rlp-config` | edit the ladder live (brain, arms, workers, gate, budgets) |
+| `/rlp-config` | edit the ladder live: add/change/remove models, brain, per-role models, gate — `help` lists every typed verb |
 | `/rlp-roles` | bind a role (code, review, plan, verify, …) to a specific model |
 | `/models [filter]`, `/models --pick` | models by provider; switch one, or set the session default |
 | `/commands [filter]` | the whole menu, grouped, including the shell side |
@@ -63,7 +63,8 @@ rlp digest [--run ID] [--wave N]  # condense a finished wave's reports into a ha
 rlp memory | rlp remember     # this project's cross-run knowledge log
 rlp doctor [--warm]           # is this host runnable?
 rlp serve                     # the same engine, as an MCP stdio server
-rlp update [--check]          # update the harness fork, re-apply RLP on top
+rlp update [--check]          # one updater: RLP's checkout, then the fork under
+                              # it — `rpi update` is the same command
 rpi                           # the bare harness, no orchestration
 ```
 

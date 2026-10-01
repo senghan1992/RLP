@@ -40,6 +40,17 @@ const SETTINGS_FILE = join(AGENT_DIR, "settings.json");
 /** Live checks talk to the network; a hung endpoint must not freeze the TUI. */
 const PROBE_TIMEOUT_MS = 45_000;
 
+/**
+ * Roles a newly added model carries when nobody narrows them — the same set
+ * every add-surface uses, so "just add it" means one thing everywhere. Spelled
+ * once per file, like findPython: extensions load alone. `: string[]` on
+ * purpose — the op builders widen to string[], and a readonly tuple would not
+ * typecheck.
+ */
+const DEFAULT_ARM_ROLES: string[] = ["code", "review", "docs", "research", "explore", "debug"];
+/** The dispatchable roles an arm can carry; plan/critique/verify/route belong to the engine, not to workers. */
+const ARM_ROLE_CHOICES: string[] = ["code", "debug", "review", "research", "docs", "explore"];
+
 // --- talking to the engine ----------------------------------------------------------
 
 type Json = Record<string, unknown>;
@@ -704,9 +715,12 @@ async function offerUsage(
 		[
 			`Use ${ref} for this session`,
 			`Set ${ref} as the default for new sessions`,
-			`Add ${connected.models.length} model(s) as RLP worker arms`,
+			`＋ Let RLP work with these ${connected.models.length} model(s)`,
 			`Set ${ref} as the RLP orchestrator (brain)`,
-			`Bind one of them to an RLP role`,
+			// First word stays "Bind": the session-local branch below tests
+			// `action.startsWith("Use ")`, and "Use one of them for a role…"
+			// would fall into it and switch the session model instead.
+			"Bind one of them to a single role…",
 			"Nothing else for now",
 		],
 	);
@@ -755,16 +769,26 @@ async function offerUsage(
 	const view = await ladderView(ctx);
 	if (!view) return;
 
-	if (action.startsWith("Add ")) {
+	if (action.startsWith("＋")) {
 		const workers = view.workers.filter((w) => (w.harness ?? "pi") === "pi");
 		const pool = workers.length > 0 ? workers : view.workers;
 		const worker = pool.length === 1 || !ctx.hasUI ? pool[0]?.id : await ctx.ui.select("Which worker?", pool.map((w) => w.id));
 		if (!worker) return;
-		const roles = await ctx.ui.input(
-			"Roles these models carry (comma-separated)",
-			"code,review,docs",
-		);
-		const list = (roles ?? "code").split(",").map((r) => r.trim()).filter(Boolean);
+		// One question, and it is a select: the old free-text roles answer
+		// became `roles: []` when left empty — an arm the router never
+		// dispatches, with nothing ever saying why.
+		const scope = await ctx.ui.select("What should these models do for RLP?", [
+			`Everything — ${DEFAULT_ARM_ROLES.join(", ")} (recommended)`,
+			"Pick roles…",
+		]);
+		if (!scope) return;
+		const list = scope.startsWith("Everything")
+			? [...DEFAULT_ARM_ROLES]
+			: await multiSelect(ctx, "Which jobs may they take?", ARM_ROLE_CHOICES);
+		if (list.length === 0) {
+			ctx.ui.notify("◈ no roles chosen, so nothing was added — a model with no jobs never gets work", "warning");
+			return;
+		}
 		const ops = connected.models
 			.filter((m) => !view.model_pool.includes(`${connected.provider}/${m}`))
 			.map((m) => ({
@@ -778,7 +802,7 @@ async function offerUsage(
 			ctx.ui.notify(`◈ those models are already arms on the ladder.`, "info");
 			return;
 		}
-		await applyOps(ctx, ops, `${ops.length} ladder arm(s) added to ${worker}:`, connected.provider);
+		await applyOps(ctx, ops, `${ops.length} model(s) added — RLP can now dispatch them:`, connected.provider);
 		return;
 	}
 
@@ -1322,9 +1346,9 @@ async function setupWizard(
 		const picked = await multiSelect(
 			ctx,
 			[
-				...stepHeader(ctx, 4, "worker arms: which models may RLP dispatch to?"),
+				...stepHeader(ctx, 4, "which models may RLP send work to?"),
 				"",
-				"  Arms are priority-ordered: the first carries the bulk of the spend.",
+				"  The order is the priority: the first carries the bulk of the spend.",
 				"  Two provider FAMILIES make independent review possible — a review",
 				"  node is re-picked onto a family the code was not written in.",
 				paint(ctx, "muted", "  Workers get branches, not the merge. The merge stays yours."),
@@ -1334,26 +1358,52 @@ async function setupWizard(
 		const armRefs = picked.map((p) => p.replace(/\s+\(this session\)$/, "").trim());
 		if (armRefs.length > 0) {
 			const piWorker = view.workers.find((w) => (w.harness ?? "pi") === "pi") ?? view.workers[0];
+			let armsAdded = false;
 			if (!piWorker) {
 				ctx.ui.notify("◈ the ladder has no worker to add arms to.", "warning");
 			} else {
-				const roles = await ctx.ui.input("Roles these arms can cover (comma-separated)", "code,review,docs");
-				const list = (roles ?? "code").split(",").map((r) => r.trim()).filter(Boolean);
-				const ops = armRefs
-					.filter((r) => !view.model_pool.includes(r))
-					.map((r) => ({
-						op: "add_arm",
-						worker: piWorker.id,
-						model: r,
-						roles: list,
-						// Appended, not positioned: `model_pool` is the union across
-						// workers, so its length is not this worker's arm count.
-						when: `arm chosen in /setup on ${new Date().toISOString().slice(0, 10)}`,
-					}));
-				if (ops.length > 0) await applyOps(ctx, ops, `${ops.length} worker arm(s) added to ${piWorker.id}:`, armRefs.join(", "));
+				// One question, and it is a select: the old free-text roles
+				// answer became `roles: []` when left empty — arms the router
+				// then never dispatches, with nothing ever saying why. A cancel
+				// here skips the add and lets the wizard continue; the one-arm
+				// fallback below still catches an empty ladder.
+				const scope = await ctx.ui.select("What should these models do for RLP?", [
+					`Everything — ${DEFAULT_ARM_ROLES.join(", ")} (recommended)`,
+					"Pick roles…",
+				]);
+				const list = !scope
+					? []
+					: scope.startsWith("Everything")
+						? [...DEFAULT_ARM_ROLES]
+						: await multiSelect(ctx, "Which jobs may they take?", ARM_ROLE_CHOICES);
+				if (list.length === 0) {
+					ctx.ui.notify(
+						[
+							"◈ no roles chosen, so no model was added — a model with no jobs never gets work.",
+							"  /rlp-config add <provider/model> does it in one line later.",
+						].join("\n"),
+						"warning",
+					);
+				} else {
+					const ops = armRefs
+						.filter((r) => !view.model_pool.includes(r))
+						.map((r) => ({
+							op: "add_arm",
+							worker: piWorker.id,
+							model: r,
+							roles: list,
+							// Appended, not positioned: `model_pool` is the union across
+							// workers, so its length is not this worker's arm count.
+							when: `arm chosen in /setup on ${new Date().toISOString().slice(0, 10)}`,
+						}));
+					if (ops.length > 0) {
+						await applyOps(ctx, ops, `${ops.length} model(s) added — RLP can now dispatch them:`, armRefs.join(", "));
+						armsAdded = true;
+					}
+				}
 			}
 			const families = new Set(armRefs.map((r) => r.split("/")[0]));
-			if (families.size < 2) {
+			if (armsAdded && families.size < 2) {
 				// Stated as a consequence, not a scolding: one family is a perfectly
 				// usable setup, it just cannot satisfy the cross-vendor review rule.
 				ctx.ui.notify(
@@ -1379,12 +1429,13 @@ async function setupWizard(
 			const brain = afterArms.brain;
 			const accept = await ctx.ui.select(
 				[
-					"◈ the ladder still has no worker arms, so nothing can be dispatched.",
+					"◈ RLP has no model to send work to yet.",
 					"",
-					`  Add ${brain} as the default arm? RLP can then orchestrate on one model;`,
+					`  Add ${brain} as the model RLP works with? It can then orchestrate on one model;`,
 					"  a second provider family later is what enables independent review.",
 				].join("\n"),
-				[`Add ${brain} as the default arm`, "Leave it — handle everything inline"],
+				// First word stays "Add" — the branch below tests startsWith("Add").
+				[`Add ${brain} as the model RLP works with`, "Leave it — handle everything inline"],
 			);
 			if (accept?.startsWith("Add")) {
 				const worker = afterArms.workers.find((w) => (w.harness ?? "pi") === "pi") ?? afterArms.workers[0];
@@ -1396,11 +1447,11 @@ async function setupWizard(
 								op: "add_arm",
 								worker: worker.id,
 								model: brain,
-								roles: ["code", "review", "docs", "research", "explore", "debug"],
+								roles: [...DEFAULT_ARM_ROLES],
 								when: `the only arm — added by /setup on ${new Date().toISOString().slice(0, 10)}`,
 							},
 						],
-						"default arm added:",
+						"RLP can now send work to:",
 						brain,
 					);
 				}
@@ -1429,11 +1480,11 @@ async function setupWizard(
 					...shown,
 					"",
 					"  A bound role pins that job to one model. Unbound roles follow",
-					"  the arm order from step 4 — usually the right answer.",
+					"  the model order from step 4 — usually the right answer.",
 					paint(ctx, "muted", "  Bind what you disagree with, not everything you can."),
 				].join("\n"),
 				[
-					"Skip — the arm order is fine",
+					"Skip — the model order is fine",
 					"Choose which roles to bind…",
 					"Bind the planner roles (plan, critique, verify)",
 				],

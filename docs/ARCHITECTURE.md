@@ -134,7 +134,7 @@ planner·critique·verify·route 모델을 여기서 해석하고, `doctor`가 �
 |---|---|
 | `rlp` | 단일 진입점 — `plan`/`triage`/`decompose`/`route`/`ladder`/`roster`/`config`/`provider`/`verify`/`memory`/`doctor`/`serve`는 결정 엔진으로, 그 외 인자는 에이전트로. 호출한 디렉터리가 작업 대상 |
 | `rlp <subcommand> --json` | 같은 결정, 기계가 읽는 envelope. 종료코드 `0` 정상 · `1` `ok:false` · `2` usage · `3` doctor 실패 |
-| `rpi` | 같은 하네스, 오케스트레이션 표면 없음. 한 가지 일만 할 때 |
+| `rpi` | 같은 하네스, 오케스트레이션 표면 없음. 한 가지 일만 할 때. `rpi update`는 `rlp update`와 같은 명령이다 — updater는 하나고, 래퍼가 self-update 스펠링을 `scripts/rlp-update`로 다시 쓴다 (이 fork는 소스 빌드라 pi 내장 self-update는 영원히 "cannot self-update"만 답할 수 있다). pi의 패키지 형태(`--extensions`/`--models`/`--all`, npm:/github: 소스)는 그대로 fork로 간다 |
 
 ## 알려진 특성
 
@@ -161,10 +161,13 @@ planner·critique·verify·route 모델을 여기서 해석하고, `doctor`가 �
   CLI에서도 `rlp plan --mode orchestrate --because "…"`가 같은 계약이며 결과에
   `gate_override`로 기록된다.
 - 래더는 세션 안에서 편집된다: `/setup`, `/rlp-config`(메뉴 또는
-  `brain|add-arm|set-arm|move-arm|rm-arm|worker|gate|mode|escalate|cap|timeout|cross-vendor`),
-  `/rlp-roles`, `/models --pick`의 "add to the RLP ladder"/"make it the
-  orchestrator", 스크립트용 `rlp config '<ops-json>'`. 쓰기 전에 검증하고
-  `.bak.<ts>` 백업 + 원자적 교체를 한다.
+  `add|brain|add-arm|set-arm|move-arm|rm-arm|worker|gate|mode|escalate|cap|timeout|cross-vendor`,
+  전체 verb 목록은 `/rlp-config help`), `/rlp-roles`, `/models --pick`의
+  "＋ Add it to RLP"/"Make it the RLP orchestrator (brain)", 스크립트용
+  `rlp config '<ops-json>'`. 쓰기 전에 검증하고 `.bak.<ts>` 백업 + 원자적
+  교체를 한다. `add`는 worker를 자동으로 고른다(pi-harness worker가 하나뿐인
+  것이 압도적으로 흔한 래더고, 아니면 add-arm usage가 답한다) — "모델을
+  추가한다"의 한 줄 스펠링.
 - 디스패치 직전 preflight: 배정된 arm의 provider에 자격증명이 없거나 harness를
   이 호스트에서 못 띄우면 그 노드를 디스패치하지 않고 수정 안내와 함께 실패
   처리한다 (`rlp_plan`의 `preflight`에도 노출). 띄울 수 있는 harness는 이름

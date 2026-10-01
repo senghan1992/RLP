@@ -10,6 +10,28 @@ offline suite fails if they drift.
 
 ### Added
 
+- **`rpi update` and `rlp update` are one command now.** The fork is a source
+  build, so pi's built-in self-update could only ever answer "rpi cannot
+  self-update this installation" — while the fork's own TUI banner, on
+  spotting a new upstream version, tells you to run exactly that: a door that
+  opened onto a wall. The wrapper now re-spells the self-update forms
+  (`rpi update`, `update self`, `update pi`, `--self`, `--force`, `--check`,
+  `--dry-run`) as `scripts/rlp-update`, which is what "update" always meant
+  here: RLP's own checkout, then the fork under it, verified, rebuilt,
+  reinstalled. pi's package forms still reach pi untouched (`--extensions`,
+  `--models`, `--all`, `--extension <src>`, npm:/github: sources) — managing
+  pi-installed packages is a different job, and one that works. No fork edit,
+  so no patch regen and no rebuild: the banner's advice now lands on the
+  updater that moves the banner's own code.
+
+- **`/rlp-config add <provider/model>` — adding a model in one line.** The
+  verb picks the worker automatically (a lone pi-harness worker is the
+  overwhelmingly common ladder; anything else answers with the `add-arm`
+  usage rather than guessing) and carries the same default roles every other
+  add-surface uses. `/rlp-config help` prints every typed verb and knob — the
+  man page moved out of the ladder card's footer and into the command that
+  owns it.
+
 - **pi's own logged-in providers are now a source, not a retype.** RLP is
   pi's fork, so a key typed into pi once used to have to be typed into RLP
   again. `/setup` now offers them as one batch before the endpoint questions:
@@ -185,6 +207,26 @@ offline suite fails if they drift.
   because a switch with no way out under pressure is a trap.
 
 ### Changed
+
+- **Adding a model asks one question now, and it's the one that matters.**
+  Bare `/rlp-config` opens on five outcomes — *＋ Add a model to RLP*,
+  *Change or remove a model…*, *Choose the orchestrator model (brain)*,
+  *Per-role models… (which model does which job)*, *Advanced settings…* —
+  instead of six engine nouns; the arm/worker/gate vocabulary lives behind
+  Advanced and `help`. The add flow's single question is what the model
+  should do, and it is a select — *Everything — code, review, docs, research,
+  explore, debug (recommended)* or *Pick roles…* — because the old free-text
+  roles answer left empty became `roles: []`, an arm the router then never
+  dispatched with nothing ever saying why. `/rlp-config add-arm`'s default
+  roles changed from `code` alone to that same six-role set: an arm that
+  could only take code work read like a bug to everyone who added one. The
+  offer after `/provider connect`, `/setup` step 4 and `/models --pick`'s
+  *＋ Add it to RLP* ask the same question with the same default, and the
+  success lines say what RLP can now do rather than what was written.
+  *Change or remove a model* lists every model on every worker as one
+  numbered list — the same model riding two workers stays distinguishable,
+  and each entry offers replace, remove, or make-it-the-brain. The ladder
+  card's footer shrank from eleven command lines to four.
 
 - **The `/setup` wizard wears its own face now.** Same questions, same answers,
   every screen painted: a theme banner with a road the run has not taken yet, a

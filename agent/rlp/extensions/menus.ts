@@ -40,6 +40,17 @@ const SETTINGS_FILE = join(AGENT_DIR, "settings.json");
 
 type Json = Record<string, unknown>;
 
+/**
+ * Roles a newly added model carries when nobody narrows them: the same set the
+ * /setup one-model fallback uses, so "just add it" means the same thing in
+ * every surface. Spelled per file, like findPython — extensions load alone.
+ * `: string[]` on purpose: the op builders widen to string[], and a readonly
+ * tuple would not typecheck.
+ */
+const DEFAULT_ARM_ROLES: string[] = ["code", "review", "docs", "research", "explore", "debug"];
+/** The dispatchable roles an arm can carry; plan/critique/verify/route belong to the engine, not to workers. */
+const ARM_ROLE_CHOICES: string[] = ["code", "debug", "review", "research", "docs", "explore"];
+
 function readJson(path: string): Json | undefined {
 	try {
 		return JSON.parse(readFileSync(path, "utf8"));
@@ -228,18 +239,39 @@ function renderLadder(): string {
 		lines.push("  list and writes the brain and the arms.");
 		lines.push("");
 	}
-	lines.push("  /rlp-config brain <provider/model>        make it the orchestrator model");
-	lines.push("  /rlp-roles --pick                         set the model for each role");
-	lines.push("  /rlp-config add-arm <worker> <ref> [roles] append a worker arm");
-	lines.push("  /rlp-config set-arm <worker> <i|ref> <ref> replace one arm");
-	lines.push("  /rlp-config rm-arm <worker> <i|ref>        remove one arm");
-	lines.push("  /rlp-config worker <id> on|off [note]      enable/disable a worker");
-	lines.push("  /rlp-config gate <laya|hybrid|direct>      how triage decides (direct = never)");
-	lines.push("  /direct on|off                            the same switch, in one word");
-	lines.push("  /rlp-config critique on|off · refines <n> · recursion <n>   plan quality loop");
-	lines.push("  /rlp-config rlm-depth <n> · rlm-iterations <n> · rlm-budget <n|off>   RLM knobs");
-	lines.push("  /rlp-config escalate <0..1> · cap <n> · timeout <ms> · cross-vendor on|off");
+	// Four lines, not the whole man page: the card answers "what is the ladder
+	// and what do I type next", and `/rlp-config help` is the man page.
+	lines.push("  /rlp-config            (no argument) add, change or remove a model; brain; gate");
+	lines.push("  /rlp-roles --pick      set the model for each role");
+	lines.push("  /direct on|off         orchestrate or not, in one word");
+	lines.push("  /rlp-config help       every typed command and knob");
 	return lines.join("\n");
+}
+
+/** The full typed surface — what the ladder card's footer used to dump in full. */
+function configHelp(): string {
+	return [
+		"◈ /rlp-config — every typed command",
+		"",
+		"  /rlp-config add <provider/model> [roles]   add a model (auto-picks the worker, default roles)",
+		"  /rlp-config brain <provider/model>         make it the orchestrator model",
+		"  /rlp-config add-arm <worker> <ref> [roles] append an arm to one worker",
+		"  /rlp-config set-arm <worker> <i|ref> <ref> replace one arm",
+		"  /rlp-config rm-arm <worker> <i|ref>        remove one arm",
+		"  /rlp-config move-arm <worker> <from> <to>  reorder one worker's arms",
+		"  /rlp-config worker <id> on|off [note]      enable/disable a worker",
+		"  /rlp-config gate <laya|hybrid|direct>      how triage decides (direct = never)",
+		"  /rlp-config mode <direct|full>             the same switch as /direct",
+		"  /direct on|off                             the same switch, in one word",
+		"  /rlp-roles <role> <refs> | --pick          set the model for each role",
+		"  /rlp-config critique on|off · refines <n> · recursion <n>   plan quality loop",
+		"  /rlp-config rlm-depth <n> · rlm-iterations <n> · rlm-budget <n|off> · rlm-timeout <s|off>",
+		"  /rlp-config escalate <0..1> · cap <n> · timeout <ms> · cross-vendor on|off",
+		"  /rlp-config artifacts on|off · verify-samples <1..7>",
+		"",
+		"  Every verb also takes --dry-run. Default roles for a new model:",
+		`  ${DEFAULT_ARM_ROLES.join(", ")}`,
+	].join("\n");
 }
 
 /** Parse a `/rlp-config ...` line into engine ops. Returns undefined on a bad verb. */
@@ -248,6 +280,30 @@ function opsFromArgs(args: string): unknown[] | string {
 	switch (verb) {
 		case "brain":
 			return rest[0] ? [{ op: "set_brain", model: rest[0] }] : "usage: /rlp-config brain <provider/model>";
+		case "add": {
+			// The one-line spelling of "let RLP work with this model": the
+			// worker is picked automatically (a lone pi-harness worker is the
+			// overwhelmingly common ladder), and the roles default to the same
+			// set every add-surface uses. add-arm stays for the explicit form.
+			const [model, roles] = rest;
+			if (!model) return "usage: /rlp-config add <provider/model> [roles]";
+			if (!model.includes("/"))
+				return `usage: /rlp-config add <provider/model> [roles] — the model needs both halves, e.g. anthropic/claude-sonnet-4-5`;
+			const doc = ladderRaw();
+			if (!doc) return `no orchestration ladder at ${ladderPath()} — sh <RLP>/scripts/install.sh installs one`;
+			const worker = pickWorkerAuto(doc);
+			if (!worker)
+				return "could not pick a worker automatically (the ladder has none, or several) — use /rlp-config add-arm <worker> <provider/model> [roles], or bare /rlp-config for the menu";
+			return [
+				{
+					op: "add_arm",
+					worker,
+					model,
+					roles: (roles || DEFAULT_ARM_ROLES.join(",")).split(",").map((r) => r.trim()).filter(Boolean),
+					when: "added from /rlp-config add",
+				},
+			];
+		}
 		case "add-arm": {
 			const [worker, model, roles, ...when] = rest;
 			if (!worker || !model) return "usage: /rlp-config add-arm <worker> <provider/model> [roles] [when]";
@@ -256,7 +312,10 @@ function opsFromArgs(args: string): unknown[] | string {
 					op: "add_arm",
 					worker,
 					model,
-					roles: (roles || "code").split(",").map((r) => r.trim()).filter(Boolean),
+					// Default roles used to be "code" alone — an arm that could
+					// only take code work, which read like a bug to everyone who
+					// added a model this way. Now every add-surface defaults the same.
+					roles: (roles || DEFAULT_ARM_ROLES.join(",")).split(",").map((r) => r.trim()).filter(Boolean),
 					when: when.join(" ") || "added from /rlp-config",
 				},
 			];
@@ -341,6 +400,12 @@ function opsFromArgs(args: string): unknown[] | string {
 /** Pick `provider/model` from the authenticated catalogue, or undefined. */
 async function pickModelRef(ctx: ExtensionCommandContext): Promise<string | undefined> {
 	const rows = modelRows(ctx).filter((r) => r.authenticated);
+	if (rows.length === 0) {
+		// Without this the select opened on an empty list — a dialog that can
+		// only be cancelled, with nothing saying why. Say why instead.
+		ctx.ui.notify("◈ no authenticated models to choose from — /provider connect or /login first", "warning");
+		return undefined;
+	}
 	const providers = [...new Set(rows.map((r) => r.provider))].sort();
 	const provider = await ctx.ui.select("Provider", providers);
 	if (!provider) return undefined;
@@ -348,6 +413,163 @@ async function pickModelRef(ctx: ExtensionCommandContext): Promise<string | unde
 	const picked = await ctx.ui.select(`${provider} models`, inProvider.map((r) => r.id));
 	if (!picked) return undefined;
 	return `${provider}/${picked}`;
+}
+
+/** The worker a new arm rides when the ladder makes it obvious (a lone pi-harness worker). */
+function pickWorkerAuto(doc: Json): string | undefined {
+	// Same preference as bindRoleChainOps: pi-harness workers take headless
+	// dispatch, so when the ladder has exactly one, "which worker?" has an
+	// answer and asking it is noise.
+	const workers = ((doc.workers as Json[]) ?? []).filter((w) => typeof w.id === "string" && w.id !== "");
+	const piWorkers = workers.filter((w) => String(w.harness ?? "pi") === "pi");
+	const pool = piWorkers.length > 0 ? piWorkers : workers;
+	return pool.length === 1 ? String(pool[0].id) : undefined;
+}
+
+/** The worker to add an arm to: automatic when obvious, a question when not, undefined when impossible. */
+async function resolveWorker(ctx: ExtensionCommandContext, doc: Json): Promise<string | undefined> {
+	const auto = pickWorkerAuto(doc);
+	if (auto) return auto;
+	const workers = ((doc.workers as Json[]) ?? []).map((w) => String(w.id)).filter(Boolean);
+	if (workers.length === 0) {
+		ctx.ui.notify(`◈ the ladder has no worker to add a model to — ${ladderPath()}`, "warning");
+		return undefined;
+	}
+	return ctx.ui.select("Which worker?", workers);
+}
+
+/**
+ * The one question a model add should ask: what may this model do? The answer
+ * is a select, not free text — an empty text answer used to become `roles: []`,
+ * which the engine accepts and the router then never dispatches. "Everything"
+ * matches the /setup one-model fallback, so adding a model means the same
+ * thing in every surface.
+ */
+async function chooseArmRoles(ctx: ExtensionCommandContext, ref: string): Promise<string[] | undefined> {
+	const scope = await ctx.ui.select(`What should ${ref} do for RLP?`, [
+		`Everything — ${DEFAULT_ARM_ROLES.join(", ")} (recommended)`,
+		"Pick roles…",
+	]);
+	if (!scope) return undefined;
+	if (scope.startsWith("Everything")) return [...DEFAULT_ARM_ROLES];
+	const picked = await multiSelectIndices(ctx, `${ref} — which jobs may it take?`, ARM_ROLE_CHOICES);
+	if (picked.length === 0) {
+		ctx.ui.notify("◈ no roles chosen, so nothing was added — a model with no jobs never gets work", "warning");
+		return undefined;
+	}
+	return picked;
+}
+
+interface FlatArm {
+	worker: string;
+	index: number;
+	ref: string;
+	roles: string[];
+	available: boolean;
+}
+
+/** Every arm on every worker as one flat list — what "change or remove a model" browses. */
+function flatArms(doc: Json): FlatArm[] {
+	const arms: FlatArm[] = [];
+	((doc.workers as Json[]) ?? []).forEach((w) => {
+		const worker = String(w.id ?? "");
+		const available = w.available !== false;
+		((w.models as Json[]) ?? []).forEach((m, index) => {
+			const ref = String(m.model ?? "");
+			if (!ref.includes("/")) return;
+			arms.push({
+				worker,
+				index,
+				ref,
+				roles: Array.isArray(m.roles) ? (m.roles as unknown[]).map(String) : [],
+				available,
+			});
+		});
+	});
+	return arms;
+}
+
+/** After set_brain succeeds, also move the live session, so "brain" stops being a description. */
+async function adoptBrain(ctx: ExtensionCommandContext, setModel: SetModel, ref: string): Promise<void> {
+	try {
+		const [provider, id] = [ref.slice(0, ref.indexOf("/")), ref.slice(ref.indexOf("/") + 1)];
+		const model = ctx.modelRegistry.find(provider, id);
+		if (model && (await setModel(model as never))) ctx.ui.notify(`◈ this session now runs on ${ref}`, "info");
+	} catch {
+		/* the ladder is edited either way */
+	}
+}
+
+/** "＋ Add a model to RLP": pick a model, get one question (roles), done. No worker question unless the ladder truly has several. */
+async function addModelToLadder(ctx: ExtensionCommandContext): Promise<void> {
+	const ref = await pickModelRef(ctx);
+	if (!ref) return;
+	const doc = ladderRaw();
+	if (!doc) {
+		ctx.ui.notify([`◈ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one, or /rlp-config to inspect"].join("\n"), "warning");
+		return;
+	}
+	const worker = await resolveWorker(ctx, doc);
+	if (!worker) return;
+	const roles = await chooseArmRoles(ctx, ref);
+	if (!roles) return;
+	const reply = await applyConfig(ctx, [{ op: "add_arm", worker, model: ref, roles, when: "added from the /rlp-config menu" }]);
+	ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
+	if (!reply.ok) return;
+	// The ladder has the model, but a direct gate never dispatches — say so
+	// rather than let "added" read as "RLP will use it".
+	const gate = String((doc.routing as Json | undefined)?.gate ?? "");
+	if (gate === "direct" || process.env.RLP_DIRECT === "1") {
+		ctx.ui.notify("◈ the gate is direct, so RLP won't dispatch yet — /direct off (or /rlp-config gate hybrid) lets it work", "info");
+	}
+}
+
+/** "Change or remove a model…": every model RLP can dispatch, as one numbered list. */
+async function changeOrRemoveModel(ctx: ExtensionCommandContext, setModel: SetModel): Promise<void> {
+	const doc = ladderRaw();
+	if (!doc) {
+		ctx.ui.notify([`◈ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one, or /rlp-config to inspect"].join("\n"), "warning");
+		return;
+	}
+	const arms = flatArms(doc);
+	if (arms.length === 0) {
+		ctx.ui.notify("◈ the ladder has no models yet — ＋ Add a model to RLP first", "warning");
+		return;
+	}
+	// Numbered labels: the same model can ride two workers, and an unnumbered
+	// select would show two identical lines. The number also makes the reverse
+	// mapping exact — labels.indexOf(picked) — which matching by text cannot be.
+	const labels = arms.map(
+		(a, n) => `${n + 1}. ${a.ref} · ${a.roles.length > 0 ? a.roles.join("/") : "no roles"} · worker ${a.worker}${a.available ? "" : " [off]"}`,
+	);
+	const picked = await ctx.ui.select("Which model?", labels);
+	if (!picked) return;
+	const arm = arms[labels.indexOf(picked)];
+	if (!arm) return;
+	const action = await ctx.ui.select(arm.ref, [
+		"Replace it with another model…",
+		"Remove it from RLP",
+		"Make it the orchestrator (brain)",
+		"Cancel",
+	]);
+	if (!action || action === "Cancel") return;
+	if (action.startsWith("Replace")) {
+		const ref = await pickModelRef(ctx);
+		if (!ref) return;
+		const reply = await applyConfig(ctx, [{ op: "set_arm", worker: arm.worker, match: arm.index, model: ref }]);
+		ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
+		return;
+	}
+	if (action.startsWith("Remove")) {
+		// The engine keeps a worker's last arm ("add the replacement first"),
+		// and that refusal arrives through reply.lines — honest, no UI echo here.
+		const reply = await applyConfig(ctx, [{ op: "remove_arm", worker: arm.worker, match: arm.index }]);
+		ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
+		return;
+	}
+	const reply = await applyConfig(ctx, [{ op: "set_brain", model: arm.ref }]);
+	ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
+	if (reply.ok) await adoptBrain(ctx, setModel, arm.ref);
 }
 
 /** The interactive editor behind bare `/rlp-config`. */
@@ -358,17 +580,23 @@ async function editLadderInteractively(ctx: ExtensionCommandContext, setModel: S
 		return;
 	}
 	const workers = ((doc.workers as Json[]) ?? []).map((w) => String(w.id));
+	// Outcomes, not engine nouns. The old menu asked the user to think in arms
+	// and gates before it would let them add a model; this one leads with what
+	// changes for them, and the internal vocabulary lives one level down (or in
+	// /rlp-config help, which lists every typed verb).
 	const action = await ctx.ui.select("RLP ladder — what to change?", [
-		"Set the orchestrator model (brain)",
-		"Set the model per role (role → model)",
-		"Add a worker arm",
-		"Replace a worker arm",
-		"Enable / disable a worker",
-		"Escalation gate (laya vs hybrid vs direct)",
+		"＋ Add a model to RLP",
+		"Change or remove a model…",
+		"Choose the orchestrator model (brain)",
+		"Per-role models… (which model does which job)",
+		"Advanced settings…",
 	]);
 	if (!action) return;
 
-	if (action.startsWith("Set the model per role")) {
+	if (action.startsWith("＋")) return addModelToLadder(ctx);
+	if (action.startsWith("Change or remove")) return changeOrRemoveModel(ctx, setModel);
+
+	if (action.startsWith("Per-role")) {
 		const view = await fetchLadderView(ctx);
 		if (!view) {
 			ctx.ui.notify(`◈ no orchestration ladder at ${ladderPath()}`, "warning");
@@ -377,52 +605,31 @@ async function editLadderInteractively(ctx: ExtensionCommandContext, setModel: S
 		return editRolesInteractively(ctx, view);
 	}
 
-	if (action.startsWith("Set the orchestrator")) {
+	if (action.startsWith("Choose the orchestrator")) {
 		const ref = await pickModelRef(ctx);
 		if (!ref) return;
 		const reply = await applyConfig(ctx, [{ op: "set_brain", model: ref }]);
 		ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
 		if (!reply.ok) return;
 		// Also move the live session, so "brain" stops being a description.
-		try {
-			const [provider, id] = [ref.slice(0, ref.indexOf("/")), ref.slice(ref.indexOf("/") + 1)];
-			const model = ctx.modelRegistry.find(provider, id);
-			if (model && (await setModel(model as never))) ctx.ui.notify(`◈ this session now runs on ${ref}`, "info");
-		} catch {
-			/* the ladder is edited either way */
-		}
+		await adoptBrain(ctx, setModel, ref);
 		return;
 	}
 
-	if (action.startsWith("Add a worker arm")) {
-		const worker = workers.length === 1 ? workers[0] : await ctx.ui.select("Worker", workers);
-		if (!worker) return;
-		const ref = await pickModelRef(ctx);
-		if (!ref) return;
-		const roles = (await ctx.ui.input("Roles (comma-separated)", "code,review")) ?? "code";
-		const reply = await applyConfig(ctx, [
-			{ op: "add_arm", worker, model: ref, roles: roles.split(",").map((r) => r.trim()).filter(Boolean), when: "added from the /rlp-config menu" },
-		]);
-		ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
+	// Advanced settings… — the worker/gate knobs, and the door to the typed verbs.
+	const advanced = await ctx.ui.select("Advanced settings", [
+		"Enable / disable a worker",
+		"Escalation gate (laya vs hybrid vs direct)",
+		"Show every typed command",
+	]);
+	if (!advanced) return;
+
+	if (advanced === "Show every typed command") {
+		ctx.ui.notify(configHelp());
 		return;
 	}
 
-	if (action.startsWith("Replace a worker arm")) {
-		const worker = workers.length === 1 ? workers[0] : await ctx.ui.select("Worker", workers);
-		if (!worker) return;
-		const workerDoc = ((doc.workers as Json[]) ?? []).find((w) => w.id === worker);
-		const arms = ((workerDoc?.models as Json[]) ?? []).map((m, i) => `${i}: ${m.model}`);
-		if (arms.length === 0) return;
-		const slot = await ctx.ui.select("Which arm?", arms);
-		if (!slot) return;
-		const ref = await pickModelRef(ctx);
-		if (!ref) return;
-		const reply = await applyConfig(ctx, [{ op: "set_arm", worker, match: Number(slot.split(":")[0]), model: ref }]);
-		ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
-		return;
-	}
-
-	if (action.startsWith("Enable / disable")) {
+	if (advanced === "Enable / disable a worker") {
 		const worker = await ctx.ui.select("Worker", workers);
 		if (!worker) return;
 		const toggle = await ctx.ui.select(`${worker} is`, ["available (on)", "unavailable (off)"]);
@@ -435,20 +642,21 @@ async function editLadderInteractively(ctx: ExtensionCommandContext, setModel: S
 		return;
 	}
 
+	// Escalation gate — an explicit branch now, not the menu's fallthrough.
 	const gate = await ctx.ui.select("Escalation gate", [
 		"hybrid — laya plus deterministic fan-out signals (recommended)",
 		"laya — laya alone; unsure always defaults to direct",
 		"direct — never orchestrate: every request inline, and no decision model to load",
 	]);
 	if (!gate) return;
-	const reply = await applyConfig(ctx, [
+	const gateReply = await applyConfig(ctx, [
 		{
 			op: "set_routing",
 			key: "gate",
 			value: gate.startsWith("hybrid") ? "hybrid" : gate.startsWith("direct") ? "direct" : "laya",
 		},
 	]);
-	ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
+	ctx.ui.notify(gateReply.lines.join("\n"), gateReply.ok ? "info" : "warning");
 }
 
 // --- role bindings: role -> model(s) -----------------------------------------------
@@ -827,9 +1035,9 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 	const action = await ctx.ui.select(`${provider}/${target.id}`, [
 		"Use for this session",
 		"Set as the default for new sessions",
-		"Add it to the RLP ladder as a worker arm",
+		"＋ Add it to RLP (workers can use it)",
 		"Make it the RLP orchestrator (brain)",
-		"Bind as the model for an RLP role",
+		"Use it for one role…",
 		"Cancel",
 	]);
 	if (!action || action === "Cancel") return;
@@ -850,10 +1058,9 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 		return;
 	}
 
-	if (action === "Add it to the RLP ladder as a worker arm") {
+	if (action.startsWith("＋")) {
 		const doc = ladderRaw();
-		const workers = ((doc?.workers as Json[]) ?? []).map((w) => String(w.id));
-		if (workers.length === 0) {
+		if (!doc) {
 			ctx.ui.notify(
 				[`◈ no orchestration ladder at ${ladderPath()}`, "  sh <RLP>/scripts/install.sh installs one, or /rlp-config to inspect"].join(
 					"\n",
@@ -862,19 +1069,17 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 			);
 			return;
 		}
-		const worker = workers.length === 1 ? workers[0] : await ctx.ui.select("Which worker?", workers);
+		const worker = await resolveWorker(ctx, doc);
 		if (!worker) return;
-		const roles = (await ctx.ui.input("Roles (comma-separated)", "code,review,docs")) ?? "code";
+		// One question was asked already (this model); the roles question would
+		// be a second one for the same intent, so the shared default applies and
+		// the success note says how to specialize.
+		const ref = `${target.provider}/${target.id}`;
 		const reply = await applyConfig(ctx, [
-			{
-				op: "add_arm",
-				worker,
-				model: `${target.provider}/${target.id}`,
-				roles: roles.split(",").map((r) => r.trim()).filter(Boolean),
-				when: "added from /models",
-			},
+			{ op: "add_arm", worker, model: ref, roles: [...DEFAULT_ARM_ROLES], when: "added from /models" },
 		]);
-		ctx.ui.notify(reply.lines.join("\n"), reply.ok ? "info" : "warning");
+		const rolesNote = reply.ok ? ["", `  roles: ${DEFAULT_ARM_ROLES.join(", ")}`, "  /rlp-roles to specialize, or bare /rlp-config to edit"] : [];
+		ctx.ui.notify([...reply.lines, ...rolesNote].join("\n"), reply.ok ? "info" : "warning");
 		return;
 	}
 
@@ -888,7 +1093,7 @@ async function pickModel(ctx: ExtensionCommandContext, setModel: SetModel): Prom
 		return;
 	}
 
-	if (action === "Bind as the model for an RLP role") {
+	if (action === "Use it for one role…") {
 		const view = await fetchLadderView(ctx);
 		if (!view) {
 			ctx.ui.notify(`◈ no orchestration ladder at ${ladderPath()}`, "warning");
@@ -955,7 +1160,7 @@ const SHELL: Array<[string, string]> = [
 	["rlp doctor [--warm]", "is this host runnable? one fix per line"],
 	["rlp memory | remember", "this project's cross-run knowledge log"],
 	["rlp serve", "the decision engine as an MCP stdio server"],
-	["rlp update [--check]", "update the harness fork and re-apply RLP on top"],
+	["rlp update [--check]", "one updater: RLP's checkout, then the fork under it — `rpi update` is the same"],
 	["rpi", "the bare harness, with no orchestration surface at all"],
 ];
 
@@ -1049,7 +1254,7 @@ async function renderCommands(ctx: ExtensionCommandContext, filter: string): Pro
 		["/rlp-triage <request>", "the gate alone, one forward pass"],
 		["/rlp-doctor", "is this host runnable?"],
 		["/rlp-ladder", "the resolved model ladder"],
-		["/rlp-config", "show or edit the ladder (brain, worker arms, gate, mode)"],
+		["/rlp-config", "show or edit the ladder: add/remove models, brain, per-role models, gate"],
 		["/rlp-roles", "set the orchestration model per role (role -> model)"],
 		["/rlp-run <request>", "compose the orchestrator command"],
 		["/commands", "this index"],
@@ -1129,6 +1334,7 @@ export default function harnessMenus(pi: ExtensionAPI): void {
 				if (ctx.hasUI) return editLadderInteractively(ctx, (model) => pi.setModel(model as never));
 				return void ctx.ui.notify(renderLadder());
 			}
+			if (raw === "help" || raw === "--help" || raw === "-h") return void ctx.ui.notify(configHelp());
 			if (raw === "show" || raw === "list") return void ctx.ui.notify(renderLadder());
 			const dryRun = /(^|\s)--dry-run(\s|$)/.test(raw);
 			const clean = raw.replace(/(^|\s)--dry-run(\s|$)/, " ").trim();

@@ -333,12 +333,14 @@ Filled in, it looks like this (the provider ids are whatever *you* connected):
 The ladder is editable from inside a session — no rebuild, no hand-editing JSON:
 
 ```
-/rlp-config                 show the ladder, or open an edit menu
+/rlp-config                 show the ladder, or open the edit menu
+/rlp-config add <ref>       add a model: worker picked automatically, standard roles
+/rlp-config help            every typed verb and knob
 /rlp-config brain <ref>     make a model the orchestrator
 /rlp-roles                  the model each role resolves to
 /rlp-roles --pick           pick a role, then multi-select a provider's models
-/models --pick              switch model · set default · add as a ladder arm ·
-                            bind as the model for a role
+/models --pick              switch model · set default · add to RLP ·
+                            use for one role
 ```
 
 Every edit is validated **before** it is written, keeps a timestamped backup, and
@@ -414,14 +416,14 @@ Add `--json` to any engine subcommand for the raw envelope. Exit codes:
 
 | Command | What it does |
 |---|---|
-| `/setup` | guided first run: mode → (tools already on this host) → endpoints → model → worker arms → per-role models |
+| `/setup` | guided first run: mode → (tools already on this host) → endpoints → the model RLP runs on → which models RLP may send work to → per-role models |
 | `/direct on\|off\|status` | direct-only mode: work inline and never orchestrate |
 | `/rlp` | status card (ladder, brain, endpoints, unusable arms) + an action menu |
 | `/rlp-plan <request>` | the headless plan, rendered in chat |
 | `/rlp-triage <request>` | the gate verdict alone |
 | `/rlp-doctor` | host health |
 | `/rlp-ladder` | the resolved ladder in full |
-| `/rlp-config` | show or edit the ladder (brain, arms, roles, gate, RLM knobs) |
+| `/rlp-config` | show or edit the ladder: add/change/remove models, brain, per-role models, gate — `help` lists every typed verb |
 | `/rlp-roles` | the model each role resolves to, and the menu to change it |
 | `/rlp-watch` | the run's live worker windows and how to attach to each (read-only; RLP never attaches for you) |
 | `/commands [filter]` | the whole slash index, grouped (harness, RLP, skills, optional extensions) |
@@ -485,7 +487,7 @@ rpi                   # the bare harness, no orchestration — isolate the harne
 | a request never fans out | the gate defaults to direct; use `rlp plan --mode orchestrate --because "…"` or ask explicitly |
 | nothing orchestrates *at all*, and `/rlp-plan` says `direct-only mode` | the mode, not a fault: `rlp mode` (or `/direct status`) says whether it came from `routing.gate` or `$RLP_DIRECT`; `/direct off` ends it |
 | a worker dies instantly | `rlp doctor` — usually a missing credential for that arm (`/provider key <id>`, or `/login <provider>`) |
-| a model is in the list but nothing runs on it | it is not a *ladder arm*: `/provider` names this under "ladder arms that cannot run", `/rlp-config add-arm` attaches it |
+| a model is in the list but nothing runs on it | it is not a *ladder arm*: `/provider` names this under "ladder arms that cannot run", `/rlp-config add <provider/model>` attaches it |
 | a connection fails and you cannot tell why | `/provider test <id>` — a rejected key, a wrong URL, a bad model id, no network and TLS are told apart, each with a fix |
 | `/settings` or `/model` default ignored | managed worker sessions follow `RPI_DEFAULT_MODEL`; interactive sessions keep your saved default |
 

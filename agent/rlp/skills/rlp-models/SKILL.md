@@ -35,7 +35,7 @@ returns the same ladder as structured JSON with `roster` and
 In the harness — this is a terminal tool, and so is that:
 
 ```
-/setup                                     the guided first run: endpoints, brain, worker arms, roles
+/setup                                     the guided first run: endpoints, brain, the models RLP works with, roles
 /provider                                  endpoints, credential state, and the arms that cannot run
 /provider connect                          guided: preset → endpoint → key → live GET /models → pick models
 /provider add <id> <baseUrl> <model…>      the scriptable attach
@@ -60,8 +60,8 @@ pipes it to `--key-stdin`). Do not hand-edit `models.json` or `auth.json`: the
 engine is the only writer that keeps those rules.
 
 Adding an endpoint does not by itself make RLP use it. A model becomes usable by
-the orchestrator only when it is a **ladder arm** (`/rlp-config add-arm`, or the
-menu offered right after `/provider connect`) — otherwise it is a model the
+the orchestrator only when it is a **ladder arm** (`/rlp-config add <provider/model>`,
+or the menu offered right after `/provider connect`) — otherwise it is a model the
 harness can run and the router will never pick. `rlp provider list` says which
 arms each endpoint carries, and `rlp doctor` reports the arms that cannot run.
 

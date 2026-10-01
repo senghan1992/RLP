@@ -63,7 +63,7 @@ command is a file drop plus `/reload`, never a rebuild.
 | `/rlp-triage <request>` | the gate verdict alone, one forward pass |
 | `/rlp-doctor` | host health, one fix per failure |
 | `/rlp-ladder` | the resolved ladder in full |
-| `/rlp-config` | show the ladder, or edit it in place: brain, worker arms, per-role models, gate |
+| `/rlp-config` | show the ladder, or edit it in place: add/change/remove models, brain, per-role models, gate — `help` lists every typed verb |
 | `/rlp-roles` | the model each role resolves to, and the menu to change it: pick a role, then multi-select a provider's models (a priority chain) |
 | `/rlp-run <request>` | composes `rlp -p "…"` into the editor — dispatch needs a real session |
 | `/direct on\|off\|status` | direct-only mode: every request inline, no gate and no decision model — or the gate back, or what is in effect and what put it there |
@@ -73,9 +73,9 @@ command is a file drop plus `/reload`, never a rebuild.
 | Command | What it does |
 |---|---|
 | `/commands [filter]` | the whole menu, grouped: harness built-ins, RLP, extensions, skills, and the shell side |
-| `/setup` | the guided first run: mode → connect/key the endpoints → the model RLP works on → the worker arms (cross-vendor rule stated) → the model for each role → re-check. Every step is skippable, and it starts by itself on a host that cannot work yet |
+| `/setup` | the guided first run: mode → connect/key the endpoints → the model RLP works on → which models RLP may send work to (cross-vendor rule stated) → the model for each role → re-check. Every step is skippable, and it starts by itself on a host that cannot work yet |
 | `/models [filter]` | models grouped by provider — `●` this session, `★` your default, `⚑` ladder arm, `○` no credentials |
-| `/models --pick` | provider → model → use for this session, set as default, add as an RLP ladder arm, or make it the orchestrator |
+| `/models --pick` | provider → model → use for this session, set as default, add it to RLP, make it the orchestrator (brain), or use it for one role |
 | `/provider` | every endpoint with its credential state **and which of them the ladder actually dispatches to**; orphan arms are named, so "the model is in the list but nothing runs" has a reason |
 | `/provider connect` | guided attach: preset → id → endpoint → key → live `GET /models` → multi-select → write. Presets cover OpenAI, Anthropic, OpenRouter, Groq, DeepSeek, Qwen, Ollama and any local OpenAI-compatible server |
 | `/provider test [id]` | one real completion round trip, with the failure **classified**: auth / not_found / rate_limit / server / network / tls / bad_url, each with a fix line |
@@ -331,10 +331,13 @@ load naming the exact field. An absent ladder means no section and plain-harness
 behaviour.
 
 **It is editable in-session.** The same file the harness renders is written by
-the engine's validated `config` op, so `/rlp-config` (menu or
-`brain|add-arm|set-arm|move-arm|rm-arm|worker|gate|escalate|cap|timeout|cross-vendor`)
-and the *add to the RLP ladder* / *make it the RLP orchestrator* actions in
-`/models --pick` change the orchestrating models without a rebuild. Every edit
+the engine's validated `config` op, so `/rlp-config` (menu,
+`add|brain|add-arm|set-arm|move-arm|rm-arm|worker|gate|escalate|cap|timeout|cross-vendor`,
+or `help` for the full list) and the *＋ Add it to RLP* / *Make it the RLP
+orchestrator (brain)* actions in `/models --pick` change the orchestrating
+models without a rebuild. `add` picks the worker automatically — a lone
+pi-harness worker is the overwhelmingly common ladder — and carries the same
+default roles every add-surface uses. Every edit
 is validated *before* it is written, keeps an `orchestration.json.bak.<ts>`
 backup, and replaces the file atomically; the harness re-reads it on the next
 prompt rebuild (it caches on the file's mtime). `rlp config '<ops-json>'` is
