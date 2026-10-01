@@ -184,6 +184,24 @@ offline suite fails if they drift.
   over from an hour ago is not. Explicit `--mode` outranks the mode as before,
   because a switch with no way out under pressure is a trap.
 
+### Changed
+
+- **The `/setup` wizard wears its own face now.** Same questions, same answers,
+  every screen painted: a theme banner with a road the run has not taken yet, a
+  stepper on every step header (`▰▰▱▱▱  mode ✓  endpoints ▸  brain ·`), receipts
+  that tick what a step actually wrote — ladder, backup, brain, and an
+  `[UNAVAILABLE]` arm in warning — and one deadpan line per step, because a
+  wizard nobody enjoys reads is a wizard people quit
+  ("Workers get branches, not the merge. The merge stays yours."). Working
+  messages read like the tool knows what it is doing: *the doctor takes this
+  host's blood pressure*, *reading pi's guest book — names only, never keys*.
+  The painting is deliberate about what it must not touch: `select` and
+  `confirm` options return raw and the router inspects the raw string, so
+  option text stays uncoloured by design, and every colour code sits *outside*
+  the substrings the checks match, byte-contiguous as before. Both wizard
+  checks pass unchanged, and a cancelled run at 80 columns still leaves the
+  ladder's checksum alone.
+
 ### Fixed
 
 - **`rlp progress` did nothing.** The subcommand existed in the engine, was

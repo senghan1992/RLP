@@ -307,8 +307,73 @@ function renderProviders(summary: ProviderSummary): string {
 }
 
 /** The lines a successful provision reports, so the user sees what was written. */
-function reportApplied(kind: string, id: string, extra: string[]): string {
-	return [`◈ ${kind} ${id}`, "", ...extra].join("\n");
+function reportApplied(ctx: ExtensionContext, kind: string, id: string, extra: string[]): string {
+	return [paint(ctx, "success", emph(ctx, `◈ ${kind} ${id}`)), "", ...extra].join("\n");
+}
+
+// --- the wizard's look -----------------------------------------------------------------
+//
+// Color comes from the host's own theme, and one rule governs it: a color code may
+// only ever *surround* a finished line or segment — never cut across a string some
+// check or router matches (`Step N of 5`, `copied into RLP`, `● `, option labels
+// returned raw from select). The pty checks strip ANSI before matching; the RPC
+// check matches the raw message, so surrounding-whole-lines is the only safe edit.
+// The second rule is width: ambiguous glyphs (▰▸·─) double on East-Asian-configured
+// terminals, so any line leaning on them stays under ~50 plain columns.
+
+type PaintToken = Parameters<ExtensionContext["ui"]["theme"]["fg"]>[0];
+
+/** Wrap a whole finished string in one theme color; plain if no theme is loaded. */
+function paint(ctx: ExtensionContext, token: PaintToken, s: string): string {
+	try {
+		return ctx.ui.theme.fg(token, s);
+	} catch {
+		return s;
+	}
+}
+
+/** Bold a whole finished string; plain if no theme is loaded. */
+function emph(ctx: ExtensionContext, s: string): string {
+	try {
+		return ctx.ui.theme.bold(s);
+	} catch {
+		return s;
+	}
+}
+
+/** A fixed Unicode rule — never `---`, which markdown would turn into an <hr>. */
+const RULE = "─".repeat(38);
+
+/** The five real steps. 1b/1c are detours and never appear in the meter. */
+const STEPS = ["mode", "endpoints", "brain", "arms", "roles"];
+
+/**
+ * The progress meter every step header rides on: five filled cells plus the road
+ * with per-step marks. It names steps as `3 brain` — deliberately *never* as
+ * `Step 3 of 5`: a no-credential run asserts that phrase is absent until the
+ * step actually happens, and this line shows up before it could.
+ * `stepperLine(ctx, 6)` renders the completed road: every rung checked.
+ */
+function stepperLine(ctx: ExtensionContext, n: number): string {
+	const cells = STEPS.map((_, i) => (i < n ? "▰" : "▱")).join("");
+	const marks = STEPS.map((name, i) =>
+		i + 1 < n
+			? paint(ctx, "success", `${name} ✓`)
+			: i + 1 === n
+				? paint(ctx, "accent", `${name} ▸`)
+				: paint(ctx, "dim", `${name} ·`),
+	);
+	return `${paint(ctx, "border", cells)}  ${marks.join("   ")}`;
+}
+
+/**
+ * The two header lines a step title starts with: the question verbatim under its
+ * `Step N of 5 —` prefix, the meter, and a rule. Dialogs already bold+accent the
+ * whole title themselves; the emphasis here is for when the same text lands in a
+ * notify instead.
+ */
+function stepHeader(ctx: ExtensionContext, n: number, question: string): string[] {
+	return [emph(ctx, `Step ${n} of 5 — ${question}`), stepperLine(ctx, n), paint(ctx, "dim", RULE)];
 }
 
 // --- the model catalogue the harness resolves -----------------------------------------
@@ -438,13 +503,14 @@ async function applyOps(ctx: ExtensionContext, ops: unknown[], kind: string, id:
 	const ladder = (reply.data.ladder ?? {}) as Json;
 	const workers = (ladder.workers as Json[] | undefined) ?? [];
 	ctx.ui.notify(
-		reportApplied(kind, id, [
-			`  ladder  ${String(reply.data.path ?? "")}`,
-			reply.data.backup ? `  backup  ${String(reply.data.backup)}` : "",
-			`  brain   ${String(ladder.brain ?? "?")}`,
+		reportApplied(ctx, kind, id, [
+			`  ✓ ${"ladder".padEnd(8)} ${String(reply.data.path ?? "")}`,
+			reply.data.backup ? `  ✓ ${"backup".padEnd(8)} ${String(reply.data.backup)}` : "",
+			`  ✓ ${"brain".padEnd(8)} ${String(ladder.brain ?? "?")}`,
 			...workers.map((w) => {
 				const arms = (w.models as Json[] | undefined) ?? [];
-				return `  [${String(w.id)}]${w.available === false ? " [UNAVAILABLE]" : ""} ${arms.map((m) => String(m.model)).join(", ")}`;
+				const line = `  ${w.available === false ? "✗" : "✓"} [${String(w.id)}]${w.available === false ? " [UNAVAILABLE]" : ""} ${arms.map((m) => String(m.model)).join(", ")}`;
+				return w.available === false ? paint(ctx, "warning", line) : line;
 			}),
 		].filter(Boolean)),
 	);
@@ -606,7 +672,7 @@ async function connectWizard(ctx: ExtensionContext, presetId?: string): Promise<
 	}
 	const stored = (applied.data.models as string[] | undefined) ?? chosen;
 	ctx.ui.notify(
-		reportApplied(existing ? "updated" : "connected", id, [
+		reportApplied(ctx, existing ? "updated" : "connected", id, [
 			`  endpoint  ${baseUrl}`,
 			`  models    ${stored.length > 0 ? stored.join(", ") : "(none yet)"}`,
 			`  auth      ${apiKey ? "key written to auth.json (0600)" : `none yet — /provider key ${id}`}`,
@@ -678,7 +744,7 @@ async function offerUsage(
 		settings.defaultModel = connected.models[0];
 		writeFileSync(SETTINGS_FILE, `${JSON.stringify(settings, null, 2)}\n`);
 		ctx.ui.notify(
-			reportApplied("default set to", ref, [
+			reportApplied(ctx, "default set to", ref, [
 				backup ? `  backup  ${backup}` : "  backup  none (new file)",
 				"  Applies to new sessions. Orchestrated workers keep the ladder arms.",
 			]),
@@ -886,7 +952,7 @@ async function addModelsInteractive(ctx: ExtensionContext, provider: string): Pr
 		return;
 	}
 	ctx.ui.notify(
-		reportApplied("models added to", provider, [
+		reportApplied(ctx, "models added to", provider, [
 			`  now  ${(((reply.data.models as string[]) ?? []) || []).join(", ")}`,
 			`  backup  ${String(reply.data.backup ?? "none")}`,
 		]),
@@ -903,7 +969,7 @@ async function removeInteractive(ctx: ExtensionContext, provider: string): Promi
 		return;
 	}
 	ctx.ui.notify(
-		reportApplied("removed", provider, [
+		reportApplied(ctx, "removed", provider, [
 			reply.data.keyRemoved ? "  credential also removed" : "  credential kept in auth.json",
 			`  backup  ${String(reply.data.backup ?? "none")}`,
 			"  /reload to apply.",
@@ -969,12 +1035,17 @@ async function setupWizard(
 	ctx: ExtensionContext,
 	opts: { firstRun?: boolean } = {},
 ): Promise<void> {
-	const health = await withWork(ctx, "rlp: checking this host", () => doctorSummary(ctx));
+	const health = await withWork(ctx, "rlp: the doctor takes this host's blood pressure", () => doctorSummary(ctx));
 	const banner = [
-		opts.firstRun ? "◈ RLP — first run" : "◈ RLP setup",
-		"",
-		`  doctor  ${health.ok ? "runnable" : "problems found"} (${health.text})`,
+		emph(ctx, opts.firstRun ? "◈ RLP — first run" : "◈ RLP setup — knows when not to orchestrate"),
+		paint(ctx, "dim", RULE),
+		paint(ctx, health.ok ? "success" : "warning", `  doctor  ▸ ${health.ok ? "runnable" : "problems found"} (${health.text})`),
 		...(health.problems.length > 0 ? ["", ...health.problems.map((p) => `  ${p}`)] : []),
+		"",
+		emph(ctx, "  the road:"),
+		"  1 mode → [tools] → [pi] → 2 endpoints",
+		"      → 3 brain → 4 arms → 5 roles",
+		"  the [ ] are detours that only open when there is something to find.",
 		"",
 		`  ${opts.firstRun ? "A few questions, then RLP works on this host." : "A few questions, each one skippable."}`,
 		"  Cancelling a step leaves it exactly as it was; nothing is written twice.",
@@ -989,12 +1060,14 @@ async function setupWizard(
 	const directNow = Boolean(ladder?.direct_only);
 	const modeChoice = await ctx.ui.select(
 		[
-			"Step 1 of 5 — what should RLP do with a request?",
+			...stepHeader(ctx, 1, "what should RLP do with a request?"),
 			"",
 			`  currently: ${directNow ? `direct-only (from ${ladder?.direct_source})` : "full — the gate decides each time"}`,
 			"",
 			"  full     a small model decides each time: inline when one agent can",
 			"           finish the work, a fan-out of workers when it earns it.",
+			paint(ctx, "muted", "    request ──▶ ⟨laya⟩ ──▶ inline, right here"),
+			paint(ctx, "muted", "                     └──▶ a wave of workers"),
 			"  direct   always inline. No gate, no DAG, no workers — RLP as a plain",
 			"           coding agent, and no decision model to load.",
 		].join("\n"),
@@ -1018,7 +1091,7 @@ async function setupWizard(
 	//     feed) and skipped entirely when RLP_HARNESS_SCAN=0 or the scan finds
 	//     no new tool — a pi-only host answers none of these questions.
 	if (!directOnly && ladder) {
-		const scan = await withWork(ctx, "rlp: looking for coding tools on this host", () =>
+		const scan = await withWork(ctx, "rlp: asking PATH who else lives here (spawns nothing)", () =>
 			engineJson(ctx, ["harness", "scan", "--no-versions", "--json"], undefined, 30_000),
 		);
 		const mounted = new Set(ladder.workers.map((w) => w.harness ?? "pi"));
@@ -1032,11 +1105,12 @@ async function setupWizard(
 			const picked = await multiSelect(
 				ctx,
 				[
-					"◈ tools this host already has. Any of them can run workers —",
+					paint(ctx, "accent", "◈ tools this host already has. Any of them can run workers —"),
 					"  each becomes a ladder worker on its own tool, carrying one arm",
 					"  (`<harness>/default`: the tool picks its own model).",
 					"",
-					"  Nothing is written until you confirm the list.",
+					"  login state rides with each name; nothing is written until",
+					"  you confirm the list.",
 				].join("\n"),
 				fresh.map(label),
 			);
@@ -1081,7 +1155,7 @@ async function setupWizard(
 	//     an endpoint whatever the gate decides. Invisible when the scan finds
 	//     nothing new, and when `sameDir` says RLP already reads pi's store.
 	{
-		const scan = await withWork(ctx, "rlp: looking for providers pi already has", () =>
+		const scan = await withWork(ctx, "rlp: reading pi's guest book — names only, never keys", () =>
 			engineJson(ctx, ["provider", "scan", "--json"], undefined, 30_000),
 		);
 		// A builtin row with no credential could not be imported (there is no
@@ -1099,9 +1173,10 @@ async function setupWizard(
 			const picked = await multiSelect(
 				ctx,
 				[
-					"◈ providers pi already has connected. Any of them come over as",
+					paint(ctx, "accent", "◈ providers pi already has connected. Any of them come over as"),
 					"  they are — endpoint, models, credential — so there is nothing",
-					"  to retype here.",
+					"  to retype here. RLP is pi's fork: log in once, both use it.",
+					"  The copy is one-way and existence-only; no key is ever shown.",
 					"",
 					"  Nothing is written until you confirm the list.",
 				].join("\n"),
@@ -1136,9 +1211,13 @@ async function setupWizard(
 						const failed = ((reply.data.failed ?? []) as unknown as string[]);
 						const lines = [
 							imported.length > 0
-								? `◈ copied into RLP: ${imported.map((i) => String(i.provider)).join(", ")} — step 2 will show them.`
+								? paint(
+										ctx,
+										"success",
+										`◈ copied into RLP: ${imported.map((i) => String(i.provider)).join(", ")} — step 2 will show them.`,
+									)
 								: "",
-							...failed.map((f) => `  ✗ ${f}`),
+							...failed.map((f) => paint(ctx, "warning", `  ✗ ${f}`)),
 							imported.length > 0 && failed.length === 0 ? "  pi's files are unchanged." : "",
 							imported.length === 0 && failed.length === 0
 								? `◈ nothing was copied: ${reply.error ?? "the engine gave no report"}`
@@ -1167,7 +1246,16 @@ async function setupWizard(
 			"＋ Connect a provider (guided)…",
 			"Skip — endpoints are fine",
 		];
-		const choice = await ctx.ui.select("Step 2 of 5 — endpoints and credentials", options);
+		const choice = await ctx.ui.select(
+			[
+				...stepHeader(ctx, 2, "endpoints and credentials"),
+				"",
+				"  ● key   ◆ oauth   ○ no credential — badges, not mysteries.",
+				"  Writes: validated, backed up, atomic. Keys land 0600 and never",
+				"  appear on screen — the wizard reads them the way you type them.",
+			].join("\n"),
+			options,
+		);
 		if (!choice || choice.startsWith("Skip")) break;
 		if (choice.startsWith("＋")) {
 			const connected = await connectWizard(ctx);
@@ -1189,8 +1277,8 @@ async function setupWizard(
 	if (authenticated.length === 0) {
 		ctx.ui.notify(
 			[
-				"◈ no provider has a credential, so there is no model to choose — skipping the",
-				"  model steps.",
+				paint(ctx, "warning", "◈ no provider has a credential, so there is no model to choose —"),
+				"  skipping the model steps. Nothing is wrong; a key turns the lights on.",
 				"",
 				"  /provider connect     attach one now (guided), then /setup again",
 			].join("\n"),
@@ -1204,16 +1292,25 @@ async function setupWizard(
 	if (authenticated.length > 0 && view) {
 		const brainRef = await chooseModel(
 			ctx,
-			directOnly
-				? `Step 3 of 5 — which model should RLP use? (direct-only mode: this is the only model it needs. Currently: ${view.brain ?? "not chosen yet"})`
-				: `Step 3 of 5 — the orchestrator (brain): the model that plans and writes when the gate says do-it-yourself. Currently: ${view.brain ?? "not chosen yet"}`,
+			[
+				...stepHeader(ctx, 3, directOnly ? "which model should RLP use?" : "the orchestrator (brain)"),
+				`  currently: ${view.brain ?? "not chosen yet"}`,
+				"",
+				paint(
+					ctx,
+					"muted",
+					directOnly
+						? "  direct-only mode: this is the only model it needs."
+						: "  the model that plans — and answers when the answer is one sentence.",
+				),
+			].join("\n"),
 			authenticated,
 		);
 		if (brainRef) {
 			await applyOps(ctx, [{ op: "set_brain", model: brainRef }], "brain is now", brainRef);
 			const model = ctx.modelRegistry.find(brainRef.split("/")[0], brainRef.slice(brainRef.indexOf("/") + 1));
 			if (model && (await pi.setModel(model as never))) {
-				ctx.ui.notify(`◈ this session now runs on ${brainRef}`, "info");
+				ctx.ui.notify(paint(ctx, "success", `◈ this session now runs on ${brainRef}`), "info");
 			}
 		}
 	}
@@ -1225,11 +1322,12 @@ async function setupWizard(
 		const picked = await multiSelect(
 			ctx,
 			[
-				"Step 4 of 5 — worker arms. Which models may RLP dispatch to?",
+				...stepHeader(ctx, 4, "worker arms: which models may RLP dispatch to?"),
 				"",
-				"  Arms are priority-ordered: the first is where the bulk of the spend goes.",
-				"  Two or more provider FAMILIES are what make independent review possible:",
-				"  a review node is re-picked onto a different family than the code it reviews.",
+				"  Arms are priority-ordered: the first carries the bulk of the spend.",
+				"  Two provider FAMILIES make independent review possible — a review",
+				"  node is re-picked onto a family the code was not written in.",
+				paint(ctx, "muted", "  Workers get branches, not the merge. The merge stays yours."),
 			].join("\n"),
 			authenticated.map((r) => `${r.provider}/${r.id}${r.current ? "   (this session)" : ""}`),
 		);
@@ -1321,16 +1419,18 @@ async function setupWizard(
 			const shown = known.map((role) => {
 				const res = resolution[role];
 				const via = res ? (res.binding ? "bound" : "arm priority") : "no arm carries it";
-				return `  ${role.padEnd(10)} ${res?.model ?? "-"}  (${via})`;
+				const line = `  ${res ? "✓" : "✗"} ${role.padEnd(10)} ${res?.model ?? "-"}  (${via})`;
+				return res ? paint(ctx, res.binding ? "success" : "text", line) : paint(ctx, "warning", line);
 			});
 			const choice = await ctx.ui.select(
 				[
-					"Step 5 of 5 — per-role models. As things stand:",
-					"",
+					...stepHeader(ctx, 5, "per-role models: who does each job?"),
+					"  as things stand:",
 					...shown,
 					"",
-					"  Binding a role pins that job to one model. Unbound roles follow",
-					"  the arm order from step 4, which is usually the right answer.",
+					"  A bound role pins that job to one model. Unbound roles follow",
+					"  the arm order from step 4 — usually the right answer.",
+					paint(ctx, "muted", "  Bind what you disagree with, not everything you can."),
 				].join("\n"),
 				[
 					"Skip — the arm order is fine",
@@ -1365,15 +1465,17 @@ async function setupWizard(
 		);
 	}
 
-	const final = await withWork(ctx, "rlp: re-checking this host", () => doctorSummary(ctx));
+	const final = await withWork(ctx, "rlp: the doctor double-checks the work", () => doctorSummary(ctx));
 	ctx.ui.notify(
 		[
-			"◈ setup done",
-			"",
+			emph(ctx, `◈ setup done — ${final.ok ? "the road is walkable now." : "not every rung is there yet."}`),
+			paint(ctx, "dim", RULE),
+			...(final.ok ? [`  ${stepperLine(ctx, 6)}`] : []),
 			`  mode    ${directOnly ? "direct-only — every request handled inline (/direct off to change)" : "full — the gate decides per request (/direct on to stop that)"}`,
-			`  doctor  ${final.ok ? "runnable" : "still has problems"} (${final.text})`,
+			paint(ctx, final.ok ? "success" : "warning", `  doctor  ${final.ok ? "runnable" : "still has problems"} (${final.text})`),
 			...(final.problems.length > 0 ? ["", ...final.problems.map((p) => `  ${p}`)] : []),
 			"",
+			emph(ctx, "  next:"),
 			"  /reload                pick up new endpoints and models in this session",
 			"  /rlp-ladder            what the orchestrator will actually do",
 			"  /rlp-plan \"<request>\"   see the gate, the DAG and the routing before running",
@@ -1562,7 +1664,7 @@ export default function rlpProvider(pi: ExtensionAPI): void {
 						return;
 					}
 					ctx.ui.notify(
-						reportApplied("connected", id, [
+						reportApplied(ctx, "connected", id, [
 							`  endpoint  ${baseUrl}`,
 							`  models    ${(reply.data.models as string[] | undefined)?.join(", ") ?? models.join(", ")}`,
 							`  auth      ${key?.trim() ? "key written to auth.json (0600)" : `none yet — /provider key ${id}`}`,
