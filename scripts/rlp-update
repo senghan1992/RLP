@@ -326,6 +326,13 @@ else
     export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
   fi
 
+  # Record and reuse conflict resolutions. This fork re-merges upstream into
+  # the same handful of RLP-touched files, so the same regions conflict again
+  # and again; rerere replays a resolution made once (by hand after an abort,
+  # or by a previous merge) the next time the identical conflict appears, and
+  # says "Resolved … using previous resolution" when it does.
+  git config rerere.enabled true
+
   say "  merging (this may conflict; RLP's changes touch files upstream edits too)"
   if ! git merge --no-edit --no-stat "$TARGET"; then
     UNMERGED=$(git diff --name-only --diff-filter=U)

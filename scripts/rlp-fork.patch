@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index 22b6fdcb4..206f9744f 100644
+index d00f9017b..ff91ee32d 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -4,7 +4,8 @@
@@ -501,14 +501,14 @@ index 934de40a6..4f8e097e6 100644
  	{ name: "import", description: "Import and resume a session from a JSONL file" },
  	{ name: "share", description: "Share session as a secret GitHub gist" },
 diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
-index 4970fd4ad..73d25611d 100644
+index 4970fd4ad..c4f163c48 100644
 --- a/packages/coding-agent/src/core/system-prompt.ts
 +++ b/packages/coding-agent/src/core/system-prompt.ts
 @@ -4,6 +4,7 @@
  
  import { getSystemMessageText } from "@earendil-works/pi-ai";
  import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
-+import { type OrchestrationConfig, loadOrchestration, renderOrchestration } from "./rlp-orchestration.ts";
++import { loadOrchestration, type OrchestrationConfig, renderOrchestration } from "./rlp-orchestration.ts";
  import { formatSkillsForPrompt, type Skill } from "./skills.ts";
  
  export interface BuildSystemPromptOptions {
@@ -544,13 +544,13 @@ index 4970fd4ad..73d25611d 100644
  	const skillFileReadTool = (["read", "bash"] as const).find((tool) => selectedTools.includes(tool));
  	if (skillFileReadTool && skills.length > 0) {
 diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
-index 9b9f273f2..be345cc95 100644
+index 9b9f273f2..1ae7c3a3c 100644
 --- a/packages/coding-agent/src/index.ts
 +++ b/packages/coding-agent/src/index.ts
-@@ -24,6 +24,14 @@ export {
- 	type SessionStats,
- } from "./core/agent-session.ts";
- export { readStoredCredential } from "./core/auth-storage.ts";
+@@ -325,6 +325,14 @@ export {
+ 	type Skill,
+ 	type SkillFrontmatter,
+ } from "./core/skills.ts";
 +// RLP: the built-in command list is exported so extensions can render a live
 +// index of what the `/` menu offers. Hardcoding the names in an extension
 +// drifts the moment upstream adds or renames one; reading the array the
@@ -559,9 +559,9 @@ index 9b9f273f2..be345cc95 100644
 +	BUILTIN_SLASH_COMMANDS,
 +	type BuiltinSlashCommand,
 +} from "./core/slash-commands.ts";
- export type { CacheWarmingDecision, CacheWarmingStatus } from "./core/cache-warmer.ts";
- // Compaction
- export {
+ export { createSyntheticSourceInfo } from "./core/source-info.ts";
+ export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
+ // Tools
 diff --git a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts b/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
 index 9d345b4e9..976c87535 100644
 --- a/packages/coding-agent/src/modes/interactive/components/custom-editor.ts
@@ -605,7 +605,7 @@ index 9d345b4e9..976c87535 100644
  		const overflowLabel = hiddenLineCount > 0 ? ` ↑ ${hiddenLineCount} more ` : undefined;
  		const overflowLabelWidth = overflowLabel ? visibleWidth(overflowLabel) : 0;
 diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
-index 8bb7b353e..25692a8d4 100644
+index 8bb7b353e..10af3075a 100644
 --- a/packages/coding-agent/src/modes/interactive/components/footer.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
 @@ -6,6 +6,7 @@ import type { ContextUsage } from "../../../core/extensions/types.ts";
@@ -616,15 +616,13 @@ index 8bb7b353e..25692a8d4 100644
  
  /**
   * Sanitize text for display in a single-line status.
-@@ -283,7 +284,13 @@ export class FooterComponent implements Component {
+@@ -283,7 +284,11 @@ export class FooterComponent implements Component {
  		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
  		const dimRemainder = theme.fg("dim", remainder);
  
 -		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 +		const pwdLine = truncateToWidth(
-+			theme.bold(theme.fg("borderAccent", brandGlyph())) +
-+				theme.fg("dim", " ") +
-+				theme.fg("dim", pwd),
++			theme.bold(theme.fg("borderAccent", brandGlyph())) + theme.fg("dim", " ") + theme.fg("dim", pwd),
 +			width,
 +			theme.fg("dim", "..."),
 +		);
@@ -632,14 +630,13 @@ index 8bb7b353e..25692a8d4 100644
  
  		// Add extension statuses on a single line, sorted by key alphabetically
 diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
-index 57381d9aa..1b0b3a732 100644
+index 57381d9aa..faad409c4 100644
 --- a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
-@@ -4,23 +4,75 @@ import { theme } from "../theme/theme.ts";
+@@ -4,23 +4,74 @@ import { theme } from "../theme/theme.ts";
  const CORAL = rgbColor(228, 138, 122);
  const BLUE = rgbColor(79, 142, 179);
  const YELLOW = rgbColor(234, 182, 93);
-+const GREEN = rgbColor(122, 179, 138);
 +// RLP's own ramp — violet -> sky -> cyan, the same one as the README banner, so
 +// the agent does not wear pi's palette.
 +const VIOLET = rgbColor(139, 92, 246);
@@ -721,10 +718,10 @@ index 57381d9aa..1b0b3a732 100644
 +	return identity() === "rlp" ? rlpLogoLines() : piLogoLines();
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index b7eb92054..23ccebcb0 100644
+index 7f9c21d0f..66b0c7c5f 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-@@ -101,6 +101,14 @@ import {
+@@ -103,6 +103,14 @@ import {
  import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
  import { DefaultPackageManager } from "../../core/package-manager.ts";
  import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
@@ -739,16 +736,16 @@ index b7eb92054..23ccebcb0 100644
  import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
  import {
  	type SessionEntry,
-@@ -152,7 +160,7 @@ import {
+@@ -154,7 +162,7 @@ import {
  	formatAuthSelectorProviderType,
  	OAuthSelectorComponent,
  } from "./components/oauth-selector.ts";
 -import { piLogoLines } from "./components/pi-logo.ts";
 +import { brandFullName, brandGlyph, brandTagline, identity, identityName, logoLines } from "./components/pi-logo.ts";
+ import { playPiLogoAnimation } from "./components/pi-logo-animation.lazy.ts";
  import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
  import { SessionSelectorComponent } from "./components/session-selector.ts";
- import { SettingsSelectorComponent } from "./components/settings-selector.ts";
-@@ -969,12 +977,32 @@ export class InteractiveMode {
+@@ -983,12 +991,32 @@ export class InteractiveMode {
  
  		// Add header with keybindings from config (unless silenced)
  		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
@@ -786,7 +783,7 @@ index b7eb92054..23ccebcb0 100644
  
  			// Build startup instructions using keybinding hint helpers
  			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-@@ -1014,11 +1042,22 @@ export class InteractiveMode {
+@@ -1028,11 +1056,23 @@ export class InteractiveMode {
  				].join(theme.fg("muted", " · "));
  			const compactOnboarding = () =>
  				theme.fg("dim", `Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`);
@@ -804,15 +801,16 @@ index b7eb92054..23ccebcb0 100644
 +							"dim",
 +							`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
 +						);
- 			this.builtInHeader = new ExpandableText(
+ 			const header = new BuiltInHeader(
 -				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
 -				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
-+				() => `${identityHeader()}\n${pipelineLine()}\n${compactInstructions()}\n${compactOnboarding()}\n\n${onboarding()}`,
++				() =>
++					`${identityHeader()}\n${pipelineLine()}\n${compactInstructions()}\n${compactOnboarding()}\n\n${onboarding()}`,
 +				() => `${identityHeader()}\n${pipelineLine()}\n${expandedInstructions()}\n\n${onboarding()}`,
  				this.getStartupExpansionState(),
  				1,
  				0,
-@@ -3162,6 +3201,11 @@ export class InteractiveMode {
+@@ -3178,6 +3218,11 @@ export class InteractiveMode {
  				this.editor.setText("");
  				return;
  			}
@@ -824,7 +822,7 @@ index b7eb92054..23ccebcb0 100644
  			if (text === "/hotkeys") {
  				this.handleHotkeysCommand();
  				this.editor.setText("");
-@@ -6555,6 +6599,112 @@ export class InteractiveMode {
+@@ -6571,6 +6616,112 @@ export class InteractiveMode {
  		this.ui.requestRender();
  	}
  
