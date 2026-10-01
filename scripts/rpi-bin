@@ -28,6 +28,50 @@ while [ -L "$SELF" ]; do
   esac
 done
 ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+
+# One updater. This fork is a source build, so pi's own `update` can only ever
+# answer "rpi cannot self-update this installation" — while the TUI banner tells
+# the user to run exactly that. The self-update spellings are therefore re-spelled
+# here as scripts/rlp-update, which moves RLP's own checkout *and* this fork,
+# verified, rebuilt and reinstalled. pi's package-manager forms (--extensions,
+# --models, --all, --extension <src>, positional npm:/github: sources, --approve)
+# still reach the fork untouched: managing pi-installed packages is a different
+# job, and one that works.
+if [ "${1:-}" = "update" ]; then
+  shift
+  SELF_FORM=1
+  HELP=0
+  ARGS=""
+  for arg in "$@"; do
+    case "$arg" in
+      # `self`/`pi`/`--self` are pi's spellings of "update the tool". `--force`
+      # ("reinstall even when already latest") has no rlp-update equivalent and
+      # is dropped on purpose: rlp-update always merges the newest upstream.
+      self|pi|--self|--force) ;;
+      --check|--dry-run)      ARGS="$ARGS $arg" ;;
+      -h|--help)              HELP=1 ;;
+      # Anything else is a pi package form — hand the whole line to the fork.
+      # A mixed line (update --check --models) passes through too and the fork
+      # rejects what it does not know, which is the honest answer.
+      *)                      SELF_FORM=0; break ;;
+    esac
+  done
+  if [ "$SELF_FORM" = 1 ]; then
+    if [ "$HELP" = 1 ]; then
+      sh "$ROOT/scripts/rlp-update" --help
+      echo ""
+      echo "pi's package forms still reach pi itself:"
+      echo "  rpi update --extensions | --models | --all | --extension <src> | <source>"
+      exit 0
+    fi
+    echo "rpi update is rlp update — one updater for RLP and the fork it rides on." >&2
+    # Word-splitting $ARGS is deliberate: it holds only --check/--dry-run tokens.
+    # shellcheck disable=SC2086
+    exec sh "$ROOT/scripts/rlp-update" $ARGS
+  fi
+  set -- update "$@"  # not a self-update form: restore the line for the fork
+fi
+
 RPI_CODING_AGENT_DIR="${RPI_CODING_AGENT_DIR:-${RLP_CODING_AGENT_DIR:-$HOME/.rlp/agent}}"
 
 # The session default is the ladder's `brain`, read from the same file the

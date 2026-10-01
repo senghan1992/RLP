@@ -5,8 +5,8 @@
 #   rlp -p "request"        one shot, same agent, non-interactive
 #   rlp <subcommand>        the decision engine: plan, triage, decompose, route,
 #                           ladder, roster, doctor, serve, version
-#   rlp update              update the pi fork the way `pi update` does, and
-#                           re-apply RLP on top
+#   rlp update              one updater: RLP's own checkout, then the fork
+#                           under it (`rpi update` is the same command)
 #
 # Orchestration is local: the RLP extension dispatches headless rpi workers,
 # one git worktree per node, and collects their results back into this session.
@@ -89,7 +89,8 @@ without a TUI.
   rlp progress               how far this host is from installed to working, and
                              the next step — the same rule the first run asks by
   rlp serve                  the decision engine as an MCP stdio server
-  rlp update [--check]       update the harness fork and re-apply RLP on top
+  rlp update [--check]       one updater: RLP and the fork under it
+                             (`rpi update` is the same command)
   rpi                        the same harness, no orchestration surface
 
 In-session: /setup /direct /provider /rlp-plan /rlp-state /rlp-doctor

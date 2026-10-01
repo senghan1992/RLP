@@ -91,6 +91,7 @@ into `~/.local/bin`.
 ```bash
 rlp update            # RLP to the newest release, the harness fork to newest upstream
 rlp update --check    # what it would do; changes nothing
+rpi update            # the same command — one updater, two spellings
 rlp version           # what you are running, and what it was built from
 ```
 
@@ -101,6 +102,13 @@ upstream pi into the harness fork, re-applies RLP's patch, verifies the RLP
 surface survived the merge, and rebuilds. A dirty checkout is never reset: it
 says so and leaves it alone. Paste `rlp version` into any bug report — it names
 the release, the exact commit, whether the tree is dirty, and the harness build.
+
+`rpi update` is the same command, not a second one. pi's built-in self-update
+needs a package-managed install and this fork is a source build, so it could
+only ever answer "rpi cannot self-update this installation" — while the fork's
+own TUI banner says to run exactly that. The wrapper re-spells the self-update
+forms as `rlp update`; pi's package forms (`rpi update --extensions|--models|--all`,
+npm:/github: sources) still reach pi itself, where they work.
 
 `rlp` is a superset of the harness: for solo work with no orchestration at all,
 the same binary is available as `rpi` (RLP execs it internally, so you normally
@@ -395,7 +403,7 @@ handoff between nodes is machine-readable, and the tool learns between runs.
 | `rlp memory` · `rlp remember "<text>"` | the project's cross-run knowledge log |
 | `rlp doctor [--warm]` | is this host runnable? one fix per failure |
 | `rlp progress [--json]` | how far this host is from installed to working, and the next step |
-| `rlp update [--check]` | RLP to the newest release + the fork to newest upstream, verified |
+| `rlp update [--check]` | RLP to the newest release + the fork to newest upstream, verified — `rpi update` is the same command |
 | `rlp version [--json]` | the release, the commit, the harness build — what a bug report needs |
 | `rpi` | the same harness with no orchestration surface at all |
 

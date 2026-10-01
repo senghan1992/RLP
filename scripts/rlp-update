@@ -30,6 +30,7 @@
 #   rlp update --self-ref <r>   which RLP ref to move to (default: newest v* tag)
 #   rlp update --to <ref>       merge a different upstream fork ref (default origin/main)
 #   rlp update --no-build       skip the rebuild (merge + verify only)
+#   rpi update                  the same command — one updater, two spellings
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
